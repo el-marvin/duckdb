@@ -36,3 +36,250 @@ SELECT g, SUM(i) FROM integers GROUP BY ALL ORDER BY g
 ----
 0	3
 1	3
+
+# an ORDER BY expression over a grouped select entry reads the group, as under the explicit GROUP BY of that entry
+statement ok
+CREATE TABLE u AS SELECT * FROM (VALUES (1, 0), (2, 0), (2, 1), (3, 1), (NULL, 1)) t(s, g);
+
+query I
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY 10 - p_;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s FROM u GROUP BY ALL ORDER BY 10 - s;
+----
+3
+2
+1
+NULL
+
+query II
+SELECT s AS p_, count(*) FROM u GROUP BY ALL ORDER BY 10 - p_;
+----
+3	1
+2	2
+1	1
+NULL	1
+
+query I
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY (p_ - 2) * (p_ - 2), p_ DESC;
+----
+2
+3
+1
+NULL
+
+query I
+SELECT s + 1 AS p_ FROM u GROUP BY ALL ORDER BY 10 - p_;
+----
+4
+3
+2
+NULL
+
+query I
+SELECT s + 1 AS p_ FROM u GROUP BY ALL ORDER BY 10 - (s + 1);
+----
+4
+3
+2
+NULL
+
+query II
+SELECT s AS p_, p_ * 2 AS d FROM u GROUP BY ALL ORDER BY 10 - d;
+----
+3	6
+2	4
+1	2
+NULL	NULL
+
+query III
+SELECT g, s AS p_, count(*) FROM u GROUP BY ALL ORDER BY g * 10 - p_;
+----
+0	2	1
+0	1	1
+1	3	1
+1	2	1
+1	NULL	1
+
+# the bare alias and the explicit GROUP BY forms give the same rows
+query I
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY p_ DESC;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s AS p_ FROM u GROUP BY p_ ORDER BY 10 - p_;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s AS p_ FROM u GROUP BY s ORDER BY 10 - p_;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s AS p_ FROM u GROUP BY 1 ORDER BY 10 - p_;
+----
+3
+2
+1
+NULL
+
+# an ORDER BY expression over an aggregate, or over an aggregate and a group
+query II
+SELECT s AS p_, count(*) AS cnt FROM u GROUP BY ALL ORDER BY 10 - cnt, p_;
+----
+2	2
+1	1
+3	1
+NULL	1
+
+query I
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY count(*) * 10 + p_;
+----
+1
+3
+2
+NULL
+
+# a column that is not grouped is still an error inside an ORDER BY expression
+statement error
+SELECT count(*) FROM u GROUP BY ALL ORDER BY 10 - s;
+----
+GROUP BY ALL will only group entries in the SELECT list
+
+statement error
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY 10 - g;
+----
+GROUP BY ALL will only group entries in the SELECT list
+
+# an alias that shadows a table column reads the column there, as under the explicit GROUP BY
+statement error
+SELECT s + 1 AS s FROM u GROUP BY s + 1 ORDER BY 10 - s;
+----
+must appear in the GROUP BY clause
+
+statement error
+SELECT s + 1 AS s FROM u GROUP BY ALL ORDER BY 10 - s;
+----
+GROUP BY ALL will only group entries in the SELECT list
+
+# HAVING, windows, DISTINCT ON, UNNEST, GROUPING and a correlated subquery read the group the same way
+query I
+SELECT s AS p_ FROM u GROUP BY ALL HAVING 10 - p_ > 7 ORDER BY 10 - p_;
+----
+2
+1
+
+query II
+SELECT s AS p_, sum(count(*)) OVER () AS w FROM u GROUP BY ALL ORDER BY 10 - p_;
+----
+3	5
+2	5
+1	5
+NULL	5
+
+query II
+SELECT s AS p_, count(*) FROM u GROUP BY ALL ORDER BY row_number() OVER (ORDER BY 10 - p_);
+----
+3	1
+2	2
+1	1
+NULL	1
+
+query I
+SELECT DISTINCT ON (p_ % 2) s AS p_ FROM u GROUP BY ALL ORDER BY p_ % 2, 10 - p_;
+----
+2
+3
+NULL
+
+query I
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY (SELECT 10 - p_);
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s AS p_ FROM u GROUP BY ALL ORDER BY grouping(s) * 100 + 10 - p_;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s FROM u GROUP BY ALL ORDER BY unnest([10 - s]);
+----
+3
+2
+1
+NULL
+
+# a volatile group and a group that holds a subquery, written out in the ORDER BY expression, read the group
+query I
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY (s + (random() * 0)::INT) * -1;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT (SELECT s) AS q FROM u GROUP BY ALL ORDER BY -(SELECT s);
+----
+3
+2
+1
+NULL
+
+# a correlated subquery over a compound group reads the group, as under the explicit GROUP BY
+query I
+SELECT s + 1 AS p_ FROM u GROUP BY ALL ORDER BY (SELECT 10 - (s + 1));
+----
+4
+3
+2
+NULL
+
+query I
+SELECT DISTINCT ON ((SELECT (s + 1) % 2)) s + 1 AS p_ FROM u GROUP BY ALL ORDER BY (SELECT (s + 1) % 2), p_ DESC;
+----
+4
+3
+NULL
+
+# a collated group is read through its uncollated value, as under the explicit GROUP BY
+statement ok
+CREATE TABLE c AS SELECT * FROM (VALUES ('a'), ('B'), ('b')) t(v);
+
+statement ok
+SET default_collation='nocase';
+
+query I
+SELECT v FROM c GROUP BY v ORDER BY ascii(v);
+----
+B
+a
+
+query I
+SELECT v FROM c GROUP BY ALL ORDER BY ascii(v);
+----
+B
+a

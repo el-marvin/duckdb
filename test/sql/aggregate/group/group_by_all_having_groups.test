@@ -76,6 +76,11 @@ SELECT x, count(*) AS n FROM range(4) t(x) GROUP BY ALL HAVING EXISTS (SELECT 1 
 0	1
 1	1
 
+query II
+SELECT x % 2 AS k, count(*) AS n FROM range(6) t(x) GROUP BY ALL HAVING (SELECT x % 2) = 1;
+----
+1	3
+
 statement error
 SELECT x % 2 AS k, count(*) AS n FROM range(6) t(x) GROUP BY ALL HAVING (SELECT x) = 1;
 ----
