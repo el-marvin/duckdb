@@ -1,0 +1,176 @@
+# name: test/sql/error/error_location_stored_query.test
+# description: An error raised while a stored view or prepared body is bound points at the reference that pulled it in
+# group: [error]
+
+statement ok
+CREATE TABLE src (a INTEGER, b INTEGER);
+
+statement ok
+CREATE VIEW v AS SELECT a FROM src;
+
+statement ok
+CREATE VIEW v_b AS SELECT b FROM src;
+
+statement ok
+CREATE VIEW vv AS SELECT * FROM v;
+
+statement ok
+CREATE VIEW v_one AS SELECT 1 AS a;
+
+statement ok
+CREATE MACRO tm() AS TABLE SELECT a FROM src;
+
+statement ok
+CREATE MACRO tm_over_view() AS TABLE SELECT a FROM v;
+
+statement ok
+PREPARE p_over_view AS SELECT 1 AS first_column, 2 AS second_column, a FROM v;
+
+statement ok
+ALTER TABLE src DROP COLUMN b;
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM v_b
+----
+LINE 1: SELECT 1 AS first_column, 2 AS second_column, * FROM v_b
+                                                             ^^^
+
+statement ok
+DROP TABLE src;
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, v.a FROM v
+----
+LINE 1: SELECT 1 AS first_column, 2 AS second_column, v.a FROM v
+                                                               ^
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM vv
+----
+LINE 1: SELECT 1 AS first_column, 2 AS second_column, * FROM vv
+                                                             ^^
+
+statement error
+SELECT * FROM v AS aliased_view, range(3) r
+----
+LINE 1: SELECT * FROM v AS aliased_view, range(3) r
+                      ^
+
+statement error
+SELECT 1 AS first_column, (SELECT max(a) FROM v) AS second_column
+----
+LINE 1: SELECT 1 AS first_column, (SELECT max(a) FROM v) AS second_column
+                                                      ^
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM tm_over_view()
+----
+LINE 1: SELECT 1 AS first_column, 2 AS second_column, * FROM tm_over_view()
+                                                             ^^^^^^^^^^^^^^
+
+# a view bound for its columns alone has no reference to point at
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM pragma_table_info('v')
+----
+Table with name src does not exist
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM pragma_table_info('v')
+----
+<!REGEX>:.*LINE 1:.*
+
+# an error the outer query raises against the view keeps having no location
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM v_one AS x(a, b)
+----
+has 1 columns available but 2 columns specified
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM v_one AS x(a, b)
+----
+<!REGEX>:.*LINE 1:.*
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM tm()
+----
+LINE 1: SELECT 1 AS first_column, 2 AS second_column, * FROM tm()
+                                                             ^^^^
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, missing_column FROM range(1)
+----
+LINE 1: SELECT 1 AS first_column, 2 AS second_column, missing_column FROM range(1)
+                                                      ^^^^^^^^^^^^^^
+
+statement ok
+CREATE TABLE prepared_src (a INTEGER);
+
+statement ok
+PREPARE p AS SELECT 1 AS first_column, 2 AS second_column, a FROM prepared_src;
+
+statement ok
+DROP TABLE prepared_src;
+
+# the EXECUTE statement carries no location of its own, so an error from the prepared body has none
+statement error
+EXECUTE p /* a comment that makes this statement longer than the prepared text */
+----
+Table with name prepared_src does not exist
+
+statement error
+EXECUTE p /* a comment that makes this statement longer than the prepared text */
+----
+<!REGEX>:.*LINE 1:.*
+
+statement error
+EXPLAIN EXECUTE p /* a comment that makes this statement longer than the prepared text */
+----
+Table with name prepared_src does not exist
+
+statement error
+EXPLAIN EXECUTE p /* a comment that makes this statement longer than the prepared text */
+----
+<!REGEX>:.*LINE 1:.*
+
+statement error
+EXECUTE p_over_view /* a comment that makes this statement longer than the prepared text */
+----
+Table with name src does not exist
+
+statement error
+EXECUTE p_over_view /* a comment that makes this statement longer than the prepared text */
+----
+<!REGEX>:.*LINE 1:.*
+
+# an error in an EXECUTE parameter is raised in the EXECUTE text and keeps its place
+statement ok
+PREPARE p_param AS SELECT $x::INTEGER AS x;
+
+statement error
+EXECUTE p_param(x := no_such_function(1))
+----
+LINE 1: EXECUTE p_param(x := no_such_function(1))
+                             ^
+
+statement ok
+SET errors_as_json = true;
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM vv
+----
+<REGEX>:.*"position":"53".*
+
+statement error
+SELECT 1 AS first_column, 2 AS second_column, * FROM vv
+----
+<REGEX>:.*"location":"\[53,2\]".*
+
+statement error
+EXECUTE p
+----
+<REGEX>:.*prepared_src does not exist.*
+
+statement error
+EXECUTE p
+----
+<!REGEX>:.*"position".*

@@ -1,6 +1,7 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -159,8 +160,17 @@ void ViewCatalogEntry::BindView(ClientContext &context, BindViewAction action) {
 	bind_thread = ThreadUtil::GetThreadId();
 	try {
 		auto columns = make_shared_ptr<ViewColumnInfo>();
-		Binder::BindView(context, GetQuery(), ParentCatalog().GetName(), ParentSchema().GetSchemaPath(), nullptr,
-		                 aliases, columns->types, columns->names);
+		try {
+			Binder::BindView(context, GetQuery(), ParentCatalog().GetName(), ParentSchema().GetSchemaPath(), nullptr,
+			                 aliases, columns->types, columns->names);
+		} catch (std::exception &ex) {
+			// locations inside the view body are offsets into the CREATE VIEW text, and no reference gives one here
+			ErrorData error(ex);
+			if (!error.ReplaceQueryLocation(QueryLocation())) {
+				throw;
+			}
+			error.Throw();
+		}
 		view_columns.atomic_store(columns);
 	} catch (...) {
 		bind_state = prev_bind_state;

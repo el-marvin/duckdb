@@ -175,6 +175,16 @@ void ErrorData::AddQueryLocation(QueryLocation query_location) {
 	Exception::SetQueryLocation(query_location, extra_info);
 }
 
+bool ErrorData::ReplaceQueryLocation(QueryLocation query_location) {
+	if (extra_info.find("position") == extra_info.end()) {
+		return false;
+	}
+	extra_info.erase("position");
+	extra_info.erase("location");
+	AddQueryLocation(query_location);
+	return true;
+}
+
 void ErrorData::AddQueryLocation(QueryErrorContext error_context) {
 	AddQueryLocation(error_context.query_location);
 }

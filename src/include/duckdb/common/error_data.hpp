@@ -57,6 +57,9 @@ public:
 	DUCKDB_API void AddQueryLocation(QueryErrorContext error_context);
 	DUCKDB_API void AddQueryLocation(const ParsedExpression &ref);
 	DUCKDB_API void AddQueryLocation(const TableRef &ref);
+	//! Replaces a query location the error carries, removing it when the given location is invalid; returns whether
+	//! the error carried one
+	DUCKDB_API bool ReplaceQueryLocation(QueryLocation query_location);
 
 private:
 	//! Whether this ErrorData contains an exception or not

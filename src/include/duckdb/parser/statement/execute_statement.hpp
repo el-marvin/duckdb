@@ -26,6 +26,8 @@ public:
 	//! Parameter values that are already typed - set when executing a prepared statement through the C/C++ API
 	//! instead of through SQL, where the values would have to be bound as literals first
 	identifier_map_t<BoundParameterData> bound_values;
+	//! Whether errors are reported against the prepared statement's own text, so that locations inside its body hold
+	bool reported_against_prepared_query = false;
 
 protected:
 	ExecuteStatement(const ExecuteStatement &other);
