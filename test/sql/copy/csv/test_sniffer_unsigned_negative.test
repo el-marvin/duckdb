@@ -1,0 +1,208 @@
+# name: test/sql/copy/csv/test_sniffer_unsigned_negative.test
+# description: A negative first row over a declared unsigned integer column is refused like the scan refuses it
+# group: [csv]
+
+statement ok
+COPY (FROM (VALUES ('-5'), ('6'))) TO '{TEST_DIR}/negative.csv' (HEADER false)
+
+statement ok
+COPY (FROM (VALUES ('-1'), ('6'))) TO '{TEST_DIR}/minus_one.csv' (HEADER false)
+
+# Refused by the declared type, so the first row is a header
+query I
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UTINYINT'})
+----
+6
+
+query I
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'USMALLINT'})
+----
+6
+
+query I
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UINTEGER'})
+----
+6
+
+query I
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UBIGINT'})
+----
+6
+
+query I
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UHUGEINT'})
+----
+6
+
+query I
+FROM read_csv('{TEST_DIR}/minus_one.csv', columns={'v': 'UTINYINT'})
+----
+6
+
+query I
+FROM read_csv('{TEST_DIR}/minus_one.csv', columns={'v': 'UBIGINT'})
+----
+6
+
+# A negative text that also overflows the type
+statement ok
+COPY (FROM (VALUES ('-256', '-65536', '-4294967296', '-18446744073709551616'), ('1', '2', '3', '4')))
+TO '{TEST_DIR}/negative_overflow.csv' (HEADER false)
+
+query IIII
+FROM read_csv('{TEST_DIR}/negative_overflow.csv', columns={'a': 'UTINYINT', 'b': 'USMALLINT', 'c': 'UINTEGER', 'd': 'UBIGINT'})
+----
+1	2	3	4
+
+query I
+FROM read_csv('{TEST_DIR}/negative_overflow.csv', columns={'a': 'UTINYINT', 'b': 'VARCHAR', 'c': 'VARCHAR', 'd': 'VARCHAR'})
+SELECT a
+----
+1
+
+query I
+FROM read_csv('{TEST_DIR}/negative_overflow.csv', columns={'a': 'VARCHAR', 'b': 'USMALLINT', 'c': 'VARCHAR', 'd': 'VARCHAR'})
+SELECT b
+----
+2
+
+query I
+FROM read_csv('{TEST_DIR}/negative_overflow.csv', columns={'a': 'VARCHAR', 'b': 'VARCHAR', 'c': 'UINTEGER', 'd': 'VARCHAR'})
+SELECT c
+----
+3
+
+query I
+FROM read_csv('{TEST_DIR}/negative_overflow.csv', columns={'a': 'VARCHAR', 'b': 'VARCHAR', 'c': 'VARCHAR', 'd': 'UBIGINT'})
+SELECT d
+----
+4
+
+# A positive overflow is refused the same way
+statement ok
+COPY (FROM (VALUES ('256', '65536', '4294967296', '18446744073709551616'), ('1', '2', '3', '4')))
+TO '{TEST_DIR}/positive_overflow.csv' (HEADER false)
+
+query IIII
+FROM read_csv('{TEST_DIR}/positive_overflow.csv', columns={'a': 'UTINYINT', 'b': 'USMALLINT', 'c': 'UINTEGER', 'd': 'UBIGINT'})
+----
+1	2	3	4
+
+# Negative zero is zero for the unsigned parse, so it is data
+statement ok
+COPY (FROM (VALUES ('-0'), ('6'))) TO '{TEST_DIR}/negative_zero.csv' (HEADER false)
+
+query I
+FROM read_csv('{TEST_DIR}/negative_zero.csv', columns={'v': 'UTINYINT'})
+----
+0
+6
+
+query I
+FROM read_csv('{TEST_DIR}/negative_zero.csv', columns={'v': 'UBIGINT'})
+----
+0
+6
+
+# A user set header decides, and the scan refuses the negative value
+statement error
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UTINYINT'}, header=false)
+----
+Could not convert string "-5" to 'UTINYINT'
+
+statement error
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'USMALLINT'}, header=false)
+----
+Could not convert string "-5" to 'USMALLINT'
+
+statement error
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UINTEGER'}, header=false)
+----
+Could not convert string "-5" to 'UINTEGER'
+
+query I
+FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UTINYINT'}, header=true)
+----
+6
+
+# With a name row as header, the negative data row is a conversion error
+statement ok
+COPY (FROM (VALUES ('-5'), ('6')) t(v)) TO '{TEST_DIR}/named.csv' (HEADER true)
+
+statement error
+FROM read_csv('{TEST_DIR}/named.csv', columns={'v': 'UTINYINT'})
+----
+Could not convert string "-5" to 'UTINYINT'
+
+# A negative value later in the file is a conversion error
+statement ok
+COPY (FROM (VALUES ('6'), ('-5'))) TO '{TEST_DIR}/negative_second.csv' (HEADER false)
+
+statement error
+FROM read_csv('{TEST_DIR}/negative_second.csv', columns={'v': 'USMALLINT'})
+----
+Could not convert string "-5" to 'USMALLINT'
+
+# One refused column out of two makes the first row a header
+statement ok
+COPY (FROM (VALUES ('-5', '1'), ('6', '2'))) TO '{TEST_DIR}/two_columns.csv' (HEADER false)
+
+query II
+FROM read_csv('{TEST_DIR}/two_columns.csv', columns={'v': 'UTINYINT', 'w': 'INTEGER'})
+----
+6	2
+
+# A NULL in the first row means no header, unless a value before it already differs from its declared name
+statement ok
+COPY (FROM (VALUES (NULL, '-5'), ('2', '6'))) TO '{TEST_DIR}/null_first.csv' (HEADER false)
+
+statement error
+FROM read_csv('{TEST_DIR}/null_first.csv', columns={'w': 'INTEGER', 'v': 'UINTEGER'})
+----
+Could not convert string "-5" to 'UINTEGER'
+
+statement ok
+COPY (FROM (VALUES ('-5', NULL), ('6', '2'))) TO '{TEST_DIR}/null_second.csv' (HEADER false)
+
+query II
+FROM read_csv('{TEST_DIR}/null_second.csv', columns={'v': 'UINTEGER', 'w': 'INTEGER'})
+----
+6	2
+
+# A file of one refused row holds a header only
+statement ok
+COPY (FROM (VALUES ('-5'))) TO '{TEST_DIR}/single_negative.csv' (HEADER false)
+
+query I
+SELECT count(*) FROM read_csv('{TEST_DIR}/single_negative.csv', columns={'v': 'UTINYINT'})
+----
+0
+
+# COPY FROM declares the columns of its target table
+statement ok
+CREATE TABLE unsigned_target (v USMALLINT)
+
+statement ok
+COPY unsigned_target FROM '{TEST_DIR}/negative.csv'
+
+query I
+FROM unsigned_target
+----
+6
+
+statement error
+COPY unsigned_target FROM '{TEST_DIR}/negative.csv' (HEADER false)
+----
+Could not convert string "-5" to 'USMALLINT'
+
+# Without declared columns the sniffer never checks an unsigned type
+query I
+FROM read_csv('{TEST_DIR}/negative.csv')
+----
+-5
+6
+
+statement error
+FROM read_csv('{TEST_DIR}/negative.csv', types=['UTINYINT'])
+----
+Could not convert string "-5" to 'UTINYINT'

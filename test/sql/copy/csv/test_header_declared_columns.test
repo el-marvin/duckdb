@@ -110,14 +110,14 @@ FROM read_csv('{TEST_DIR}/two_columns.csv', columns={'a': 'INTEGER', 'b': 'VARCH
 5	b
 1	2
 
-# A first row that the scan refuses keeps its outcome, here the conversion error
+# A first row that both the scan and type detection refuse is a header
 statement ok
 COPY (FROM (VALUES ('-5'), ('6'))) TO '{TEST_DIR}/negative.csv' (HEADER false)
 
-statement error
+query I
 FROM read_csv('{TEST_DIR}/negative.csv', columns={'v': 'UINTEGER'})
 ----
-Could not convert string "-5" to 'UINTEGER'
+6
 
 # A NULL in the first row means no header
 statement ok
