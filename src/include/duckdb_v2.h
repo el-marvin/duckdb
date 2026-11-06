@@ -435,10 +435,9 @@ typedef void (*duckdb_v2_opaque_destroy_fn)(void *data);
 /*!
  * 16-byte storage for a variable-size, byte-backed value: VARCHAR, BLOB, BIT, or BIGNUM. The bytes are inlined when the
  * length is at most BYTES_INLINE_LENGTH, in value.inlined.inlined; otherwise value.pointer.ptr holds them and
- * value.pointer.prefix repeats the first
- * 4. The union is transparent, so read the fields directly. VARCHAR and
- * BLOB carry no further encoding; BIT and BIGNUM do. For BIT, byte 0 is the padding-bit count and bytes 1.. are the
- * data; BIGNUM is decoded via `duckdb_v2_bignum_decode()`.
+ * value.pointer.prefix repeats the first 4. The union is transparent, so read the fields directly. VARCHAR and BLOB
+ * carry no further encoding; BIT and BIGNUM do. For BIT, byte 0 is the padding-bit count and bytes 1.. are the data;
+ * BIGNUM is decoded via `duckdb_v2_bignum_decode()`.
  */
 struct duckdb_v2_bytes {
 	union {
@@ -1641,6 +1640,7 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_config_get_option_value(duckdb_v2_config_
  *   - DEFAULT writes to the option's default scope, like a bare `SET name = value`.
  *   - GLOBAL writes through to the instance, visible to all connections, like `SET GLOBAL`.
  *   - SESSION writes to one connection's session only, like `SET SESSION`.
+ *
  * A scope neither the option (`duckdb_v2_option_supports_scope()`) nor the config supports returns ERROR_INPUT_INVALID;
  * an instance's config supports only GLOBAL. The value is cast to the option's type as SQL `SET` does. An unknown name
  * is rejected unless an extension that defines it can be autoloaded. An option that can only be chosen at startup is
@@ -3962,19 +3962,21 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_instance_destroy(duckdb_v2_instance_handl
  * Attaches the database at `path` exactly like `ATTACH 'path'`:
  *   - `:memory:` or an empty view attaches a fresh in-memory database.
  *   - any other path attaches that file, creating it if it does not exist.
+ *
  * `name` is the name to attach under, like `ATTACH ... AS name`; it is how `duckdb_v2_instance_detach()` and
  * `duckdb_v2_instance_set_default()` refer to the database. Null, or an empty view, derives the name from the path the
  * way SQL `ATTACH` without `AS` does:
  *   - `memory` for `:memory:` or an empty view;
  *   - otherwise the file name up to its first `.`, without any `?query` parameters (`/data/sales.2024.db` attaches as
- * `sales`), with `_db` appended when that is a reserved name such as `system` or `temp`. Naming is how two files with
- * the same base name, or `:memory:` twice, attach side by side. `options` may be null; it carries the `(KEY value)`
- * options of SQL `ATTACH`, for per-database options such as READ_ONLY, BLOCK_SIZE or ENCRYPTION_KEY, and must have been
- * created from this instance handle. `make_default` makes the attached database the default for connections created
- * afterwards, exactly as a `duckdb_v2_instance_set_default()` call right after the attach would; otherwise the default
- * is left alone. A path that is already attached on this or any other instance of the environment returns
- * ERROR_RESOURCE_IN_USE, and a name that is already attached fails. Options that only apply at startup are passed to
- * `duckdb_v2_instance_create_with_options()`.
+ * `sales`), with `_db` appended when that is a reserved name such as `system` or `temp`.
+ *
+ * Naming is how two files with the same base name, or `:memory:` twice, attach side by side. `options` may be null; it
+ * carries the `(KEY value)` options of SQL `ATTACH`, for per-database options such as READ_ONLY, BLOCK_SIZE or
+ * ENCRYPTION_KEY, and must have been created from this instance handle. `make_default` makes the attached database the
+ * default for connections created afterwards, exactly as a `duckdb_v2_instance_set_default()` call right after the
+ * attach would; otherwise the default is left alone. A path that is already attached on this or any other instance of
+ * the environment returns ERROR_RESOURCE_IN_USE, and a name that is already attached fails. Options that only apply at
+ * startup are passed to `duckdb_v2_instance_create_with_options()`.
  *
  * history:
  * - unstable: v2.0.0

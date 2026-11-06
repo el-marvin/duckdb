@@ -154,6 +154,7 @@ functions:
         - `:memory:` or an empty view attaches a fresh in-memory database.
         - any other path attaches that file, creating it if it does not
           exist.
+
       `name` is the name to attach under, like `ATTACH ... AS name`; it is
       how `[[instance_detach]]` and `[[instance_set_default]]` refer to the
       database. Null, or an empty view, derives the name from the path the
@@ -163,6 +164,7 @@ functions:
           parameters (`/data/sales.2024.db` attaches as `sales`), with
           `_db` appended when that is a reserved name such as `system` or
           `temp`.
+
       Naming is how two files with the same base name, or `:memory:` twice,
       attach side by side. `options`
       may be null; it carries the `(KEY value)` options of SQL `ATTACH`, for

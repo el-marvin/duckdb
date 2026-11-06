@@ -188,6 +188,7 @@ functions:
         - GLOBAL writes through to the instance, visible to all connections,
           like `SET GLOBAL`.
         - SESSION writes to one connection's session only, like `SET SESSION`.
+
       A scope neither the option (`[[option_supports_scope]]`) nor the config
       supports returns ERROR_INPUT_INVALID; an instance's config supports only
       GLOBAL. The value is cast to the option's type as SQL `SET` does. An
