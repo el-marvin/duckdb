@@ -25,6 +25,18 @@ ExpressionBinder::ExpressionBinder(Binder &binder, ClientContext &context) : bin
 ExpressionBinder::~ExpressionBinder() {
 }
 
+ExpressionBinder::InaccessibleLambdaBindings::InaccessibleLambdaBindings(ExpressionBinder &binder_p, const char *owner)
+    : binder(binder_p), previous_count(binder.inaccessible_lambda_binding_count),
+      previous_owner(binder.inaccessible_lambda_binding_owner) {
+	binder.inaccessible_lambda_binding_count = binder.lambda_bindings ? binder.lambda_bindings->size() : 0;
+	binder.inaccessible_lambda_binding_owner = owner;
+}
+
+ExpressionBinder::InaccessibleLambdaBindings::~InaccessibleLambdaBindings() {
+	binder.inaccessible_lambda_binding_count = previous_count;
+	binder.inaccessible_lambda_binding_owner = previous_owner;
+}
+
 void ExpressionBinder::InitializeStackCheck() {
 	static constexpr idx_t INITIAL_DEPTH = 5;
 	if (binder.HasEnclosingScope()) {

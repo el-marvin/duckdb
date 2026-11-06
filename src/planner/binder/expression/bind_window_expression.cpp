@@ -166,6 +166,7 @@ BindResult BaseSelectBinder::BindWindowExpression(WindowExpression &window, idx_
 	// bind inside the children of the window function
 	// we set the inside_window flag to true to prevent binding nested window functions
 	inside_window = true;
+	InaccessibleLambdaBindings inaccessible_lambdas(*this, "window functions");
 	// window arguments are evaluated by the window operator, where a transported error flag has no
 	// consumer; nested subqueries in them bind as plain subqueries
 	const auto save_transport_try_errors = transport_try_errors;

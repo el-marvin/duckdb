@@ -118,8 +118,6 @@ public:
 
 	optional_ptr<DummyBinding> macro_binding;
 	optional_ptr<vector<DummyBinding>> lambda_bindings;
-	//! The number of (outer) lambda bindings whose parameters can not be referenced, e.g. inside an aggregate
-	idx_t inaccessible_lambda_binding_count = 0;
 
 public:
 	unique_ptr<Expression> Bind(unique_ptr<ParsedExpression> &expr, optional_ptr<LogicalType> result_type = nullptr,
@@ -266,11 +264,27 @@ public:
 private:
 	//! Current stack depth
 	idx_t stack_depth = DConstants::INVALID_INDEX;
+	//! The number of (outer) lambda bindings whose parameters can not be referenced, e.g. inside an aggregate
+	idx_t inaccessible_lambda_binding_count = 0;
+	//! What makes them inaccessible, named in the error, e.g. "aggregate functions"
+	const char *inaccessible_lambda_binding_owner = nullptr;
 
 	void InitializeStackCheck();
 	StackChecker<ExpressionBinder> StackCheck(const ParsedExpression &expr, idx_t extra_stack = 1);
 
 protected:
+	//! Hides the enclosing lambdas' parameters from an expression computed over the rows of the query
+	class InaccessibleLambdaBindings {
+	public:
+		InaccessibleLambdaBindings(ExpressionBinder &binder, const char *owner);
+		~InaccessibleLambdaBindings();
+
+	private:
+		ExpressionBinder &binder;
+		idx_t previous_count;
+		const char *previous_owner;
+	};
+
 	BindResult BindExpression(BetweenExpression &expr, idx_t depth);
 	BindResult BindExpression(CaseExpression &expr, idx_t depth);
 	BindResult BindExpression(CollateExpression &expr, idx_t depth);
