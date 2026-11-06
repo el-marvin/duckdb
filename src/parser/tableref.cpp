@@ -52,12 +52,14 @@ string TableRef::BaseToString(string result, const vector<Identifier> &column_na
 }
 
 bool TableRef::Equals(const TableRef &other) const {
-	return type == other.type && alias == other.alias && SampleOptions::Equals(sample.get(), other.sample.get());
+	return type == other.type && alias == other.alias && column_name_alias == other.column_name_alias &&
+	       SampleOptions::Equals(sample.get(), other.sample.get());
 }
 
 void TableRef::CopyProperties(TableRef &target) const {
 	D_ASSERT(type == target.type);
 	target.alias = alias;
+	target.column_name_alias = column_name_alias;
 	target.query_location = query_location;
 	target.sample = sample ? sample->Copy() : nullptr;
 	target.external_dependency = external_dependency;

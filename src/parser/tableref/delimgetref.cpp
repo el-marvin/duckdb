@@ -9,7 +9,7 @@ string DelimGetRef::ToString() const {
 }
 
 bool DelimGetRef::Equals(const TableRef &other) const {
-	return TableRef::Equals(other);
+	return TableRef::Equals(other) && types == other.Cast<DelimGetRef>().types;
 }
 
 unique_ptr<TableRef> DelimGetRef::Copy() {

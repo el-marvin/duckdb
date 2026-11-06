@@ -93,6 +93,9 @@ bool JoinRef::Equals(const TableRef &other_p) const {
 		return false;
 	}
 	auto &other = other_p.Cast<JoinRef>();
+	if (ref_type != other.ref_type || delim_flipped != other.delim_flipped) {
+		return false;
+	}
 	if (using_columns.size() != other.using_columns.size()) {
 		return false;
 	}

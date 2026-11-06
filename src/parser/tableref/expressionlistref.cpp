@@ -28,6 +28,9 @@ bool ExpressionListRef::Equals(const TableRef &other_p) const {
 		return false;
 	}
 	auto &other = other_p.Cast<ExpressionListRef>();
+	if (expected_names != other.expected_names || expected_types != other.expected_types) {
+		return false;
+	}
 	if (values.size() != other.values.size()) {
 		return false;
 	}
