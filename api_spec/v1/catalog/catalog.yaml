@@ -17,7 +17,7 @@ functions:
     return_type: catalog
     description: |
       Retrieve a database catalog instance by name.
-      This function can only be called from within the context of an active transaction, e.g. during execution of a registered function callback. Otherwise returns `nullptr`.
+      This function can only be called from within the context of an active transaction, e.g., during execution of a registered function callback. Otherwise returns `nullptr`.
     return_description: The resulting catalog instance, or `nullptr` if called from outside an active transaction or if a catalog with the specified name does not exist. Must be destroyed with `duckdb_destroy_catalog`
   catalog_get_type_name:
     offset: 417

@@ -136,7 +136,7 @@ functions:
     description: |
       Closes the specified database and de-allocates all memory allocated for that database.
       This should be called after you are done with any database allocated through `duckdb_open` or `duckdb_open_ext`.
-      Note that failing to call `duckdb_close` (in case of e.g. a program crash) will not cause data corruption.
+      Note that failing to call `duckdb_close` (in case of e.g., a program crash) will not cause data corruption.
       Still, it is recommended to always correctly close a database object after you are done with it.
   library_version:
     offset: 7
@@ -207,7 +207,7 @@ functions:
     return_type: state
     description: |
       Obtains a human-readable name and description of a specific configuration option. This can be used to e.g.
-      display configuration options. This will succeed unless `index` is out of range (i.e. `>= duckdb_config_count`).
+      display configuration options. This will succeed unless `index` is out of range (i.e., `>= duckdb_config_count`).
 
       The result name or description MUST NOT be freed.
     return_description: '`DuckDBSuccess` on success or `DuckDBError` on failure.'
