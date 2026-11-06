@@ -43,8 +43,8 @@ bool MatchRecognizeConfig::Equals(const MatchRecognizeConfig &other) const {
 		return false;
 	}
 	if (!ExpressionUtil::ListEquals(partition_expressions, other.partition_expressions) ||
-	    !ExpressionUtil::ListEquals(measures_expression_list, other.measures_expression_list) ||
-	    !ExpressionUtil::ListEquals(defines_expression_list, other.defines_expression_list)) {
+	    !ExpressionUtil::ListEqualsWithAliases(measures_expression_list, other.measures_expression_list) ||
+	    !ExpressionUtil::ListEqualsWithAliases(defines_expression_list, other.defines_expression_list)) {
 		return false;
 	}
 	if (order_by_expressions.size() != other.order_by_expressions.size()) {
@@ -173,7 +173,6 @@ bool MatchRecognizeRef::Equals(const TableRef &other_p) const {
 
 unique_ptr<TableRef> MatchRecognizeRef::Copy() {
 	auto copy = make_uniq<MatchRecognizeRef>(input->Copy(), config->Copy());
-	copy->column_name_alias = column_name_alias;
 	CopyProperties(*copy);
 	return std::move(copy);
 }

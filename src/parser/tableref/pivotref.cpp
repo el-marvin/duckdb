@@ -301,7 +301,7 @@ bool PivotRef::Equals(const TableRef &other_p) const {
 	if (!source->Equals(*other.source)) {
 		return false;
 	}
-	if (!ParsedExpression::ListEquals(aggregates, other.aggregates)) {
+	if (!ExpressionUtil::ListEqualsWithAliases(aggregates, other.aggregates)) {
 		return false;
 	}
 	if (pivots.size() != other.pivots.size()) {
@@ -313,9 +313,6 @@ bool PivotRef::Equals(const TableRef &other_p) const {
 		}
 	}
 	if (unpivot_names != other.unpivot_names) {
-		return false;
-	}
-	if (alias != other.alias) {
 		return false;
 	}
 	if (groups != other.groups) {
@@ -338,7 +335,6 @@ unique_ptr<TableRef> PivotRef::Copy() {
 		copy->pivots.push_back(entry.Copy());
 	}
 	copy->groups = groups;
-	copy->column_name_alias = column_name_alias;
 	copy->include_nulls = include_nulls;
 	CopyProperties(*copy);
 	return std::move(copy);

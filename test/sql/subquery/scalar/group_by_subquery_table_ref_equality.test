@@ -1,0 +1,149 @@
+# name: test/sql/subquery/scalar/group_by_subquery_table_ref_equality.test
+# description: A select list subquery matches a GROUP BY subquery only when their table references denote the same relation
+# group: [scalar]
+
+statement ok
+CREATE TABLE tbl AS SELECT 1 AS a, 2 AS b
+
+statement ok
+CREATE TABLE mr AS SELECT * FROM (VALUES (1, 1), (2, 5), (3, 2)) t(o, v)
+
+# join type
+query I
+SELECT (SELECT count(*) FROM range(3) a CROSS JOIN range(3) b) FROM range(1) GROUP BY (SELECT count(*) FROM range(3) a POSITIONAL JOIN range(3) b)
+----
+9
+
+query I
+SELECT (SELECT count(*) FROM range(3) a(x) CROSS JOIN range(3) b(x)) FROM range(1) GROUP BY (SELECT count(*) FROM range(3) a(x) NATURAL JOIN range(3) b(x))
+----
+9
+
+query I
+SELECT (SELECT count(*) FROM range(3) a(x) JOIN range(3) b(y) ON a.x >= b.y) FROM range(1) GROUP BY (SELECT count(*) FROM range(3) a(x) ASOF JOIN range(3) b(y) ON a.x >= b.y)
+----
+6
+
+query I
+SELECT (SELECT count(*) FROM range(3) a(x) ASOF JOIN range(3) b(y) ON a.x >= b.y) FROM range(1) GROUP BY (SELECT count(*) FROM range(3) a(x) JOIN range(3) b(y) ON a.x >= b.y)
+----
+3
+
+# column name aliases
+query I
+SELECT (SELECT x FROM (SELECT 1, 2) t(x, y)) FROM range(1) GROUP BY (SELECT x FROM (SELECT 1, 2) t(y, x))
+----
+1
+
+query I
+SELECT (SELECT x FROM (VALUES (1, 2)) t(x, y)) FROM range(1) GROUP BY (SELECT x FROM (VALUES (1, 2)) t(y, x))
+----
+1
+
+query I
+SELECT (SELECT x FROM tbl t(x, y)) FROM range(1) GROUP BY (SELECT x FROM tbl t(y, x))
+----
+1
+
+query I
+SELECT (SELECT x FROM range(5, 6) WITH ORDINALITY t(x, y)) FROM range(1) GROUP BY (SELECT x FROM range(5, 6) WITH ORDINALITY t(y, x))
+----
+5
+
+query I
+SELECT (SELECT x FROM (SELECT 'a' AS k, 1 AS v) PIVOT (sum(v) FOR k IN ('a', 'b')) AS p(x, y)) FROM range(1) GROUP BY (SELECT x FROM (SELECT 'a' AS k, 1 AS v) PIVOT (sum(v) FOR k IN ('a', 'b')) AS p(y, x))
+----
+1
+
+query I
+SELECT (SELECT max(x) FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f, last(o) AS l ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3) AS m(x, y)) FROM range(1) GROUP BY (SELECT max(x) FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f, last(o) AS l ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3) AS m(y, x))
+----
+1
+
+# WITH ORDINALITY
+query I
+SELECT (SELECT len([*COLUMNS(*)]) FROM range(5, 6) WITH ORDINALITY) FROM range(1) GROUP BY (SELECT len([*COLUMNS(*)]) FROM range(5, 6))
+----
+2
+
+# sample size, unit, method and seed
+query I
+SELECT (SELECT count(*) FROM range(100) TABLESAMPLE 10 ROWS) FROM range(1) GROUP BY (SELECT count(*) FROM range(100) TABLESAMPLE 20 ROWS)
+----
+10
+
+query I
+SELECT (SELECT count(*) FROM range(50) TABLESAMPLE reservoir(10 PERCENT)) FROM range(1) GROUP BY (SELECT count(*) FROM range(50) TABLESAMPLE reservoir(10 ROWS))
+----
+5
+
+# a system sample keeps or drops the single vector of range(100) whole
+query I
+SELECT (SELECT count(*) FROM range(100) TABLESAMPLE reservoir(50 PERCENT)) FROM range(1) GROUP BY (SELECT count(*) FROM range(100) TABLESAMPLE system(50 PERCENT))
+----
+50
+
+query I
+SELECT (SELECT count(*) FROM range(100) TABLESAMPLE reservoir(50 PERCENT) REPEATABLE (1)) FROM range(1) GROUP BY (SELECT count(*) FROM range(100) TABLESAMPLE bernoulli(50 PERCENT) REPEATABLE (1))
+----
+50
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM range(100) USING SAMPLE 10 ROWS)) FROM range(1) GROUP BY (SELECT count(*) FROM (SELECT * FROM range(100) USING SAMPLE 20 ROWS))
+----
+10
+
+# aliases that name output columns or pattern variables
+query I
+SELECT (SELECT a_s FROM (PIVOT (SELECT 'a' AS k, 1 AS v UNION ALL SELECT 'a', 3) ON k IN ('a') USING sum(v) AS s, max(v) AS m)) FROM range(1) GROUP BY (SELECT a_s FROM (PIVOT (SELECT 'a' AS k, 1 AS v UNION ALL SELECT 'a', 3) ON k IN ('a') USING sum(v) AS m, max(v) AS s))
+----
+4
+
+query I
+SELECT (SELECT max(f) FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f, last(o) AS l ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3)) FROM range(1) GROUP BY (SELECT max(f) FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS l, last(o) AS f ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3))
+----
+1
+
+query I
+SELECT (SELECT max(f) FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f, last(o) AS l ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3)) FROM range(1) GROUP BY (SELECT max(f) FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f, last(o) AS l ONE ROW PER MATCH PATTERN (A B) DEFINE B AS v < 3, A AS v >= 3))
+----
+1
+
+# two GROUP BY subqueries that differ only in the join kind stay two groups
+query II
+SELECT (SELECT count(*) FROM range(3) a CROSS JOIN range(3) b), (SELECT count(*) FROM range(3) a POSITIONAL JOIN range(3) b) FROM range(1) GROUP BY (SELECT count(*) FROM range(3) a CROSS JOIN range(3) b), (SELECT count(*) FROM range(3) a POSITIONAL JOIN range(3) b)
+----
+9	3
+
+# a correlated select list subquery binds only when it matches the GROUP BY subquery, so these show the match is kept
+query I rowsort
+SELECT (SELECT count(*) FROM range(3) a(x), range(3) b(y) WHERE x < r.i) FROM range(4) r(i) GROUP BY (SELECT count(*) FROM range(3) a(x) CROSS JOIN range(3) b(y) WHERE x < r.i)
+----
+0
+3
+6
+9
+
+query I rowsort
+SELECT (SELECT count(*) FROM range(5) WITH ORDINALITY t(x, o) TABLESAMPLE reservoir(5 ROWS) REPEATABLE (1) WHERE o <= r.i) FROM range(3) r(i) GROUP BY (SELECT count(*) FROM range(5) WITH ORDINALITY t(x, o) TABLESAMPLE reservoir(5 ROWS) REPEATABLE (1) WHERE o <= r.i)
+----
+0
+1
+2
+
+query I rowsort
+SELECT (SELECT a_s + r.i FROM (PIVOT (SELECT 'a' AS k, 1 AS v) ON k IN ('a') USING sum(v) AS s) p(a_s)) FROM range(2) r(i) GROUP BY (SELECT a_s + r.i FROM (PIVOT (SELECT 'a' AS k, 1 AS v) ON k IN ('a') USING sum(v) AS s) p(a_s))
+----
+1
+2
+
+query I rowsort
+SELECT (SELECT max(f) + r.i FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3) AS m(f)) FROM range(2) r(i) GROUP BY (SELECT max(f) + r.i FROM mr MATCH_RECOGNIZE (ORDER BY o MEASURES first(o) AS f ONE ROW PER MATCH PATTERN (A B) DEFINE A AS v < 3, B AS v >= 3) AS m(f))
+----
+1
+2
+
+statement error
+SELECT (SELECT count(*) FROM range(3) a CROSS JOIN range(3) b WHERE a.range < r.i) FROM range(4) r(i) GROUP BY (SELECT count(*) FROM range(3) a POSITIONAL JOIN range(3) b WHERE a.range < r.i)
+----
+must appear in the GROUP BY clause
