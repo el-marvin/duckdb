@@ -151,11 +151,7 @@ bool CSVSniffer::CanYouCastBignum(const char *value_ptr, idx_t value_size, const
 template <class T>
 static bool CanYouCastUnsigned(const char *value_ptr, idx_t value_size, const bool strict) {
 	T dummy_value;
-	if (strict) {
-		// Type detection parses unsigned text with the signed parse, which accepts some negative spellings
-		return TrySimpleIntegerCast(value_ptr, value_size, dummy_value, true);
-	}
-	return TrySimpleIntegerCast<T, false>(value_ptr, value_size, dummy_value, false);
+	return TrySimpleIntegerCast<T, false>(value_ptr, value_size, dummy_value, strict);
 }
 
 bool CSVSniffer::CanYouCastIt(ClientContext &context, const string_t value, const LogicalType &type,
