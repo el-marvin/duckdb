@@ -1,6 +1,7 @@
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_format.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/function/table/arrow.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
@@ -451,7 +452,8 @@ int GetNext(struct ArrowArrayStream *stream, struct ArrowArray *out) {
 
 class CArrowScanFactory : public duckdb::ArrowScanFactory {
 public:
-	explicit CArrowScanFactory(ArrowArrayStream &stream_p) : stream(stream_p) {
+	CArrowScanFactory(ArrowArrayStream &stream_p, std::string view_name_p)
+	    : stream(stream_p), view_name(std::move(view_name_p)) {
 	}
 
 	void GetSchema(ArrowSchema &schema) override {
@@ -460,6 +462,12 @@ public:
 
 	duckdb::unique_ptr<duckdb::ArrowArrayStreamWrapper>
 	ProduceStream(duckdb::ArrowStreamParameters &parameters) override {
+		// An Arrow stream cannot be rewound, so a second scan would read only what the first one left.
+		if (stream_handed_out.exchange(true)) {
+			throw duckdb::InvalidInputException("The Arrow stream behind view \"%s\" can be read only once and was "
+			                                    "already read; copy it into a table to read it again",
+			                                    view_name);
+		}
 		auto result = duckdb::make_uniq<duckdb::ArrowArrayStreamWrapper>();
 		result->arrow_array_stream = stream.get();
 		result->arrow_array_stream.release = EmptyStreamRelease;
@@ -469,6 +477,8 @@ public:
 private:
 	//! The caller retains ownership of the stream and its arrays.
 	duckdb::reference<ArrowArrayStream> stream;
+	std::string view_name;
+	duckdb::atomic<bool> stream_handed_out {false};
 };
 
 // LCOV_EXCL_START
@@ -488,14 +498,48 @@ void Release(struct ArrowArrayStream *stream) {
 	stream->release = nullptr;
 }
 
-duckdb_state Ingest(duckdb_connection connection, const char *table_name, struct ArrowArrayStream *input) {
+//! A stream that hands out the caller's array once, without taking ownership of it or of the schema
+void InitArrayStream(ArrowArrayStream &stream, ArrowSchema *schema, ArrowArray *array) {
+	auto private_data = new PrivateData;
+	private_data->schema = schema;
+	private_data->array = array;
+	private_data->done = false;
+
+	stream.get_schema = GetSchema;
+	stream.get_next = GetNext;
+	stream.get_last_error = GetLastError;
+	stream.release = Release;
+	stream.private_data = private_data;
+}
+
+class CArrowArrayScanFactory : public duckdb::ArrowScanFactory {
+public:
+	CArrowArrayScanFactory(ArrowSchema *schema_p, ArrowArray *array_p) : schema(schema_p), array(array_p) {
+	}
+
+	void GetSchema(ArrowSchema &out) override {
+		out = *schema;
+		out.release = nullptr;
+	}
+
+	duckdb::unique_ptr<duckdb::ArrowArrayStreamWrapper>
+	ProduceStream(duckdb::ArrowStreamParameters &parameters) override {
+		auto result = duckdb::make_uniq<duckdb::ArrowArrayStreamWrapper>();
+		InitArrayStream(result->arrow_array_stream, schema, array);
+		return result;
+	}
+
+private:
+	//! The caller retains ownership of the schema and the array.
+	ArrowSchema *schema;
+	ArrowArray *array;
+};
+
+duckdb_state Ingest(duckdb_connection connection, const char *table_name,
+                    duckdb::shared_ptr<duckdb::ArrowScanFactory> factory) {
 	try {
 		auto cconn = reinterpret_cast<duckdb::Connection *>(connection);
-		if (!input) {
-			return DuckDBError;
-		}
-		auto factory = duckdb::make_shared_ptr<CArrowScanFactory>(*input);
-		// The factory hands out the caller's stream unchanged, so neither projections nor filters can be pushed into it
+		// The factories hand out the caller's data unchanged, so neither projections nor filters can be pushed into it
 		cconn->TableFunction("arrow_scan_dumb", {}, {}, std::move(factory))
 		    ->CreateView(duckdb::Identifier(table_name), true, true);
 	} catch (...) { // LCOV_EXCL_START
@@ -510,12 +554,9 @@ duckdb_state Ingest(duckdb_connection connection, const char *table_name, struct
 
 	return DuckDBSuccess;
 }
-} // namespace
-} // namespace arrow_array_stream_wrapper
 
-duckdb_state duckdb_arrow_scan(duckdb_connection connection, const char *table_name, duckdb_arrow_stream arrow) {
-	auto stream = reinterpret_cast<ArrowArrayStream *>(arrow);
-
+duckdb_state Scan(duckdb_connection connection, const char *table_name, ArrowArrayStream *stream,
+                  duckdb::shared_ptr<duckdb::ArrowScanFactory> factory) {
 	// Backup release functions - we nullify children schema release functions because we don't want to release on
 	// behalf of the caller, downstream in our code. Note that Arrow releases target immediate children, but aren't
 	// recursive. So we only back up immediate children here and restore their functions.
@@ -532,7 +573,7 @@ duckdb_state duckdb_arrow_scan(duckdb_connection connection, const char *table_n
 		child->release = arrow_array_stream_wrapper::EmptySchemaRelease;
 	}
 
-	auto ret = arrow_array_stream_wrapper::Ingest(connection, table_name, stream);
+	auto ret = Ingest(connection, table_name, std::move(factory));
 
 	// Restore release functions.
 	for (idx_t i = 0; i < duckdb::NumericCast<idx_t>(schema.n_children); i++) {
@@ -541,34 +582,44 @@ duckdb_state duckdb_arrow_scan(duckdb_connection connection, const char *table_n
 
 	return ret;
 }
+} // namespace
+} // namespace arrow_array_stream_wrapper
+
+duckdb_state duckdb_arrow_scan(duckdb_connection connection, const char *table_name, duckdb_arrow_stream arrow) {
+	auto stream = reinterpret_cast<ArrowArrayStream *>(arrow);
+	if (!stream) {
+		return DuckDBError;
+	}
+	try {
+		auto factory = duckdb::make_shared_ptr<arrow_array_stream_wrapper::CArrowScanFactory>(*stream, table_name);
+		return arrow_array_stream_wrapper::Scan(connection, table_name, stream, std::move(factory));
+	} catch (...) { // LCOV_EXCL_START
+		return DuckDBError;
+	} // LCOV_EXCL_STOP
+}
 
 duckdb_state duckdb_arrow_array_scan(duckdb_connection connection, const char *table_name,
                                      duckdb_arrow_schema arrow_schema, duckdb_arrow_array arrow_array,
                                      duckdb_arrow_stream *out_stream) {
-	auto private_data = new arrow_array_stream_wrapper::PrivateData;
-	private_data->schema = reinterpret_cast<ArrowSchema *>(arrow_schema);
-	private_data->array = reinterpret_cast<ArrowArray *>(arrow_array);
-	private_data->done = false;
-
-	ArrowArrayStream *stream;
+	auto schema = reinterpret_cast<ArrowSchema *>(arrow_schema);
+	auto array = reinterpret_cast<ArrowArray *>(arrow_array);
+	duckdb::unique_ptr<ArrowArrayStream> stream;
+	duckdb::shared_ptr<duckdb::ArrowScanFactory> factory;
 	try {
-		stream = new ArrowArrayStream;
-	} catch (...) {
-		delete private_data;
+		stream = duckdb::make_uniq<ArrowArrayStream>();
+		arrow_array_stream_wrapper::InitArrayStream(*stream, schema, array);
+		factory = duckdb::make_shared_ptr<arrow_array_stream_wrapper::CArrowArrayScanFactory>(schema, array);
+	} catch (...) { // LCOV_EXCL_START
+		if (stream && stream->release) {
+			stream->release(stream.get());
+		}
 		return DuckDBError;
-	}
+	} // LCOV_EXCL_STOP
+	auto view_stream = stream.release();
+	*out_stream = reinterpret_cast<duckdb_arrow_stream>(view_stream);
 	try {
-		*out_stream = reinterpret_cast<duckdb_arrow_stream>(stream);
-		stream->get_schema = arrow_array_stream_wrapper::GetSchema;
-		stream->get_next = arrow_array_stream_wrapper::GetNext;
-		stream->get_last_error = arrow_array_stream_wrapper::GetLastError;
-		stream->release = arrow_array_stream_wrapper::Release;
-		stream->private_data = private_data;
-
-		return duckdb_arrow_scan(connection, table_name, reinterpret_cast<duckdb_arrow_stream>(stream));
-	} catch (...) {
-		delete private_data;
-		delete stream;
+		return arrow_array_stream_wrapper::Scan(connection, table_name, view_stream, std::move(factory));
+	} catch (...) { // LCOV_EXCL_START
 		return DuckDBError;
-	}
+	} // LCOV_EXCL_STOP
 }

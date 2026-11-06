@@ -1507,3 +1507,191 @@ TEST_CASE("Test C-API Arrow round trip of timestamps below the first midnight of
 	duckdb_destroy_data_chunk(&chunk);
 	duckdb_destroy_result(&result);
 }
+
+namespace {
+
+idx_t released_streams = 0;
+
+void CountStreamRelease(ArrowArrayStream *stream) {
+	released_streams++;
+	stream->release = nullptr;
+}
+
+void RequireStreamAlreadyRead(CAPIResult &result) {
+	REQUIRE_FAIL(&result);
+	REQUIRE(result.ErrorType() == DUCKDB_ERROR_INVALID_INPUT);
+	REQUIRE_THAT(result.ErrorMessage(),
+	             Catch::Matchers::Contains("view \"t\"") && Catch::Matchers::Contains("read only once"));
+}
+
+} // namespace
+
+TEST_CASE("duckdb_arrow_scan reads its stream in one scan and refuses a second", "[capi][arrow]") {
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+	REQUIRE_NO_FAIL(tester.Query("SET threads = 4"));
+
+	BatchStream batches(
+	    PlainSchema(tester),
+	    QueryToArrowBatches(tester, {PLAIN_BATCHES[0], PLAIN_BATCHES[1], PLAIN_BATCHES[0], PLAIN_BATCHES[1],
+	                                 PLAIN_BATCHES[0], PLAIN_BATCHES[1], PLAIN_BATCHES[0], PLAIN_BATCHES[1]}));
+	released_streams = 0;
+	batches.stream.release = CountStreamRelease;
+	REQUIRE(duckdb_arrow_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_stream>(&batches.stream)) ==
+	        DuckDBSuccess);
+
+	SECTION("one scan over several threads reads every batch once") {
+		auto result = tester.Query("SELECT count(*), count(a), sum(a), count(DISTINCT b) FROM t");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 24);
+		REQUIRE(result->Fetch<int64_t>(1, 0) == 20);
+		REQUIRE(result->Fetch<int64_t>(2, 0) == 72);
+		REQUIRE(result->Fetch<int64_t>(3, 0) == 4);
+		REQUIRE(batches.next_batch == batches.batches.size());
+	}
+
+	SECTION("a second query") {
+		auto first = tester.Query("SELECT count(*) FROM t");
+		REQUIRE_NO_FAIL(*first);
+		REQUIRE(first->Fetch<int64_t>(0, 0) == 24);
+		RequireStreamAlreadyRead(*tester.Query("SELECT count(*) FROM t"));
+	}
+
+	SECTION("a second query after a first one with a LIMIT") {
+		auto first = tester.Query("SELECT a FROM t LIMIT 1");
+		REQUIRE_NO_FAIL(*first);
+		REQUIRE(first->row_count() == 1);
+		RequireStreamAlreadyRead(*tester.Query("SELECT count(*) FROM t"));
+	}
+
+	SECTION("a self join") {
+		RequireStreamAlreadyRead(*tester.Query("SELECT t1.c, t2.b FROM t t1 JOIN t t2 USING (a)"));
+	}
+
+	SECTION("two scalar subqueries") {
+		RequireStreamAlreadyRead(*tester.Query("SELECT (SELECT count(*) FROM t) + (SELECT count(*) FROM t)"));
+	}
+
+	SECTION("the two sides of a UNION ALL") {
+		RequireStreamAlreadyRead(*tester.Query("SELECT count(*) FROM (SELECT a FROM t UNION ALL SELECT a FROM t)"));
+	}
+
+	SECTION("a recursive CTE that scans the view on every step") {
+		RequireStreamAlreadyRead(
+		    *tester.Query("WITH RECURSIVE r(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM r "
+		                  "WHERE i < (SELECT count(*) FROM t WHERE a = 1)) SELECT count(*) FROM r"));
+	}
+
+	SECTION("a materialized CTE feeds both of its readers from one scan") {
+		auto result = tester.Query("WITH m AS MATERIALIZED (SELECT a FROM t WHERE a <= 2) "
+		                           "SELECT count(*), sum(m1.a) FROM m m1 JOIN m m2 USING (a)");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 32);
+		REQUIRE(result->Fetch<int64_t>(1, 0) == 48);
+	}
+
+	SECTION("preparing and explaining do not read the stream, a second execution does") {
+		REQUIRE_NO_FAIL(tester.Query("EXPLAIN SELECT count(*) FROM t"));
+		duckdb_prepared_statement statement = nullptr;
+		REQUIRE(duckdb_prepare(tester.connection, "SELECT count(*) FROM t", &statement) == DuckDBSuccess);
+		REQUIRE(batches.next_batch == 0);
+		CAPIResult first;
+		first.QueryPrepared(statement);
+		REQUIRE_NO_FAIL(first);
+		REQUIRE(first.Fetch<int64_t>(0, 0) == 24);
+		CAPIResult second;
+		second.QueryPrepared(statement);
+		RequireStreamAlreadyRead(second);
+		duckdb_destroy_prepare(&statement);
+	}
+
+	SECTION("a null stream") {
+		REQUIRE(duckdb_arrow_scan(tester.connection, "u", nullptr) == DuckDBError);
+	}
+
+	REQUIRE_NO_FAIL(tester.Query("DROP VIEW t"));
+	REQUIRE(released_streams == 0);
+	batches.stream.release(&batches.stream);
+	REQUIRE(released_streams == 1);
+}
+
+TEST_CASE("duckdb_arrow_array_scan reads its array in full on every scan", "[capi][arrow]") {
+	if (STANDARD_VECTOR_SIZE < 3) {
+		return;
+	}
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+	REQUIRE_NO_FAIL(tester.Query("SET threads = 4"));
+
+	auto batches = QueryToArrowBatches(tester, {PLAIN_BATCHES[0]});
+	REQUIRE(batches.size() == 1);
+	ArrayScanInput input(PlainSchema(tester), batches[0]);
+	REQUIRE(duckdb_arrow_array_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_schema>(&input.schema),
+	                                reinterpret_cast<duckdb_arrow_array>(&input.array),
+	                                reinterpret_cast<duckdb_arrow_stream *>(&input.stream)) == DuckDBSuccess);
+
+	SECTION("a self join") {
+		auto result = tester.Query("SELECT t1.c, t2.b FROM t t1 JOIN t t2 USING (a) ORDER BY a");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->row_count() == 2);
+		REQUIRE(result->Fetch<double>(0, 0) == 1.5);
+		REQUIRE(result->Fetch<string>(1, 0) == "x");
+		REQUIRE(result->Fetch<double>(0, 1) == 2.5);
+		REQUIRE(result->Fetch<string>(1, 1) == "yy");
+	}
+
+	SECTION("two scalar subqueries") {
+		auto result = tester.Query("SELECT (SELECT count(*) FROM t) + (SELECT count(*) FROM t)");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 6);
+	}
+
+	SECTION("the two sides of a UNION ALL") {
+		auto result =
+		    tester.Query("SELECT count(*), count(a), sum(c) FROM (SELECT * FROM t UNION ALL SELECT * FROM t)");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 6);
+		REQUIRE(result->Fetch<int64_t>(1, 0) == 4);
+		REQUIRE(result->Fetch<double>(2, 0) == 15.0);
+	}
+
+	SECTION("repeated queries and a prepared statement executed twice") {
+		for (idx_t i = 0; i < 3; i++) {
+			auto result = tester.Query("SELECT count(*), sum(a), sum(c) FROM t");
+			REQUIRE_NO_FAIL(*result);
+			REQUIRE(result->Fetch<int64_t>(0, 0) == 3);
+			REQUIRE(result->Fetch<int64_t>(1, 0) == 3);
+			REQUIRE(result->Fetch<double>(2, 0) == 7.5);
+		}
+		duckdb_prepared_statement statement = nullptr;
+		REQUIRE(duckdb_prepare(tester.connection, "SELECT string_agg(b, ',' ORDER BY a) FROM t", &statement) ==
+		        DuckDBSuccess);
+		for (idx_t i = 0; i < 2; i++) {
+			CAPIResult result;
+			result.QueryPrepared(statement);
+			REQUIRE_NO_FAIL(result);
+			REQUIRE(result.Fetch<string>(0, 0) == "x,yy");
+		}
+		duckdb_destroy_prepare(&statement);
+	}
+
+	SECTION("a recursive CTE that scans the view on every step") {
+		auto result = tester.Query("WITH RECURSIVE r(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM r "
+		                           "WHERE i < (SELECT count(*) FROM t)) SELECT count(*), max(i) FROM r");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 4);
+		REQUIRE(result->Fetch<int64_t>(1, 0) == 3);
+	}
+
+	SECTION("the view outlives the stream duckdb_arrow_array_scan returned") {
+		duckdb_destroy_arrow_stream(reinterpret_cast<duckdb_arrow_stream *>(&input.stream));
+		REQUIRE(input.stream == nullptr);
+		auto result = tester.Query("SELECT count(*) FROM t");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 3);
+	}
+
+	REQUIRE_NO_FAIL(tester.Query("DROP VIEW t"));
+	REQUIRE(input.array.release);
+	REQUIRE(input.schema.release);
+}
