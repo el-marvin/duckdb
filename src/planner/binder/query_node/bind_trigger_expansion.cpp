@@ -40,7 +40,7 @@
 namespace duckdb {
 
 // Defined in binder.cpp — rejects 'excluded'-qualified columns in RETURNING, matching the no-trigger path.
-void VerifyNotExcluded(const ParsedExpression &root_expr);
+void VerifyNotExcluded(const ParsedExpression &root_expr, const Identifier &target_alias);
 
 unique_ptr<BoundStatement> Binder::TryExpandTriggers(QueryNode &node, TableCatalogEntry &table,
                                                      TriggerEventType event_type) {
@@ -497,7 +497,7 @@ BoundStatement Binder::ExpandTriggers(QueryNode &node, TableCatalogEntry &table,
 	BoundStatement result;
 	vector<unique_ptr<Expression>> proj_exprs;
 	for (auto &returning_expr : expanded_returning) {
-		VerifyNotExcluded(*returning_expr);
+		VerifyNotExcluded(*returning_expr, GetReturningAlias(node));
 		LogicalType result_type;
 		auto bound_expr = returning_binder.Bind(returning_expr, &result_type);
 		result.names.push_back(bound_expr->GetName());

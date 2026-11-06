@@ -465,7 +465,7 @@ identifier_map_t<unique_ptr<TableRef>> &Binder::GetReplacementScans() {
 }
 
 // FIXME: this is extremely naive
-void VerifyNotExcluded(const ParsedExpression &root_expr) {
+void VerifyNotExcluded(const ParsedExpression &root_expr, const Identifier &target_alias) {
 	ParsedExpressionIterator::VisitExpression<ColumnRefExpression>(
 	    root_expr, [&](const ColumnRefExpression &column_ref) {
 		    if (!column_ref.IsQualified()) {
@@ -473,7 +473,8 @@ void VerifyNotExcluded(const ParsedExpression &root_expr) {
 		    }
 		    // the table qualifier is the component directly before the column name
 		    auto &names = column_ref.ColumnNames();
-		    if (names[names.size() - 2] == "excluded") {
+		    auto &table_qualifier = names[names.size() - 2];
+		    if (table_qualifier == "excluded" && table_qualifier != target_alias) {
 			    throw NotImplementedException(
 			        "'excluded' qualified columns are not supported in the RETURNING clause yet");
 		    }
@@ -640,7 +641,7 @@ BoundStatement Binder::BindReturning(vector<unique_ptr<ParsedExpression>> return
 	BoundStatement result;
 	binder->ExpandStarExpressions(returning_list, new_returning_list);
 	for (auto &returning_expr : new_returning_list) {
-		VerifyNotExcluded(*returning_expr);
+		VerifyNotExcluded(*returning_expr, alias);
 		auto expr = returning_binder.Bind(returning_expr, &result_type);
 		result.names.push_back(expr->GetName());
 		result.types.push_back(result_type);

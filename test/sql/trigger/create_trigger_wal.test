@@ -181,3 +181,50 @@ USE memory;
 
 statement ok
 DETACH triggerdb;
+
+# A trigger body INSERT keeps its target alias through WAL replay
+statement ok
+ATTACH '{TEST_DIR}/create_trigger_wal.db' AS triggerdb;
+
+statement ok
+USE triggerdb;
+
+statement ok
+CREATE TABLE t4 (id INTEGER);
+
+statement ok
+CREATE TABLE audit4 (id INTEGER);
+
+statement ok
+CREATE TRIGGER alias_trigger AFTER INSERT ON t4 REFERENCING NEW TABLE AS nt FOR EACH STATEMENT INSERT INTO audit4 AS a SELECT id FROM nt RETURNING a.id;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH triggerdb;
+
+statement ok
+ATTACH '{TEST_DIR}/create_trigger_wal.db' AS triggerdb;
+
+statement ok
+USE triggerdb;
+
+query I
+SELECT sql FROM duckdb_triggers() WHERE trigger_name = 'alias_trigger';
+----
+CREATE TRIGGER alias_trigger AFTER INSERT ON t4 REFERENCING NEW TABLE AS nt FOR EACH STATEMENT INSERT INTO audit4 AS a SELECT id FROM nt RETURNING a.id;
+
+statement ok
+INSERT INTO t4 VALUES (7);
+
+query I
+SELECT id FROM audit4;
+----
+7
+
+statement ok
+USE memory;
+
+statement ok
+DETACH triggerdb;

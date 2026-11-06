@@ -1,0 +1,225 @@
+# name: test/sql/returning/returning_insert_alias.test
+# description: The alias of an INSERT target names the inserted rows in RETURNING, with or without ON CONFLICT
+# group: [returning]
+
+statement ok
+CREATE TABLE t (a INTEGER);
+
+query I
+INSERT INTO t AS x VALUES (1) RETURNING x.a;
+----
+1
+
+statement ok
+CREATE TABLE u (a INTEGER PRIMARY KEY, b VARCHAR DEFAULT 'd');
+
+query II
+INSERT INTO u AS x VALUES (1, 'one') RETURNING x.a, b;
+----
+1	one
+
+query II
+INSERT INTO u AS x VALUES (2, NULL) RETURNING *;
+----
+2	NULL
+
+query II
+INSERT INTO u AS x VALUES (3, 'three') RETURNING x.*;
+----
+3	three
+
+query II
+INSERT INTO u AS x VALUES (4, 'four') RETURNING x.a * 10 AS a10, upper(x.b);
+----
+40	FOUR
+
+query II rowsort
+INSERT INTO u AS x SELECT range, 'r' FROM range(5, 7) RETURNING x.a, x.b;
+----
+5	r
+6	r
+
+query II
+INSERT INTO u AS x (a) VALUES (7) RETURNING x.a, x.b;
+----
+7	d
+
+statement ok
+CREATE TABLE d (a INTEGER DEFAULT 42);
+
+query I
+INSERT INTO d AS x DEFAULT VALUES RETURNING x.a;
+----
+42
+
+query I
+INSERT INTO u AS "Weird Alias" VALUES (8, 'eight') RETURNING "Weird Alias".a;
+----
+8
+
+# the alias hides the table name, as it does for ON CONFLICT, UPDATE and DELETE
+statement error
+INSERT INTO u AS x VALUES (9, 'nine') RETURNING u.a;
+----
+Referenced table "u" not found!
+
+statement error
+INSERT INTO u AS x VALUES (9, 'nine') RETURNING main.u.a;
+----
+Referenced table "main.u" not found!
+
+statement error
+INSERT INTO u AS x VALUES (9, 'nine') RETURNING u;
+----
+Referenced column "u" not found
+
+query I
+INSERT INTO d AS x VALUES (43) RETURNING x;
+----
+{'a': 43}
+
+statement error
+INSERT INTO u AS x VALUES (9, 'nine') ON CONFLICT DO NOTHING RETURNING u.a;
+----
+Referenced table "u" not found!
+
+statement error
+UPDATE u AS x SET b = b RETURNING u.a;
+----
+Referenced table "u" not found!
+
+statement error
+INSERT INTO u AS x VALUES (9, 'nine') RETURNING y.a;
+----
+Referenced table "y" not found!
+
+query I
+SELECT count(*) FROM u WHERE a = 9;
+----
+0
+
+# an alias equal to the table name keeps the name usable
+query I
+INSERT INTO u AS u VALUES (9, 'nine') RETURNING u.a;
+----
+9
+
+# as for UPDATE, the binding carries the bare alias, so a schema qualified name does not resolve
+statement error
+INSERT INTO u AS u VALUES (90, 'ninety') RETURNING main.u.a;
+----
+Referenced table "main.u" not found!
+
+query I
+INSERT INTO main.u VALUES (10, 'ten') RETURNING main.u.a;
+----
+10
+
+# the alias beside ON CONFLICT and OR REPLACE
+query II rowsort
+INSERT INTO u AS x VALUES (1, 'uno'), (11, 'eleven') ON CONFLICT (a) DO UPDATE SET b = x.b || excluded.b WHERE x.a = 1 RETURNING x.a, x.b;
+----
+1	oneuno
+11	eleven
+
+query II
+INSERT INTO u AS x VALUES (11, 'once') ON CONFLICT DO UPDATE SET b = excluded.b WHERE x.b = 'nope' RETURNING x.a, x.b;
+----
+
+query II
+INSERT OR REPLACE INTO u AS x VALUES (11, 'once') RETURNING x.a, x.b;
+----
+11	once
+
+query II
+INSERT OR IGNORE INTO u AS x VALUES (11, 'ignored'), (12, 'twelve') RETURNING x.a, x.b;
+----
+12	twelve
+
+# the alias in an INSERT used as a common table expression
+query I
+WITH ins AS (INSERT INTO u AS x VALUES (13, 'thirteen') RETURNING x.a + 1 AS a1) SELECT a1 FROM ins;
+----
+14
+
+# a target alias spelled excluded names the target, not the ON CONFLICT pseudo table
+statement ok
+CREATE TABLE e (a INTEGER PRIMARY KEY);
+
+query I
+INSERT INTO e AS excluded VALUES (1) RETURNING *;
+----
+1
+
+query I
+INSERT INTO e AS Excluded VALUES (2) RETURNING EXCLUDED.a;
+----
+2
+
+query I rowsort
+UPDATE e AS excluded SET a = a + 10 RETURNING *;
+----
+11
+12
+
+query I
+DELETE FROM e AS excluded WHERE a = 12 RETURNING excluded.a;
+----
+12
+
+query I
+MERGE INTO e AS excluded USING (SELECT 13 AS a) s ON excluded.a = s.a WHEN NOT MATCHED THEN INSERT VALUES (s.a) RETURNING excluded.a;
+----
+13
+
+# beside ON CONFLICT, excluded still names the pseudo table, which RETURNING cannot reference
+statement error
+INSERT INTO e VALUES (11) ON CONFLICT DO UPDATE SET a = excluded.a RETURNING excluded.a;
+----
+'excluded' qualified columns are not supported in the RETURNING clause yet
+
+statement error
+INSERT INTO e AS x VALUES (11) ON CONFLICT DO UPDATE SET a = excluded.a RETURNING excluded.a;
+----
+'excluded' qualified columns are not supported in the RETURNING clause yet
+
+statement error
+INSERT INTO e AS excluded VALUES (11) ON CONFLICT DO UPDATE SET a = excluded.a RETURNING excluded.a;
+----
+Ambiguous reference to table "excluded"
+
+# with an explicit conflict target the alias excluded binds, and RETURNING sees the updated target row
+statement ok
+CREATE TABLE ev (id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+INSERT INTO ev VALUES (1, 10);
+
+query II
+INSERT INTO ev AS excluded VALUES (1, 20), (2, 40) ON CONFLICT (id) DO UPDATE SET v = 30 RETURNING excluded.id, excluded.v;
+----
+1	30
+2	40
+
+# the target alias is not visible in the inserted query
+statement error
+INSERT INTO u AS x SELECT x.a + 100, 'x' FROM range(1) RETURNING x.a;
+----
+Referenced table "x" not found!
+
+query II
+SELECT a, b FROM u ORDER BY a;
+----
+1	oneuno
+2	NULL
+3	three
+4	four
+5	r
+6	r
+7	d
+8	eight
+9	nine
+10	ten
+11	once
+12	twelve
+13	thirteen

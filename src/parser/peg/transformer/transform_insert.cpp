@@ -44,13 +44,12 @@ unique_ptr<SQLStatement> PEGTransformerFactory::TransformInsertStatement(
 			                      "the first if you want to have more granular control");
 		}
 		node.on_conflict_info = std::move(*on_conflict_clause);
-		node.table_ref = std::move(insert_target);
 	} else if (action != OnConflictAction::THROW) {
 		auto on_conflict_info = make_uniq<OnConflictInfo>();
 		on_conflict_info->action_type = action;
 		node.on_conflict_info = std::move(on_conflict_info);
-		node.table_ref = std::move(insert_target);
 	}
+	node.table_ref = std::move(insert_target);
 	if (returning_clause) {
 		node.returning_list = std::move(*returning_clause);
 	}

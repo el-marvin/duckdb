@@ -304,6 +304,110 @@ INSERT INTO oc VALUES (1, 99), (2, 20) ON CONFLICT DO NOTHING RETURNING id, v;
 ----
 2	20
 
+# ─── Aliased INSERT target + RETURNING ───────────────────────────────────────
+
+statement ok
+CREATE TABLE ali (a INTEGER, b INTEGER GENERATED ALWAYS AS (a + 1));
+
+statement ok
+CREATE TABLE ali_log (msg VARCHAR);
+
+statement ok
+CREATE TRIGGER tr_ali AFTER INSERT ON ali FOR EACH STATEMENT
+    INSERT INTO ali_log VALUES ('ali');
+
+query III
+INSERT INTO ali AS x VALUES (1) RETURNING x.a, x.b, a;
+----
+1	2	1
+
+statement error
+INSERT INTO ali AS x VALUES (2) RETURNING ali.a;
+----
+Referenced table "ali" not found!
+
+query I
+SELECT COUNT(*) FROM ali_log;
+----
+1
+
+# a trigger body INSERT keeps its alias
+statement ok
+CREATE TRIGGER tr_ali_body AFTER INSERT ON ali REFERENCING NEW TABLE AS nt FOR EACH STATEMENT
+    INSERT INTO ali_log AS l SELECT 'body ' || a FROM nt RETURNING l.msg;
+
+query I
+SELECT sql FROM duckdb_triggers() WHERE trigger_name = 'tr_ali_body';
+----
+CREATE TRIGGER tr_ali_body AFTER INSERT ON ali REFERENCING NEW TABLE AS nt FOR EACH STATEMENT INSERT INTO ali_log AS l SELECT ('body ' || a) FROM nt RETURNING l.msg;
+
+query I
+INSERT INTO ali AS x VALUES (3) RETURNING x;
+----
+{'a': 3, 'b': 4}
+
+query I
+SELECT msg FROM ali_log ORDER BY msg;
+----
+ali
+ali
+body 3
+
+# a target alias spelled excluded, with and without RETURNING
+statement ok
+INSERT INTO ali AS excluded VALUES (4);
+
+query III
+INSERT INTO ali AS excluded VALUES (5) RETURNING *, excluded.a;
+----
+5	6	5
+
+query I
+SELECT COUNT(*) FROM ali_log;
+----
+7
+
+statement ok
+CREATE TABLE alik (id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE TABLE alik_log (msg VARCHAR);
+
+statement ok
+CREATE TRIGGER tr_alik_ins AFTER INSERT ON alik FOR EACH STATEMENT
+    INSERT INTO alik_log VALUES ('ins');
+
+statement ok
+CREATE TRIGGER tr_alik_upd AFTER UPDATE ON alik FOR EACH STATEMENT
+    INSERT INTO alik_log VALUES ('upd');
+
+statement ok
+CREATE TRIGGER tr_alik_del AFTER DELETE ON alik FOR EACH STATEMENT
+    INSERT INTO alik_log VALUES ('del');
+
+query II
+INSERT INTO alik AS Excluded VALUES (1, 10), (2, 20) RETURNING EXCLUDED.id, excluded.v;
+----
+1	10
+2	20
+
+query III rowsort
+UPDATE alik AS excluded SET v = v + 1 RETURNING excluded.v, *;
+----
+11	1	11
+21	2	21
+
+query II rowsort
+INSERT INTO alik AS excluded VALUES (1, 99), (3, 30) ON CONFLICT (id) DO UPDATE SET v = 50 RETURNING excluded.id, excluded.v;
+----
+1	50
+3	30
+
+query I
+DELETE FROM alik AS excluded WHERE id = 2 RETURNING excluded.id;
+----
+2
+
 # ─── WITH CTE wrapping ────────────────────────────────────────────────────────
 
 statement ok
