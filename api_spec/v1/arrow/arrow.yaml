@@ -375,6 +375,8 @@ functions:
       **DEPRECATION NOTICE**: This method is scheduled for removal in a future release.
 
       Scans the Arrow stream and creates a view with the given name.
+      The view reads the stream once: a second scan of it, in the same query or a later one, fails.
+      Pass a stream to one call only; a view over a stream another view has read returns its remaining rows.
     return_description: '`DuckDBSuccess` on success or `DuckDBError` on failure.'
   arrow_array_scan:
     offset: 402
@@ -407,4 +409,6 @@ functions:
 
       Scans the Arrow array and creates a view with the given name.
       Note that after running `duckdb_arrow_array_scan`, `duckdb_destroy_arrow_stream` must be called on the out stream.
+      Every scan of the view reads the whole array. The view needs the schema and the array, not the out stream, to stay
+      valid.
     return_description: '`DuckDBSuccess` on success or `DuckDBError` on failure.'

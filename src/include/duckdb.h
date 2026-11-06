@@ -3078,7 +3078,9 @@ DUCKDB_C_API duckdb_state duckdb_execute_prepared_arrow(duckdb_prepared_statemen
 /*!
  * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release.
  *
- * Scans the Arrow stream and creates a view with the given name.
+ * Scans the Arrow stream and creates a view with the given name. The view reads the stream once: a second scan of it,
+ * in the same query or a later one, fails. Pass a stream to one call only; a view over a stream another view has read
+ * returns its remaining rows.
  *
  * history:
  * - stable: v0.9.0
@@ -3098,7 +3100,8 @@ DUCKDB_C_API duckdb_state duckdb_arrow_scan(duckdb_connection connection, const 
  * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release.
  *
  * Scans the Arrow array and creates a view with the given name. Note that after running `duckdb_arrow_array_scan`,
- * `duckdb_destroy_arrow_stream` must be called on the out stream.
+ * `duckdb_destroy_arrow_stream` must be called on the out stream. Every scan of the view reads the whole array. The
+ * view needs the schema and the array, not the out stream, to stay valid.
  *
  * history:
  * - stable: v0.9.0
