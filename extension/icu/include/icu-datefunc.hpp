@@ -122,6 +122,8 @@ struct ICUDateFunc {
 	static uint64_t SetTime(Calendar *calendar, timestamp_tz_t date);
 	//! Sets the calendar to the timestamp, returning the unused ns part
 	static uint64_t SetTimeNS(Calendar *calendar, timestamp_tz_ns_t date);
+	//! Splits the wall clock time of the instant in the calendar's zone into a day and a time of day
+	static void GetLocalTime(Calendar *calendar, timestamp_tz_t instant, date_t &local_date, dtime_t &local_time);
 	//! Extracts the field from the calendar
 	static int32_t ExtractField(Calendar *calendar, CalendarField field);
 	//! Extracts the UTC offset (in seconds) of the calendar, returns false if a TIMETZ cannot represent it

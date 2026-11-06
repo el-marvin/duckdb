@@ -1,0 +1,248 @@
+# name: test/sql/timezone/test_icu_calendar_casts.test
+# description: Casts between instants and naive timestamps, dates and text read and write proleptic Gregorian fields under every session calendar
+# group: [timezone]
+
+require icu
+
+statement ok
+SET Calendar = 'gregorian';
+
+statement ok
+SET TimeZone = 'Europe/Amsterdam';
+
+# Every cast below must give the answer of the Gregorian calendar
+statement ok
+CREATE TABLE ref AS
+SELECT s, ts, s::TIMESTAMPTZ AS tstz, epoch_us(s::TIMESTAMPTZ) AS us, s::TIMESTAMPTZ::TIMESTAMP AS local_ts,
+	s::TIMESTAMPTZ::DATE AS local_date, ts::DATE::TIMESTAMPTZ AS midnight, timezone('Asia/Tokyo', ts) AS tokyo,
+	timezone('Asia/Tokyo', s::TIMESTAMPTZ) AS tokyo_ts, (s || ' Asia/Tokyo')::TIMESTAMPTZ AS tokyo_text,
+	ts::TIMESTAMP_MS::TIMESTAMPTZ AS ms_tstz, ts::TIMESTAMP_S::TIMESTAMPTZ AS s_tstz,
+	TRY_CAST(s AS TIMESTAMPTZ_NS) AS ns_tstz, TRY_CAST(s AS TIMESTAMPTZ_NS)::TIMESTAMP_NS AS ns_local,
+	TRY_CAST(s AS TIMESTAMPTZ_NS)::TIMESTAMP AS ns_local_us, TRY_CAST(s AS TIMESTAMPTZ_NS)::DATE AS ns_date
+FROM (SELECT s, s::TIMESTAMP AS ts
+FROM (VALUES
+	('2024-07-01 12:00:00'),
+	('2024-01-15 08:30:00.123456'),
+	('2024-02-29 23:59:59.999999'),
+	('1969-12-31 23:59:59.999999'),
+	('2024-09-20 12:00:00'),
+	('2024-03-31 02:30:00'),
+	('2024-10-27 02:30:00'),
+	('1989-01-07 12:00:00'),
+	('1867-01-01 00:00:00'),
+	('1582-10-04 12:00:00'),
+	('1582-10-15 12:00:00'),
+	('0645-06-30 00:00:00'),
+	('0001-01-01 00:00:00'),
+	('0001-01-01 (BC) 12:00:00'),
+	('0044-03-15 (BC) 12:00:00.000123'),
+	('9999-12-31 23:59:59'),
+	('1970-01-01 00:00:00')
+) t(s));
+
+query II
+SELECT s, us FROM ref WHERE s IN ('2024-03-31 02:30:00', '2024-10-27 02:30:00', '0044-03-15 (BC) 12:00:00.000123', '1969-12-31 23:59:59.999999') ORDER BY us;
+----
+0044-03-15 (BC) 12:00:00.000123	-63517781849999877
+1969-12-31 23:59:59.999999	-3600000001
+2024-03-31 02:30:00	1711848600000000
+2024-10-27 02:30:00	1729992600000000
+
+foreach calendar japanese buddhist islamic hebrew roc persian chinese dangi coptic ethiopic ethiopic-amete-alem indian islamic-civil islamic-rgsa islamic-tbla islamic-umalqura iso8601
+
+statement ok
+SET Calendar = '{calendar}';
+
+# The text of a timestamp is read as Gregorian fields in the session zone
+query I
+SELECT epoch('2024-07-01 12:00:00'::TIMESTAMPTZ);
+----
+1719828000.0
+
+query I
+SELECT TIMESTAMPTZ '2024-07-01 12:00:00' = TIMESTAMPTZ '2024-07-01 10:00:00+00';
+----
+true
+
+query I
+SELECT count(*) FROM ref WHERE epoch_us(s::TIMESTAMPTZ) <> us;
+----
+0
+
+# The nanosecond types hold only the rows from 1678 to 2262
+query I
+SELECT count(*) FROM ref
+WHERE TRY_CAST(s AS TIMESTAMPTZ_NS) IS DISTINCT FROM ns_tstz
+	OR TRY_CAST(ts AS TIMESTAMP_NS)::TIMESTAMPTZ_NS IS DISTINCT FROM ns_tstz
+	OR TRY_CAST(ts AS TIMESTAMP_NS)::TIMESTAMPTZ IS DISTINCT FROM ns_tstz::TIMESTAMPTZ
+	OR ns_tstz::TIMESTAMP_NS IS DISTINCT FROM ns_local
+	OR ns_tstz::TIMESTAMP IS DISTINCT FROM ns_local_us
+	OR ns_tstz::DATE IS DISTINCT FROM ns_date;
+----
+0
+
+# A zone named in the text uses that zone, still with Gregorian fields
+query I
+SELECT epoch('2024-07-01 12:00:00 Asia/Tokyo'::TIMESTAMPTZ);
+----
+1719802800.0
+
+query IIIII
+SELECT TRY_CAST('2024-13-01 12:00:00' AS TIMESTAMPTZ), '-infinity'::TIMESTAMPTZ = '-infinity'::TIMESTAMP::TIMESTAMPTZ,
+	'infinity'::TIMESTAMPTZ::TIMESTAMP, '-infinity'::TIMESTAMPTZ::DATE,
+	TRY_CAST('294247-01-10 04:00:54 America/New_York' AS TIMESTAMPTZ);
+----
+NULL	true	infinity	-infinity	NULL
+
+# TIMESTAMP and DATE values carry Gregorian fields in both directions
+query I
+SELECT count(*) FROM ref
+WHERE ts::TIMESTAMPTZ <> tstz
+	OR ts::TIMESTAMP_MS::TIMESTAMPTZ <> ms_tstz
+	OR ts::TIMESTAMP_S::TIMESTAMPTZ <> s_tstz
+	OR tstz::TIMESTAMP <> local_ts
+	OR tstz::TIMESTAMP_MS <> local_ts::TIMESTAMP_MS
+	OR tstz::TIMESTAMP_S <> local_ts::TIMESTAMP_S
+	OR tstz::DATE <> local_date
+	OR ts::DATE::TIMESTAMPTZ <> midnight;
+----
+0
+
+query III
+SELECT TIMESTAMPTZ '2024-07-01 10:00:00+00'::TIMESTAMP, TIMESTAMPTZ '2024-07-01 23:00:00+00'::DATE, DATE '2024-07-01'::TIMESTAMPTZ = TIMESTAMPTZ '2024-06-30 22:00:00+00';
+----
+2024-07-01 12:00:00	2024-07-02	true
+
+# Both occurrences of a repeated local time
+query II
+SELECT TIMESTAMPTZ '2024-10-27 00:30:00+00'::TIMESTAMP, TIMESTAMPTZ '2024-10-27 01:30:00+00'::TIMESTAMP;
+----
+2024-10-27 02:30:00	2024-10-27 02:30:00
+
+# The local value does not need the calendar to represent the instant
+query II
+SELECT TIMESTAMPTZ '100000-01-01 00:00:00+00'::TIMESTAMP, TRY_CAST(TIMESTAMPTZ '100000-01-01 00:00:00+00' AS DATE);
+----
+100000-01-01 01:00:00	100000-01-01
+
+# The lowest instant
+query II
+SELECT make_timestamptz(-9223372036854775806)::TIMESTAMP, make_timestamptz(-9223372036854775806)::DATE;
+----
+290309-12-21 (BC) 20:16:35.224194	290309-12-21 (BC)
+
+# timezone() and AT TIME ZONE convert with Gregorian fields
+query I
+SELECT count(*) FROM ref
+WHERE timezone('Asia/Tokyo', ts) <> tokyo
+	OR (s || ' Asia/Tokyo')::TIMESTAMPTZ <> tokyo_text
+	OR timezone('Asia/Tokyo', tstz) <> tokyo_ts
+	OR tstz AT TIME ZONE 'Asia/Tokyo' <> tokyo_ts;
+----
+0
+
+query I
+SELECT epoch_us(localtimestamp) = epoch_us(now()) + date_part('timezone', now()) * 1000000
+	AND current_date = localtimestamp::DATE AND today() = current_date AND localtime = localtimestamp::TIME;
+----
+true
+
+# The default origin of time_bucket is a Monday whatever the calendar
+query I
+SELECT time_bucket(INTERVAL 7 DAY, TIMESTAMPTZ '2024-07-03 12:00:00+00', 'Europe/Amsterdam') = TIMESTAMPTZ '2024-07-01 00:00:00+02';
+----
+true
+
+# strptime reads %Y as a Gregorian year
+query II
+SELECT strptime('2024-07-01 12:00:00', '%Y-%m-%d %H:%M:%S'), epoch(strptime('2024-07-01 12:00:00 +0200', '%Y-%m-%d %H:%M:%S %z'));
+----
+2024-07-01 12:00:00	1719828000.0
+
+query I
+SELECT epoch(strptime('2024-07-01 12:00:00', '%Y-%m-%d %H:%M:%S')::TIMESTAMPTZ);
+----
+1719828000.0
+
+endloop
+
+# The calendar functions still follow the session calendar
+statement ok
+SET Calendar = 'japanese';
+
+query I
+SELECT date_part(['era', 'year', 'month', 'day'], TIMESTAMPTZ '2024-07-01 12:00:00+02');
+----
+{'era': 236, 'year': 6, 'month': 7, 'day': 1}
+
+query I
+SELECT make_timestamptz(6, 7, 1, 12, 0, 0) = TIMESTAMPTZ '2024-07-01 12:00:00+02';
+----
+true
+
+query I
+SELECT date_trunc('year', TIMESTAMPTZ '2024-07-01 12:00:00+02') = TIMESTAMPTZ '2024-01-01 00:00:00+01';
+----
+true
+
+query I
+SELECT TIMESTAMPTZ '2024-07-01 12:00:00+02'::VARCHAR;
+----
+2024-07-01 12:00:00+02
+
+# The text without an offset prints back as itself
+query I
+SELECT TIMESTAMPTZ '2024-07-01 12:00:00'::VARCHAR;
+----
+2024-07-01 12:00:00+02
+
+query I
+SELECT epoch(strptime('2024-07-01 12:00:00 Europe/Amsterdam', '%Y-%m-%d %H:%M:%S %Z'));
+----
+1719828000.0
+
+statement ok
+SET Calendar = 'buddhist';
+
+query I
+SELECT date_part(['era', 'year', 'month', 'day'], TIMESTAMPTZ '2024-07-01 12:00:00+02');
+----
+{'era': 0, 'year': 2567, 'month': 7, 'day': 1}
+
+query I
+SELECT make_timestamptz(2567, 7, 1, 12, 0, 0) = TIMESTAMPTZ '2024-07-01 12:00:00+02';
+----
+true
+
+statement ok
+SET Calendar = 'islamic';
+
+query I
+SELECT date_part(['era', 'year', 'month', 'day'], TIMESTAMPTZ '2024-07-01 12:00:00+02');
+----
+{'era': 0, 'year': 1445, 'month': 12, 'day': 25}
+
+query I
+SELECT make_timestamptz(1445, 12, 25, 12, 0, 0) = TIMESTAMPTZ '2024-07-01 12:00:00+02';
+----
+true
+
+statement ok
+SET Calendar = 'hebrew';
+
+query I
+SELECT date_part(['era', 'year', 'month', 'day'], TIMESTAMPTZ '2024-07-01 12:00:00+02');
+----
+{'era': 0, 'year': 5784, 'month': 10, 'day': 25}
+
+query I
+SELECT make_timestamptz(5784, 10, 25, 12, 0, 0) = TIMESTAMPTZ '2024-07-01 12:00:00+02';
+----
+true
+
+# The Hebrew year 5785 began on 2024-10-03
+query II
+SELECT date_trunc('year', TIMESTAMPTZ '2024-12-01 12:00:00+01') = TIMESTAMPTZ '2024-10-03 00:00:00+02',
+	date_trunc('year', TIMESTAMPTZ '2024-12-01 12:00:00+01') = make_timestamptz(5785, 1, 1, 0, 0, 0);
+----
+true	true

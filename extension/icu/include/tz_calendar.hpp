@@ -9,6 +9,7 @@
 #pragma once
 
 #include "calendar.hpp"
+#include "grego.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
@@ -41,6 +42,8 @@ using datetime::CAL_WEEK_OF_YEAR;
 using datetime::CAL_YEAR;
 using datetime::CAL_YEAR_WOY;
 using datetime::CAL_ZONE_OFFSET;
+
+using datetime::JULIAN_1970_CE;
 
 using datetime::CAL_MONDAY;
 using datetime::CAL_SUNDAY;

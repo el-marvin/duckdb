@@ -801,10 +801,10 @@ SELECT DATE_PART(['timezone', 'timezone_hour', 'timezone_minute'], '2021-12-22':
 statement ok
 SET Calendar = 'hebrew';
 
-# Year 5872 (2021-2022) was a leap year
+# Year 5872 (2111-2112) is a common year, so month 6 (Adar I) does not occur
 query III
 SELECT year(ts), month(ts), monthname(ts)
-FROM range('5872-01-01'::TIMESTAMPTZ, '5873-01-01'::TIMESTAMPTZ, INTERVAL 1 DAY) tbl(ts)
+FROM range(make_timestamptz(5872, 1, 1, 0, 0, 0), make_timestamptz(5873, 1, 1, 0, 0, 0), INTERVAL 1 DAY) tbl(ts)
 GROUP BY ALL
 ORDER BY ALL;
 ----
