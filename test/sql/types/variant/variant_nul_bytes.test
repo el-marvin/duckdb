@@ -1,0 +1,182 @@
+# name: test/sql/types/variant/variant_nul_bytes.test
+# description: A U+0000 inside a VARIANT object key or string value keeps its bytes and its length
+# group: [variant]
+
+require json
+
+require parquet
+
+# variant_typeof lists the keys of an object, NUL bytes included
+
+query III
+SELECT t::BLOB, length(t), strlen(t) FROM (SELECT variant_typeof(CAST(CAST('{"a\u0000b": 1}' AS JSON) AS VARIANT)) AS t);
+----
+OBJECT(a\x00b)	11	11
+
+query III
+SELECT t::BLOB, length(t), strlen(t) FROM (SELECT variant_typeof(CAST(CAST('{"\u0000ab": 1}' AS JSON) AS VARIANT)) AS t);
+----
+OBJECT(\x00ab)	11	11
+
+query III
+SELECT t::BLOB, length(t), strlen(t) FROM (SELECT variant_typeof(CAST(CAST('{"ab\u0000": 1}' AS JSON) AS VARIANT)) AS t);
+----
+OBJECT(ab\x00)	11	11
+
+query III
+SELECT t::BLOB, length(t), strlen(t) FROM (SELECT variant_typeof(CAST(CAST('{"\u0000": 1}' AS JSON) AS VARIANT)) AS t);
+----
+OBJECT(\x00)	9	9
+
+# keys that differ only after the NUL sort by their bytes
+
+query II
+SELECT t::BLOB, strlen(t) FROM (SELECT variant_typeof(CAST(CAST('{"a\u0000b": 1, "a": 2, "a\u0000": 3}' AS JSON) AS VARIANT)) AS t);
+----
+OBJECT(a, a\x00, a\x00b)	18
+
+# several rows whose type texts differ in length, one of them longer than an inlined string
+
+query III
+SELECT t::BLOB, length(t), strlen(t) FROM (
+	SELECT i, variant_typeof(CAST(CAST(j AS JSON) AS VARIANT)) AS t
+	FROM (VALUES
+		(1, '{"a_rather_long_key\u0000with_a_nul": 1, "b": 2}'),
+		(2, '{"x\u0000": 1}'),
+		(3, '[1, 2]'),
+		(4, NULL),
+		(5, '{"\u0000\u0000": "\u0000"}')
+	) v(i, j)
+) ORDER BY i;
+----
+OBJECT(a_rather_long_key\x00with_a_nul, b)	39	39
+OBJECT(x\x00)	10	10
+ARRAY(2)	8	8
+VARIANT_NULL	12	12
+OBJECT(\x00\x00)	10	10
+
+# keys from variant_group_object
+
+query II
+SELECT t::BLOB, strlen(t) FROM (SELECT variant_typeof(variant_group_object('k' || chr(0) || 'z', 1::VARIANT)) AS t);
+----
+OBJECT(k\x00z)	11
+
+statement ok
+CREATE TABLE nul_bytes AS SELECT CAST(CAST('{"a\u0000b": "x\u0000y", "\u0000c": ["p\u0000q", {"k\u0000": "\u0000v"}]}' AS JSON) AS VARIANT) AS v;
+
+query II
+SELECT variant_typeof(v)::BLOB, strlen(variant_typeof(v)) FROM nul_bytes;
+----
+OBJECT(\x00c, a\x00b)	15
+
+# a nested object reached through a key and an array element that both hold NUL
+
+query II
+SELECT t::BLOB, strlen(t) FROM (SELECT variant_typeof(variant_extract(variant_extract(v, chr(0) || 'c'), 2)) AS t FROM nul_bytes);
+----
+OBJECT(k\x00)	10
+
+# variant_extract finds a key by all of its bytes and returns the value whole
+
+query II
+SELECT s::BLOB, strlen(s) FROM (SELECT variant_extract(v, 'a' || chr(0) || 'b')::VARCHAR AS s FROM nul_bytes);
+----
+x\x00y	3
+
+query II
+SELECT variant_extract(v, 'a') IS NULL, variant_extract(v, 'a' || chr(0)) IS NULL FROM nul_bytes;
+----
+true	true
+
+query II
+SELECT s::BLOB, strlen(s) FROM (SELECT variant_extract(variant_extract(v, chr(0) || 'c'), 1)::VARCHAR AS s FROM nul_bytes);
+----
+p\x00q	3
+
+query II
+SELECT s::BLOB, strlen(s) FROM (SELECT variant_extract(variant_extract(variant_extract(v, chr(0) || 'c'), 2), 'k' || chr(0))::VARCHAR AS s FROM nul_bytes);
+----
+\x00v	2
+
+query II
+SELECT s::BLOB, strlen(s) FROM (SELECT variant_extract_string(v, 'a' || chr(0) || 'b') AS s FROM nul_bytes);
+----
+x\x00y	3
+
+query II
+SELECT variant_exists(v, 'a' || chr(0) || 'b'), variant_exists(v, 'a') FROM nul_bytes;
+----
+true	false
+
+query IIIII
+SELECT len(k), k[1]::BLOB, strlen(k[1]), k[2]::BLOB, strlen(k[2]) FROM (SELECT variant_keys(v) AS k FROM nul_bytes);
+----
+2	\x00c	2	a\x00b	3
+
+# the JSON rendering escapes NUL and casts back to the same VARIANT
+
+query II
+SELECT v::JSON::VARCHAR, strlen(v::JSON::VARCHAR) FROM nul_bytes;
+----
+{"\u0000c":["p\u0000q",{"k\u0000":"\u0000v"}],"a\u0000b":"x\u0000y"}	68
+
+query III
+SELECT v::JSON::VARIANT = v, variant_typeof(v::JSON::VARIANT)::BLOB, v::JSON::VARIANT::JSON = v::JSON FROM nul_bytes;
+----
+true	OBJECT(\x00c, a\x00b)	true
+
+# the VARCHAR rendering keeps every byte
+
+query II
+SELECT s::BLOB, strlen(s) FROM (SELECT v::VARCHAR AS s FROM nul_bytes);
+----
+{\x27\x00c\x27: [p\x00q, {\x27k\x00\x27: \x00v}], \x27a\x00b\x27: x\x00y}	37
+
+# a JSON file holding such keys, read as a STRUCT and as JSON objects
+
+query III
+SELECT variant_typeof(s::VARIANT)::BLOB, s::VARIANT::JSON, s::VARIANT = v FROM read_json('data/json/nul_bytes_in_key.json', records=false) t(s), nul_bytes;
+----
+OBJECT(\x00c, a\x00b)	{"\u0000c":["p\u0000q",{"k\u0000":"\u0000v"}],"a\u0000b":"x\u0000y"}	true
+
+query III
+SELECT variant_typeof(json::VARIANT)::BLOB, strlen(variant_typeof(json::VARIANT)), json::VARIANT = v FROM read_json_objects('data/json/nul_bytes_in_key.json'), nul_bytes;
+----
+OBJECT(\x00c, a\x00b)	15	true
+
+query II
+SELECT s::BLOB, strlen(s) FROM (SELECT variant_extract(json::VARIANT, 'a' || chr(0) || 'b')::VARCHAR AS s FROM read_json_objects('data/json/nul_bytes_in_key.json'));
+----
+x\x00y	3
+
+# a checkpointed column stores the keys as names of shredded STRUCT fields
+
+statement ok
+SET variant_minimum_shredding_size = 0;
+
+statement ok
+CREATE TABLE shredded AS SELECT i AS id, CAST(CAST('{"a\u0000b": ' || i || ', "\u0000c": "x\u0000' || i || '"}' AS JSON) AS VARIANT) AS v FROM range(2000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query IIIII
+SELECT count(*), count(DISTINCT variant_typeof(v)), min(variant_typeof(v))::BLOB, sum(variant_extract(v, 'a' || chr(0) || 'b')::BIGINT), sum(strlen(variant_extract(v, chr(0) || 'c')::VARCHAR)) FROM shredded;
+----
+2000	1	OBJECT(\x00c, a\x00b)	1999000	10890
+
+query I
+SELECT v::JSON FROM shredded WHERE id = 7;
+----
+{"\u0000c":"x\u00007","a\u0000b":7}
+
+# and so does a Parquet file
+
+statement ok
+COPY shredded TO '{TEST_DIR}/variant_nul_bytes.parquet';
+
+query IIII
+SELECT count(*), min(variant_typeof(v))::BLOB, sum(variant_extract(v, 'a' || chr(0) || 'b')::BIGINT), sum(strlen(variant_extract(v, chr(0) || 'c')::VARCHAR)) FROM '{TEST_DIR}/variant_nul_bytes.parquet';
+----
+2000	OBJECT(\x00c, a\x00b)	1999000	10890
