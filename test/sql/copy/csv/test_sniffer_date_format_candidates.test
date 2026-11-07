@@ -1,0 +1,386 @@
+# name: test/sql/copy/csv/test_sniffer_date_format_candidates.test
+# description: A sniffed date or timestamp format reads every value the sniffer sampled for its column
+# group: [csv]
+
+statement ok
+SET threads = 4;
+
+# the only format that reads '01-13-24' does not read '99-01-01', in either order
+
+statement ok
+COPY (SELECT * FROM (VALUES ('99-01-01'), ('01-13-24')) t(d)) TO '{TEST_DIR}/later_candidate.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/later_candidate.csv');
+----
+VARCHAR	99-01-01
+VARCHAR	01-13-24
+
+query II
+SELECT Columns, DateFormat FROM sniff_csv('{TEST_DIR}/later_candidate.csv');
+----
+[{'name': d, 'type': VARCHAR}]	NULL
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-13-24'), ('99-01-01')) t(d)) TO '{TEST_DIR}/later_candidate_reversed.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/later_candidate_reversed.csv');
+----
+VARCHAR	01-13-24
+VARCHAR	99-01-01
+
+statement ok
+COPY (SELECT * FROM (VALUES ('99-01-01'), ('24-02-30')) t(d)) TO '{TEST_DIR}/later_candidate_day_first.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/later_candidate_day_first.csv');
+----
+VARCHAR	99-01-01
+VARCHAR	24-02-30
+
+# a format reads a value only when the value converts under it: '13-02-30' is not February 30 under %y-%m-%d
+
+statement ok
+COPY (SELECT '13-02-30' AS d) TO '{TEST_DIR}/invalid_under_preferred.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/invalid_under_preferred.csv');
+----
+DATE	2030-02-13
+
+# NULLs between the values do not count
+
+statement ok
+COPY (SELECT * FROM (VALUES ('99-01-01'), (NULL), ('01-13-24'), (NULL)) t(d)) TO '{TEST_DIR}/later_candidate_nulls.csv' (HEADER);
+
+query I
+SELECT typeof(d) FROM read_csv('{TEST_DIR}/later_candidate_nulls.csv') LIMIT 1;
+----
+VARCHAR
+
+# a later candidate that reads every value is still found, in either order
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-24'), ('01-13-24'), ('01-02-24')) t(d)) TO '{TEST_DIR}/narrow.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/narrow.csv');
+----
+DATE	2024-01-02
+DATE	2024-01-13
+DATE	2024-01-02
+
+query I
+SELECT DateFormat FROM sniff_csv('{TEST_DIR}/narrow.csv');
+----
+%m-%d-%y
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-13-24'), ('01-02-24')) t(d)) TO '{TEST_DIR}/narrow_reversed.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/narrow_reversed.csv');
+----
+DATE	2024-01-13
+DATE	2024-01-02
+
+# with declared types the sniffed format is the one the scan uses
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/narrow.csv', columns = {'d': 'DATE'});
+----
+2024-01-02
+2024-01-13
+2024-01-02
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/narrow.csv', types = {'d': 'DATE'});
+----
+2024-01-02
+2024-01-13
+2024-01-02
+
+# a column mixing two and four digit years has no format that reads both
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-24'), ('13-02-2024')) t(d)) TO '{TEST_DIR}/mixed_width.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/mixed_width.csv');
+----
+VARCHAR	01-02-24
+VARCHAR	13-02-2024
+
+statement ok
+COPY (SELECT * FROM (VALUES ('13-02-2024'), ('01-02-24')) t(d)) TO '{TEST_DIR}/mixed_width_reversed.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/mixed_width_reversed.csv');
+----
+VARCHAR	13-02-2024
+VARCHAR	01-02-24
+
+# timestamps follow the same rule
+
+statement ok
+COPY (SELECT * FROM (VALUES ('99-01-01 10:00:00'), ('01-13-24 10:00:00 PM')) t(d)) TO '{TEST_DIR}/later_candidate_ts.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/later_candidate_ts.csv');
+----
+VARCHAR	99-01-01 10:00:00
+VARCHAR	01-13-24 10:00:00 PM
+
+statement ok
+COPY (SELECT * FROM (VALUES ('99-01-01 10:00:00'), ('13-01-2024 10:00:00')) t(d)) TO '{TEST_DIR}/later_candidate_ts_four.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/later_candidate_ts_four.csv');
+----
+VARCHAR	99-01-01 10:00:00
+VARCHAR	13-01-2024 10:00:00
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-24 10:00:00'), ('13-02-30 11:00:00')) t(d)) TO '{TEST_DIR}/narrow_ts.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/narrow_ts.csv');
+----
+TIMESTAMP	2024-02-01 10:00:00
+TIMESTAMP	2030-02-13 11:00:00
+
+query I
+SELECT TimestampFormat FROM sniff_csv('{TEST_DIR}/narrow_ts.csv');
+----
+%d-%m-%y %H:%M:%S
+
+# the plain cast reads ISO 8601 text, and a format that a later value needs must read the earlier values too
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-02-13'), ('13/02/2024')) t(d)) TO '{TEST_DIR}/iso_then_slash.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/iso_then_slash.csv');
+----
+VARCHAR	2024-02-13
+VARCHAR	13/02/2024
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-02-13'), ('13-02-2024')) t(d)) TO '{TEST_DIR}/iso_then_dash.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/iso_then_dash.csv');
+----
+VARCHAR	2024-02-13
+VARCHAR	13-02-2024
+
+statement ok
+COPY (SELECT * FROM (VALUES ('13-02-2024'), ('2024-02-13')) t(d)) TO '{TEST_DIR}/dash_then_iso.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/dash_then_iso.csv');
+----
+VARCHAR	13-02-2024
+VARCHAR	2024-02-13
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-02-13 10:00:00'), ('13-02-2024 10:00:00')) t(d)) TO '{TEST_DIR}/iso_then_dash_ts.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/iso_then_dash_ts.csv');
+----
+VARCHAR	2024-02-13 10:00:00
+VARCHAR	13-02-2024 10:00:00
+
+# a value the plain cast reads before any value looks like a date with separators counts too
+
+statement ok
+COPY (SELECT * FROM (VALUES ('-2024-02-13'), ('13-02-2024')) t(d)) TO '{TEST_DIR}/negative_year_then_dash.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/negative_year_then_dash.csv');
+----
+VARCHAR	-2024-02-13
+VARCHAR	13-02-2024
+
+# special values are read by every format, so they tell no format apart
+
+statement ok
+COPY (SELECT * FROM (VALUES ('infinity'), ('13-02-2024'), ('epoch')) t(d)) TO '{TEST_DIR}/special_then_dash.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/special_then_dash.csv');
+----
+DATE	infinity
+DATE	2024-02-13
+DATE	1970-01-01
+
+statement ok
+COPY (SELECT * FROM (VALUES ('infinity'), (NULL), ('2024-02-13'), ('epoch')) t(d)) TO '{TEST_DIR}/special_then_iso.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/special_then_iso.csv');
+----
+DATE	infinity
+DATE	NULL
+DATE	2024-02-13
+DATE	1970-01-01
+
+# once the formats are set up, a value narrows them also when it does not start like a numeric date with one separator,
+# such as fields separated by runs of spaces, which the formats read
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01 02 24'), ('99  01  01'), ('01 13 24')) t(d)) TO '{TEST_DIR}/space_runs.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/space_runs.csv');
+----
+VARCHAR	01 02 24
+VARCHAR	99  01  01
+VARCHAR	01 13 24
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01 02 24 10:00:00'), ('99  01  01 10:00:00'), ('13 02 30 10:00:00')) t(d)) TO '{TEST_DIR}/space_runs_ts.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/space_runs_ts.csv');
+----
+VARCHAR	01 02 24 10:00:00
+VARCHAR	99  01  01 10:00:00
+VARCHAR	13 02 30 10:00:00
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01 02 24'), ('01  13  24')) t(d)) TO '{TEST_DIR}/space_runs_narrow.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/space_runs_narrow.csv');
+----
+DATE	2024-01-02
+DATE	2024-01-13
+
+# a column no candidate format reads falls back to the plain casts
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-02-13'), ('2024-02-14')) t(d)) TO '{TEST_DIR}/iso_only.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/iso_only.csv');
+----
+DATE	2024-02-13
+DATE	2024-02-14
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-02-13 10:00:00'), ('2024-02-14 11:00:00')) t(d)) TO '{TEST_DIR}/iso_ts_only.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/iso_ts_only.csv');
+----
+TIMESTAMP	2024-02-13 10:00:00
+TIMESTAMP	2024-02-14 11:00:00
+
+statement ok
+COPY (SELECT * FROM (VALUES ('31-02-2024'), ('13-13-2024')) t(d)) TO '{TEST_DIR}/no_candidate.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/no_candidate.csv');
+----
+VARCHAR	31-02-2024
+VARCHAR	13-13-2024
+
+# a column whose values no format reads leaves the next column free to set up formats for its own layout
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-02-13 10:00:00', '13/02/2024')) t(a, b)) TO '{TEST_DIR}/timestamp_then_date.csv' (HEADER);
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('{TEST_DIR}/timestamp_then_date.csv');
+----
+TIMESTAMP	2024-02-13 10:00:00	DATE	2024-02-13
+
+# a column whose dates narrowed the formats keeps them narrowed for the next columns, also when a stray value makes it
+# VARCHAR, because a declared type reads it with that format
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-13-24'), ('N/A'), ('01-14-24')) t(d)) TO '{TEST_DIR}/stray_value.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/stray_value.csv');
+----
+VARCHAR	01-13-24
+VARCHAR	N/A
+VARCHAR	01-14-24
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/stray_value.csv', types = {'d': 'DATE'}, ignore_errors = true);
+----
+2024-01-13
+2024-01-14
+
+statement error
+SELECT d FROM read_csv('{TEST_DIR}/stray_value.csv', types = {'d': 'DATE'});
+----
+Could not convert string "N/A" to 'DATE'
+
+statement ok
+COPY (SELECT * FROM (VALUES ('99-01-01', '01-13-24'), ('abc', '02-14-24')) t(a, b)) TO '{TEST_DIR}/two_columns.csv' (HEADER);
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('{TEST_DIR}/two_columns.csv');
+----
+VARCHAR	99-01-01	VARCHAR	01-13-24
+VARCHAR	abc	VARCHAR	02-14-24
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-13-24', '01-02-24', '01-13-24'), ('abc', '03-04-24', '02-14-24')) t(a, b, c)) TO '{TEST_DIR}/three_columns.csv' (HEADER);
+
+query IIIIII
+SELECT typeof(a), a, typeof(b), b, typeof(c), c FROM read_csv('{TEST_DIR}/three_columns.csv');
+----
+VARCHAR	01-13-24	DATE	2024-01-02	DATE	2024-01-13
+VARCHAR	abc	DATE	2024-03-04	DATE	2024-02-14
+
+# the file has one date format, chosen by the first date column; a later column the chosen format does not read is
+# VARCHAR
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-24', '01-13-24')) t(a, b)) TO '{TEST_DIR}/shared_format.csv' (HEADER);
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('{TEST_DIR}/shared_format.csv');
+----
+DATE	2001-02-24	VARCHAR	01-13-24
+
+# the type refinement over the rest of the sample tests the chosen format only and drops the type on a miss, so a value
+# past the first 2048 rows of the file does not narrow the formats
+
+statement ok
+COPY (SELECT CASE WHEN i < 2046 THEN '01-02-24' ELSE '01-13-24' END AS d FROM range(2047) t(i)) TO '{TEST_DIR}/narrow_in_first_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/narrow_in_first_chunk.csv') GROUP BY ALL;
+----
+DATE	2047
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '01-02-24' ELSE '01-13-24' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/narrow_in_second_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/narrow_in_second_chunk.csv') GROUP BY ALL;
+----
+VARCHAR	2048
+
+# a value past the sample is not sampled: the scan fails on it and suggests a larger sample
+
+statement ok
+COPY (SELECT CASE WHEN i < 30000 THEN '99-01-01' ELSE '01-13-24' END AS d FROM range(30001) t(i)) TO '{TEST_DIR}/past_sample.csv' (HEADER);
+
+statement error
+SELECT max(d) FROM read_csv('{TEST_DIR}/past_sample.csv');
+----
+sample_size=-1
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/past_sample.csv', sample_size = -1) GROUP BY ALL;
+----
+VARCHAR	30001

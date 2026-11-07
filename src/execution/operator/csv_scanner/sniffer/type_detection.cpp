@@ -7,6 +7,7 @@
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/types/bignum.hpp"
 #include "duckdb/common/types/time.hpp"
+#include "duckdb/common/vector/vector_iterator.hpp"
 #include "duckdb/execution/operator/csv_scanner/sniffer/csv_sniffer.hpp"
 
 namespace duckdb {
@@ -317,34 +318,66 @@ bool CSVSniffer::CanYouCastIt(ClientContext &context, const string_t value, cons
 	}
 }
 
-void CSVSniffer::InitializeDateAndTimeStampDetection(CSVStateMachine &candidate, const string &separator,
-                                                     const LogicalType &sql_type) {
+void CSVSniffer::InitializeDateAndTimeStampDetection(const string &separator, const LogicalType &sql_type) {
 	auto &format_candidate = format_candidates[sql_type.id()];
-	if (!format_candidate.initialized) {
-		format_candidate.initialized = true;
-		// if user set a format, we add that as well
-		auto user_format = options.dialect_options.date_format.find(sql_type.id());
-		if (user_format->second.IsSetByUser()) {
-			format_candidate.format.emplace_back(user_format->second.GetValue().format_specifier);
-		} else {
-			auto entry = format_template_candidates.find(sql_type.id());
-			if (entry != format_template_candidates.end()) {
-				const auto &format_template_list = entry->second;
-				for (const auto &t : format_template_list) {
-					const auto format_string = GenerateDateFormat(separator, t);
-					// don't parse ISO 8601
-					if (format_string.find("%Y-%m-%d") == string::npos) {
-						format_candidate.format.emplace_back(format_string);
-					}
-				}
-			}
-		}
-		// order by preference
-		original_format_candidates = format_candidates;
+	format_candidate.initialized = true;
+	auto entry = format_template_candidates.find(sql_type.id());
+	if (entry == format_template_candidates.end()) {
+		return;
 	}
-	//	initialise the first candidate
-	//	all formats are constructed to be valid
-	SetDateFormat(candidate, format_candidate.format.back(), sql_type.id());
+	for (const auto &t : entry->second) {
+		const auto format_string = GenerateDateFormat(separator, t);
+		// ISO 8601 is left to the plain cast
+		if (format_string.find("%Y-%m-%d") == string::npos) {
+			StrpTimeFormat format;
+			StrTimeFormat::ParseFormatSpecifier(format_string, format);
+			format_candidate.format.push_back(std::move(format));
+		}
+	}
+}
+
+static bool FormatReadsValue(const StrpTimeFormat &format, const string_t &value, const LogicalTypeId sql_type) {
+	StrpTimeFormat::ParseResult result;
+	if (!format.Parse(value, result, true)) {
+		return false;
+	}
+	if (sql_type == LogicalTypeId::DATE) {
+		date_t date;
+		return result.TryToDate(date);
+	}
+	timestamp_t timestamp;
+	return result.TryToTimestamp(timestamp);
+}
+
+//! Returns whether the list changed
+static bool NarrowFormatCandidates(DateTimestampSniffing &format_candidate, const string_t &value,
+                                   const LogicalTypeId sql_type) {
+	auto &formats = format_candidate.format;
+	if (formats.empty()) {
+		return false;
+	}
+	// A special value such as 'infinity' parses under every format, so it tells no format apart
+	StrpTimeFormat::ParseResult special_check;
+	if (formats.back().Parse(value, special_check, true) && special_check.is_special) {
+		return false;
+	}
+	const auto reads_value = [&](const StrpTimeFormat &format) {
+		return FormatReadsValue(format, value, sql_type);
+	};
+	if (std::none_of(formats.begin(), formats.end(), reads_value)) {
+		if (format_candidate.had_match) {
+			return false;
+		}
+		// No candidate read the values of the column so far, so only the plain cast can read the column
+		formats.clear();
+		return true;
+	}
+	format_candidate.had_match = true;
+	const auto old_size = formats.size();
+	formats.erase(std::remove_if(formats.begin(), formats.end(),
+	                             [&](const StrpTimeFormat &format) { return !reads_value(format); }),
+	              formats.end());
+	return formats.size() != old_size;
 }
 
 bool ValidSeparator(const string &separator) {
@@ -352,49 +385,37 @@ bool ValidSeparator(const string &separator) {
 	return separator == "-" || separator == "." || separator == "/" || separator == " ";
 }
 void CSVSniffer::DetectDateAndTimeStampFormats(CSVStateMachine &candidate, const LogicalType &sql_type,
-                                               const string &separator, const string_t &dummy_val) {
-	if (!ValidSeparator(separator)) {
+                                               const VectorIterator<string_t> &values, idx_t first_row, idx_t row_idx) {
+	if (options.dialect_options.date_format.find(sql_type.id())->second.IsSetByUser()) {
 		return;
 	}
-	// If it is the first time running date/timestamp detection we must initialize the format variables
-	InitializeDateAndTimeStampDetection(candidate, separator, sql_type);
-	// generate date format candidates the first time through
-	auto &type_format_candidates = format_candidates[sql_type.id()].format;
-	// check all formats and keep the first one that works
-	StrpTimeFormat::ParseResult result;
-	auto save_format_candidates = type_format_candidates;
-	const bool had_format_candidates = !save_format_candidates.empty();
-	const bool initial_format_candidates =
-	    save_format_candidates.size() == original_format_candidates.at(sql_type.id()).format.size();
-	const bool is_set_by_user = options.dialect_options.date_format.find(sql_type.id())->second.IsSetByUser();
-	while (!type_format_candidates.empty() && !is_set_by_user) {
-		//	avoid using exceptions for flow control...
-		auto &current_format = candidate.dialect_options.date_format[sql_type.id()].GetValue();
-		if (current_format.Parse(dummy_val, result, true)) {
-			format_candidates[sql_type.id()].had_match = true;
-			break;
+	const auto &value = values[row_idx].GetValue();
+	auto &format_candidate = format_candidates[sql_type.id()];
+	bool changed = false;
+	if (!format_candidate.initialized) {
+		// The templates take their separator from the first value that starts like a numeric date
+		string separator;
+		if (!StartsWithNumericDate(separator, value) || !ValidSeparator(separator)) {
+			return;
 		}
-		//	doesn't work - move to the next one
-		type_format_candidates.pop_back();
-		if (!type_format_candidates.empty()) {
-			SetDateFormat(candidate, type_format_candidates.back(), sql_type.id());
+		InitializeDateAndTimeStampDetection(separator, sql_type);
+		changed = true;
+		// The plain cast read the earlier values of the column, and a format must read them too
+		for (idx_t earlier_row = first_row; earlier_row < row_idx; earlier_row++) {
+			const auto earlier_value = values[earlier_row];
+			if (earlier_value.IsValid()) {
+				NarrowFormatCandidates(format_candidate, earlier_value.GetValue(), sql_type.id());
+			}
 		}
 	}
-	//	if none match, then this is not a value of type sql_type,
-	if (type_format_candidates.empty()) {
-		//	so restore the candidates that did work.
-		//	or throw them out if they were generated by this value.
-		if (had_format_candidates) {
-			if (initial_format_candidates && !format_candidates[sql_type.id()].had_match) {
-				// we reset the whole thing because we tried to sniff the wrong type.
-				format_candidates[sql_type.id()].initialized = false;
-				format_candidates[sql_type.id()].format.clear();
-				SetDateFormat(candidate, "", sql_type.id());
-				return;
-			}
-			type_format_candidates.swap(save_format_candidates);
-			SetDateFormat(candidate, type_format_candidates.back(), sql_type.id());
-		}
+	changed = NarrowFormatCandidates(format_candidate, value, sql_type.id()) || changed;
+	if (!changed) {
+		return;
+	}
+	if (format_candidate.format.empty()) {
+		SetDateFormat(candidate, "", sql_type.id());
+	} else {
+		candidate.dialect_options.date_format[sql_type.id()].Set(format_candidate.format.back(), false);
 	}
 }
 
@@ -410,6 +431,9 @@ void CSVSniffer::SniffTypes(DataChunk &data_chunk, CSVStateMachine &state_machin
 		auto vector_data = FlatVector::GetData<string_t>(cur_vector);
 		auto null_mask = FlatVector::ValidityMutable(cur_vector);
 		auto &col_type_candidates = info_sql_types_candidates[col_idx];
+		const auto column_values = cur_vector.Values<string_t>();
+		auto column_start_format_candidates = format_candidates;
+		auto column_start_date_formats = state_machine.dialect_options.date_format;
 		for (idx_t row_idx = start_idx_detection; row_idx < chunk_size; row_idx++) {
 			// col_type_candidates can't be empty since anything in a CSV file should at least be a string
 			// and we validate utf-8 compatibility when creating the type
@@ -418,15 +442,11 @@ void CSVSniffer::SniffTypes(DataChunk &data_chunk, CSVStateMachine &state_machin
 			// try cast from string to sql_type
 			while (col_type_candidates.size() > 1) {
 				const auto &sql_type = col_type_candidates.back();
-				// try formatting for date types if the user did not specify one, and it starts with numeric
-				// values.
-				string separator;
-				// If Value is not Null, Has a numeric date format, and the current investigated candidate is
-				// either a timestamp or a date
-				if (null_mask.RowIsValid(row_idx) && StartsWithNumericDate(separator, vector_data[row_idx]) &&
+				// If Value is not Null and the current investigated candidate is either a timestamp or a date
+				if (null_mask.RowIsValid(row_idx) &&
 				    ((col_type_candidates.back().id() == LogicalTypeId::TIMESTAMP && !has_type.timestamp) ||
 				     (col_type_candidates.back().id() == LogicalTypeId::DATE && !has_type.date))) {
-					DetectDateAndTimeStampFormats(state_machine, sql_type, separator, vector_data[row_idx]);
+					DetectDateAndTimeStampFormats(state_machine, sql_type, column_values, start_idx_detection, row_idx);
 				}
 				// try cast from string to sql_type
 				if (sql_type == LogicalType::VARCHAR) {
@@ -453,6 +473,13 @@ void CSVSniffer::SniffTypes(DataChunk &data_chunk, CSVStateMachine &state_machin
 					break;
 				}
 				col_type_candidates.pop_back();
+			}
+		}
+		// A column whose values no format read leaves the next column free to set up formats for its own layout
+		for (const auto type : {LogicalTypeId::DATE, LogicalTypeId::TIMESTAMP}) {
+			if (col_type_candidates.back().id() != type && !format_candidates[type].had_match) {
+				format_candidates[type] = column_start_format_candidates[type];
+				state_machine.dialect_options.date_format[type] = column_start_date_formats[type];
 			}
 		}
 		if (col_type_candidates.back().id() == LogicalTypeId::DATE) {
@@ -493,6 +520,7 @@ void CSVSniffer::DetectTypes() {
 
 		// Reset candidate for parsing
 		auto candidate = candidate_cc->UpgradeToStringValueScanner();
+		format_candidates.clear();
 		SetUserDefinedDateTimeFormat(*candidate->state_machine);
 		// Parse chunk and read csv with info-candidate
 		auto &data_chunk = candidate->ParseChunk().ToChunk();
