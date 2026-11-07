@@ -941,3 +941,33 @@ SELECT id FROM copy_row_log ORDER BY id;
 1
 2
 3
+
+# An aliased INSERT target fires the row trigger once per row
+statement ok
+CREATE TABLE alias_row_target (id INTEGER, val VARCHAR);
+
+statement ok
+CREATE TABLE alias_row_log (id INTEGER, val VARCHAR);
+
+statement ok
+CREATE TRIGGER alias_row_trg AFTER INSERT ON alias_row_target FOR EACH ROW
+    INSERT INTO alias_row_log VALUES (NEW.id, NEW.val);
+
+statement ok
+INSERT INTO alias_row_target AS x VALUES (1, 'a'), (2, 'b');
+
+query II
+SELECT id, val FROM alias_row_log ORDER BY id;
+----
+1	a
+2	b
+
+statement ok
+INSERT INTO alias_row_target AS excluded VALUES (3, 'c');
+
+query II
+SELECT id, val FROM alias_row_log ORDER BY id;
+----
+1	a
+2	b
+3	c
