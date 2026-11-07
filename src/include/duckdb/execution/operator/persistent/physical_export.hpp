@@ -15,6 +15,7 @@
 #include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/parser/parsed_data/exported_table_data.hpp"
 #include "duckdb/catalog/catalog_entry_map.hpp"
+#include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 
 namespace duckdb {
@@ -58,6 +59,9 @@ public:
 	static void ExtractEntries(ClientContext &context, vector<reference<SchemaCatalogEntry>> &schemas,
 	                           ExportEntries &result);
 	static catalog_entry_vector_t GetNaiveExportOrder(ClientContext &context, Catalog &catalog);
+	//! The triggers of the tables in the order they can be recreated in
+	static catalog_entry_vector_t GetTriggerExportOrder(CatalogTransaction transaction,
+	                                                    const vector<reference<TableCatalogEntry>> &tables);
 
 public:
 	// Sink interface

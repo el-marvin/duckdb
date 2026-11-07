@@ -690,7 +690,7 @@ BoundStatement Binder::BindNode(InsertQueryNode &node) {
 	result.names = {"Count"};
 	result.types = {LogicalType::BIGINT};
 
-	node.qualified_name = BindTableName(node.qualified_name);
+	node.qualified_name = BindTableName(entry_retriever, node.qualified_name);
 	EntryLookupInfo table_lookup(CatalogType::TABLE_ENTRY, node.qualified_name);
 	auto &table_entry = *entry_retriever.GetEntry(table_lookup, OnEntryNotFound::THROW_EXCEPTION);
 	if (table_entry.type != CatalogType::TABLE_ENTRY) {
