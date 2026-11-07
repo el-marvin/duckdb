@@ -43,8 +43,13 @@ unique_ptr<QueryNode> Binder::BindTableMacro(FunctionExpression &function, Table
 	vector<identifier_set_t> lambda_params;
 
 	auto node = macro_def.Cast<TableMacroFunction>().query_node->Copy();
+	vector<reference<unique_ptr<ParsedExpression>>> body;
 	ParsedExpressionIterator::EnumerateQueryNodeChildren(
-	    *node, [&](unique_ptr<ParsedExpression> &child) { eb.ReplaceMacroParameters(child, lambda_params); });
+	    *node, [&](unique_ptr<ParsedExpression> &child) { body.push_back(child); });
+	ExpressionBinder::RenameLambdaParametersCapturingArguments(body, *this, *new_macro_binding, nullptr);
+	for (auto &child : body) {
+		eb.ReplaceMacroParameters(child.get(), lambda_params);
+	}
 
 	return node;
 }
