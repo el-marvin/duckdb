@@ -34,9 +34,6 @@ string CreateTriggerInfo::ToString() const {
 	if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 		ss << "IF NOT EXISTS ";
 	}
-	if (!IsInvalidSchema(GetQualifiedName().Schema())) {
-		ss << SQLIdentifier(GetQualifiedName().Schema()) << ".";
-	}
 	ss << SQLIdentifier(GetTriggerName());
 	ss << " ";
 	ss << EnumUtil::ToString(timing);
@@ -52,7 +49,12 @@ string CreateTriggerInfo::ToString() const {
 		}
 	}
 	ss << " ON ";
-	ss << base_table->ToString();
+	if (IsInvalidSchema(GetQualifiedName().Schema())) {
+		ss << base_table->ToString();
+	} else {
+		// base_table holds the name as written, which may have resolved through the search path
+		ss << GetQualifiedName().WithName(base_table->Table()).ToString(QualifiedNameToStringMode::HIDE_DEFAULT_SCHEMA);
+	}
 	if (!referencing_new_table.empty() || !referencing_old_table.empty()) {
 		ss << " REFERENCING";
 		if (!referencing_new_table.empty()) {

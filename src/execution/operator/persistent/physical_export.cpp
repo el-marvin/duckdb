@@ -47,6 +47,22 @@ static void WriteCatalogEntries(stringstream &ss, catalog_entry_vector_t &entrie
 	ss << '\n';
 }
 
+static void WriteTriggers(CatalogTransaction transaction, stringstream &ss, BoundExportData &exported_tables) {
+	catalog_entry_vector_t triggers;
+	for (auto &exported_table : exported_tables.data) {
+		exported_table.entry.ScanTriggers(transaction, [&](CatalogEntry &trigger) { triggers.push_back(trigger); });
+	}
+	// binding a trigger depends on the triggers that already exist, so they are recreated in creation order
+	sort(triggers.begin(), triggers.end(), [](const reference<CatalogEntry> &lhs, const reference<CatalogEntry> &rhs) {
+		return lhs.get().oid < rhs.get().oid;
+	});
+	for (auto &trigger : triggers) {
+		auto create_info = trigger.get().GetInfo();
+		create_info->StripCatalogQualification();
+		ss << create_info->ToString() << '\n';
+	}
+}
+
 static void WriteStringStreamToFile(FileSystem &fs, stringstream &ss, const string &path) {
 	auto ss_string = ss.str();
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW |
@@ -239,6 +255,8 @@ SourceResultType PhysicalExport::GetDataInternal(ExecutionContext &context, Data
 		auto exported_table_info = exported_tables->data[i].table_data;
 		WriteCopyStatement(fs, load_ss, *info, exported_table_info);
 	}
+	// COPY FROM fires triggers, so they are created after the data is loaded
+	WriteTriggers(catalog.GetCatalogTransaction(ccontext), load_ss, *exported_tables);
 	WriteStringStreamToFile(fs, load_ss, fs.JoinPath(info->file_path, "load.sql"));
 	state.finished = true;
 

@@ -11,6 +11,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/export_statement.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
@@ -172,11 +173,17 @@ static string PragmaImportDatabase(ClientContext &context, const FunctionParamet
 		if (file == "load.sql") {
 			auto parser = Parser::GetBuiltinParser();
 			parser.ParseQuery(query);
-			auto copy_statements = std::move(parser.statements);
+			auto load_statements = std::move(parser.statements);
 			query.clear();
-			for (auto &statement_p : copy_statements) {
+			for (auto &statement_p : load_statements) {
+				if (statement_p->type == StatementType::CREATE_STATEMENT &&
+				    statement_p->Cast<CreateStatement>().info->type == CatalogType::TRIGGER_ENTRY) {
+					query += statement_p->ToString();
+					continue;
+				}
 				if (statement_p->type != StatementType::COPY_STATEMENT) {
-					throw InvalidInputException("IMPORT DATABASE: load.sql may only contain COPY statements, found: %s",
+					throw InvalidInputException("IMPORT DATABASE: load.sql may only contain COPY statements and CREATE "
+					                            "TRIGGER statements, found: %s",
 					                            statement_p->ToString());
 				}
 				auto &statement = statement_p->Cast<CopyStatement>();
