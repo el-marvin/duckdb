@@ -1,11 +1,15 @@
 #include "core_functions/aggregate/algebraic_functions.hpp"
 #include "core_functions/aggregate/sum_helpers.hpp"
+#include "duckdb/common/bit_utils.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/likely.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/planner/expression.hpp"
+
+#include <cmath>
 
 namespace duckdb {
 
@@ -54,10 +58,10 @@ struct KahanAvgState {
 };
 
 struct AverageDecimalBindData : public FunctionData {
-	explicit AverageDecimalBindData(double scale) : scale(scale) {
+	explicit AverageDecimalBindData(uint8_t scale) : scale(scale) {
 	}
 
-	double scale;
+	uint8_t scale;
 
 public:
 	unique_ptr<FunctionData> Copy() const override {
@@ -81,14 +85,106 @@ struct AverageSetOperation {
 	}
 };
 
-template <class T>
-static T GetAverageDivident(uint64_t count, optional_ptr<FunctionData> bind_data) {
-	T divident = T(count);
-	if (bind_data) {
-		auto &avg_bind_data = bind_data->Cast<AverageDecimalBindData>();
-		divident *= avg_bind_data.scale;
+//! Divides high * 2^64 + low by a divisor above high, by Knuth's algorithm D on 32 bit digits (Hacker's Delight divlu)
+uint64_t DivideTwoWords(uint64_t high, uint64_t low, uint64_t divisor, uint64_t &remainder) {
+	D_ASSERT(high < divisor);
+	static constexpr uint64_t BASE = uint64_t(1) << 32;
+	const auto shift = CountZeros<uint64_t>::Leading(divisor);
+	divisor <<= shift;
+	const uint64_t divisor_high = divisor >> 32;
+	const uint64_t divisor_low = divisor & (BASE - 1);
+	const uint64_t numerator_high = shift == 0 ? high : (high << shift) | (low >> (64 - shift));
+	const uint64_t numerator_low = low << shift;
+	const uint64_t digit_1 = numerator_low >> 32;
+	const uint64_t digit_0 = numerator_low & (BASE - 1);
+
+	uint64_t quotient_high = numerator_high / divisor_high;
+	uint64_t estimate_remainder = numerator_high - quotient_high * divisor_high;
+	// Each loop tests quotient >= BASE first, which keeps the product below 2^64.
+	while (quotient_high >= BASE || quotient_high * divisor_low > BASE * estimate_remainder + digit_1) {
+		quotient_high -= 1;
+		estimate_remainder += divisor_high;
+		if (estimate_remainder >= BASE) {
+			break;
+		}
 	}
-	return divident;
+	const uint64_t partial = numerator_high * BASE + digit_1 - quotient_high * divisor;
+	uint64_t quotient_low = partial / divisor_high;
+	estimate_remainder = partial - quotient_low * divisor_high;
+	while (quotient_low >= BASE || quotient_low * divisor_low > BASE * estimate_remainder + digit_0) {
+		quotient_low -= 1;
+		estimate_remainder += divisor_high;
+		if (estimate_remainder >= BASE) {
+			break;
+		}
+	}
+	remainder = (partial * BASE + digit_0 - quotient_low * divisor) >> shift;
+	return quotient_high * BASE + quotient_low;
+}
+
+//! The double nearest to sum / (count * 10^scale), rounded once
+double GetExactAverage(hugeint_t sum, uint64_t count, optional_ptr<FunctionData> bind_data) {
+	D_ASSERT(count > 0);
+	const uint8_t scale = bind_data ? bind_data->Cast<AverageDecimalBindData>().scale : 0;
+	const bool negative = sum < hugeint_t(0);
+	uhugeint_t magnitude(static_cast<uint64_t>(sum.upper), sum.lower);
+	if (negative) {
+		magnitude = -magnitude;
+	}
+	if (magnitude == uhugeint_t(0)) {
+		return 0;
+	}
+	static constexpr uint64_t MAX_EXACT_DOUBLE = uint64_t(1) << 53;
+	const auto &power_of_ten = Uhugeint::POWERS_OF_TEN[scale];
+	if (magnitude <= uhugeint_t(MAX_EXACT_DOUBLE) && power_of_ten <= uhugeint_t(MAX_EXACT_DOUBLE) &&
+	    count <= MAX_EXACT_DOUBLE / power_of_ten.lower) {
+		// Both operands are exact doubles, so the division rounds the exact quotient once.
+		const double result = double(magnitude.lower) / double(count * power_of_ten.lower);
+		return negative ? -result : result;
+	}
+
+	// The divisor count * 10^scale reaches 2^64 * 10^38, so it is kept as up to three factors below 2^64.
+	static constexpr uint8_t MAX_WORD_POWER = 19;
+	uint64_t factors[3];
+	idx_t factor_count = 0;
+	const uint8_t low_power = scale > MAX_WORD_POWER ? scale - MAX_WORD_POWER : scale;
+	uint64_t count_and_power;
+	if (TryMultiplyOperator::Operation(count, Uhugeint::POWERS_OF_TEN[low_power].lower, count_and_power)) {
+		factors[factor_count++] = count_and_power;
+	} else {
+		factors[factor_count++] = count;
+		factors[factor_count++] = Uhugeint::POWERS_OF_TEN[low_power].lower;
+	}
+	if (scale > MAX_WORD_POWER) {
+		factors[factor_count++] = Uhugeint::POWERS_OF_TEN[MAX_WORD_POWER].lower;
+	}
+
+	// Dividing by each factor in turn gives the quotient digits, as floor(floor(x / a) / b) = floor(x / (a * b)).
+	uint64_t remainders[3] = {0, 0, 0};
+	uhugeint_t quotient(0);
+	int32_t exponent = 0;
+	static constexpr uint64_t MIN_SIGNIFICAND = uint64_t(1) << 54;
+	for (idx_t digit_index = magnitude.upper == 0 ? 1 : 0;; digit_index++) {
+		uint64_t digit = 0;
+		if (digit_index == 0) {
+			digit = magnitude.upper;
+		} else if (digit_index == 1) {
+			digit = magnitude.lower;
+		} else {
+			exponent -= 64;
+		}
+		for (idx_t i = 0; i < factor_count; i++) {
+			digit = DivideTwoWords(remainders[i], digit, factors[i], remainders[i]);
+		}
+		quotient = uhugeint_t(quotient.lower, digit);
+		// With 55 bits the lowest bit lies below the rounding bit of a double, so it can stand for the fraction.
+		if (digit_index >= 1 && (quotient.upper != 0 || quotient.lower >= MIN_SIGNIFICAND)) {
+			break;
+		}
+	}
+	quotient.lower |= uint64_t((remainders[0] | remainders[1] | remainders[2]) != 0);
+	const double result = std::ldexp(Uhugeint::Cast<double>(quotient), exponent);
+	return negative ? -result : result;
 }
 
 struct IntegerAverageOperation : public BaseSumOperation<AverageSetOperation, RegularAdd> {
@@ -102,8 +198,7 @@ struct IntegerAverageOperation : public BaseSumOperation<AverageSetOperation, Re
 		if (state.count == 0) {
 			finalize_data.ReturnNull();
 		} else {
-			double divident = GetAverageDivident<double>(state.count, finalize_data.input.bind_data);
-			target = double(state.value) / divident;
+			target = GetExactAverage(hugeint_t(state.value), state.count, finalize_data.input.bind_data);
 		}
 	}
 };
@@ -119,8 +214,7 @@ struct IntegerAverageOperationHugeint : public BaseSumOperation<AverageSetOperat
 		if (state.count == 0) {
 			finalize_data.ReturnNull();
 		} else {
-			long double divident = GetAverageDivident<long double>(state.count, finalize_data.input.bind_data);
-			target = Hugeint::Cast<long double>(state.value) / divident;
+			target = GetExactAverage(state.value, state.count, finalize_data.input.bind_data);
 		}
 	}
 };
@@ -389,8 +483,7 @@ struct HugeintAverageOperation : public BaseSumOperation<AverageSetOperation, Hu
 		if (state.count == 0) {
 			finalize_data.ReturnNull();
 		} else {
-			long double divident = GetAverageDivident<long double>(state.count, finalize_data.input.bind_data);
-			target = Hugeint::Cast<long double>(state.value) / divident;
+			target = GetExactAverage(state.value, state.count, finalize_data.input.bind_data);
 		}
 	}
 };
@@ -544,8 +637,7 @@ unique_ptr<FunctionData> BindDecimalAvg(BindAggregateFunctionInput &input) {
 	function.SetName("avg");
 	function.GetArguments()[0] = decimal_type;
 	function.SetReturnType(LogicalType::DOUBLE);
-	return make_uniq<AverageDecimalBindData>(
-	    Hugeint::Cast<double>(Hugeint::POWERS_OF_TEN[DecimalType::GetScale(decimal_type)]));
+	return make_uniq<AverageDecimalBindData>(DecimalType::GetScale(decimal_type));
 }
 
 AggregateFunction GetTimestampAverage() {

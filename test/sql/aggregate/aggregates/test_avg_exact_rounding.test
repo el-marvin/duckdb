@@ -1,0 +1,327 @@
+# name: test/sql/aggregate/aggregates/test_avg_exact_rounding.test
+# description: avg over an integer or decimal sum is the DOUBLE nearest to sum / (count * 10^scale), rounded once
+# group: [aggregates]
+
+# Results are compared as text, because the test runner accepts a DOUBLE result within a tolerance. Every avg here is
+# grouped, windowed or finalized from a state, since an ungrouped avg is planned as sum / count.
+
+# 2**126 + 2**73 + 1 is just above a DOUBLE midpoint, so one row averages to the value rounded up, as the cast does
+statement ok
+CREATE TABLE single(v HUGEINT);
+
+statement ok
+INSERT INTO single VALUES
+	(85070591730234625310576617597232480257),
+	(-85070591730234625310576617597232480257),
+	(170141183460469231731687303715884105727),
+	(-170141183460469231731687303715884105728),
+	(9007199254740993),
+	(0),
+	(NULL);
+
+query III
+SELECT v, avg(v)::VARCHAR, avg(v) = v::DOUBLE FROM single GROUP BY v ORDER BY v
+----
+-170141183460469231731687303715884105728	-1.7014118346046923e+38	true
+-85070591730234625310576617597232480257	-8.507059173023463e+37	true
+0	0.0	true
+9007199254740993	9007199254740992.0	true
+85070591730234625310576617597232480257	8.507059173023463e+37	true
+170141183460469231731687303715884105727	1.7014118346046923e+38	true
+NULL	NULL	NULL
+
+query II
+SELECT v, avg(TRY_CAST(v AS DECIMAL(38,0)))::VARCHAR FROM single GROUP BY v ORDER BY v
+----
+-170141183460469231731687303715884105728	NULL
+-85070591730234625310576617597232480257	-8.507059173023463e+37
+0	0.0
+9007199254740993	9007199254740992.0
+85070591730234625310576617597232480257	8.507059173023463e+37
+170141183460469231731687303715884105727	NULL
+NULL	NULL
+
+# The exact averages are 2**125 + 2**72 + 1/2 and its negation, just past the midpoint 2**125 + 2**72
+query II
+SELECT g, avg(v)::VARCHAR
+FROM (VALUES
+	(1, 42535295865117312655288308798616240128::HUGEINT),
+	(1, 42535295865117312655288308798616240129::HUGEINT),
+	(2, -42535295865117312655288308798616240128::HUGEINT),
+	(2, -42535295865117312655288308798616240129::HUGEINT)
+) t(g, v)
+GROUP BY g ORDER BY g
+----
+1	4.253529586511732e+37
+2	-4.253529586511732e+37
+
+# One DECIMAL row averages to its cast: 2**91 + 2**38 is a midpoint, the scale 28 values need 10**28 exactly
+query III
+SELECT x, avg(x)::VARCHAR, avg(x) = x::DOUBLE
+FROM (VALUES
+	('2475880078570760824676155392.0000000001'::DECIMAL(38,10)),
+	('-2475880078570760824676155392.0000000001'::DECIMAL(38,10))
+) t(x)
+GROUP BY x ORDER BY x
+----
+-2475880078570760824676155392.0000000001	-2.475880078570761e+27	true
+2475880078570760824676155392.0000000001	2.475880078570761e+27	true
+
+query III
+SELECT x, avg(x)::VARCHAR, avg(x) = x::DOUBLE
+FROM (VALUES
+	('0.0000000000000000000000049976'::DECIMAL(38,28)),
+	('-7195106750.2323783214747598745883015072'::DECIMAL(38,28))
+) t(x)
+GROUP BY x ORDER BY x
+----
+-7195106750.2323783214747598745883015072	-7195106750.232378	true
+0.0000000000000000000000049976	4.9976e-24	true
+
+# Three BIGINT rows whose sum passes 2**64 go through the HUGEINT state; rounding the sum to a DOUBLE first, or the
+# quotient to a 64 bit long double first, gives 9.223372036854333e+18
+query I
+SELECT avg(v)::VARCHAR FROM (VALUES (1, 9223372036853847642), (1, 9223372036854550076), (1, 9223372036854601065)) t(g, v)
+GROUP BY g
+----
+9.223372036854332e+18
+
+# An INTEGER state repeated past 2**53 rows
+query I
+SELECT finalize(combine_aggr(st, 9007199254740993))::VARCHAR
+FROM (SELECT avg(v) EXPORT_STATE st FROM (VALUES (2147483647), (2147483647), (0)) t(v) GROUP BY ALL)
+----
+1431655764.6666667
+
+# Counts past 2**53: 2**53 rows of 1 and one of 0 average to 1 - 2**-53, also for SMALLINT and DECIMAL(4, s)
+statement ok
+CREATE TABLE counts AS SELECT * FROM (VALUES (1, 9007199254740992), (0, 1)) v(x, n);
+
+query IIIII
+SELECT (SELECT finalize(combine_aggr(st, n))::VARCHAR FROM (SELECT avg(x::SMALLINT) EXPORT_STATE st, n FROM counts GROUP BY ALL)),
+       (SELECT finalize(combine_aggr(st, n))::VARCHAR FROM (SELECT avg(x::DECIMAL(4,2)) EXPORT_STATE st, n FROM counts GROUP BY ALL)),
+       (SELECT finalize(combine_aggr(st, n))::VARCHAR FROM (SELECT avg(x::BIGINT) EXPORT_STATE st, n FROM counts GROUP BY ALL)),
+       (SELECT finalize(combine_aggr(st, n))::VARCHAR FROM (SELECT avg(x::HUGEINT) EXPORT_STATE st, n FROM counts GROUP BY ALL)),
+       (SELECT finalize(combine_aggr(st, n))::VARCHAR FROM (SELECT avg(x::DECIMAL(38,10)) EXPORT_STATE st, n FROM counts GROUP BY ALL))
+----
+0.9999999999999999	0.9999999999999999	0.9999999999999999	0.9999999999999999	0.9999999999999999
+
+# A state of 2**53 + 1 rows whose average is just above the midpoint (2**53 + 1) * 2**20, and one just below it
+query II
+SELECT finalize(to_aggregate_state({'count': 9007199254740993, 'value': 85070591730234634755309583336523956225::HUGEINT}, 'avg', ['HUGEINT']))::VARCHAR,
+       finalize(to_aggregate_state({'count': 9007199254740993, 'value': 85070591730234634755309583336523956223::HUGEINT}, 'avg', ['HUGEINT']))::VARCHAR
+----
+9.444732965739293e+21	9.44473296573929e+21
+
+# The largest count and the largest sum, with a divisor of up to (2**64 - 1) * 10**38
+query IIII
+SELECT finalize(to_aggregate_state({'count': 18446744073709551615, 'value': 170141183460469231731687303715884105727::HUGEINT}, 'avg', ['HUGEINT']))::VARCHAR,
+       finalize(to_aggregate_state({'count': 18446744073709551615, 'value': '-170141183460469231731687303715884105728'::HUGEINT}, 'avg', ['DECIMAL(38,0)']))::VARCHAR,
+       finalize(to_aggregate_state({'count': 18446744073709551615, 'value': 170141183460469231731687303715884105727::HUGEINT}, 'avg', ['DECIMAL(38,38)']))::VARCHAR,
+       finalize(to_aggregate_state({'count': 18446744073709551615, 'value': 1::HUGEINT}, 'avg', ['DECIMAL(38,38)']))::VARCHAR
+----
+9.223372036854776e+18	-9.223372036854776e+18	9.223372036854775e-20	5.421010862427522e-58
+
+# Only the remainder of the first factor (count * 10**1 against 10**19) or of the middle one shows the fraction past a
+# midpoint, so every remainder counts
+query II
+SELECT (SELECT avg(v)::VARCHAR FROM (VALUES ('18014398509481986.00000000000000000001'::DECIMAL(38,20))) t(v) GROUP BY v),
+       finalize(to_aggregate_state({'count': 2, 'value': '195312500000000021684043449710088681'::HUGEINT}, 'avg', ['DECIMAL(38,38)']))::VARCHAR
+----
+1.8014398509481988e+16	0.0009765625000000002
+
+# Empty and NULL groups stay NULL
+query II
+SELECT g, avg(v) FROM (VALUES (1, NULL::HUGEINT), (1, NULL), (2, 5::HUGEINT), (2, NULL)) t(g, v) GROUP BY g ORDER BY g
+----
+1	NULL
+2	5.0
+
+query III
+SELECT finalize(to_aggregate_state({'count': 0, 'value': 0::HUGEINT}, 'avg', ['HUGEINT'])),
+       finalize(to_aggregate_state({'count': 0, 'value': 0}, 'avg', ['SMALLINT'])),
+       finalize(to_aggregate_state({'count': 0, 'value': 0::HUGEINT}, 'avg', ['DECIMAL(38,10)']))
+----
+NULL	NULL	NULL
+
+# A windowed avg, over a partition and over a moving frame, takes the same finalizer
+query III
+SELECT i, avg(v) OVER (PARTITION BY g)::VARCHAR, avg(v) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)::VARCHAR
+FROM (VALUES
+	(1, 1, 42535295865117312655288308798616240128::HUGEINT),
+	(2, 1, 42535295865117312655288308798616240129::HUGEINT),
+	(3, 2, NULL),
+	(4, 3, '-85070591730234625310576617597232480257'::HUGEINT)
+) t(i, g, v)
+ORDER BY i
+----
+1	4.253529586511732e+37	4.253529586511731e+37
+2	4.253529586511732e+37	4.253529586511732e+37
+3	NULL	4.253529586511732e+37
+4	-8.507059173023463e+37	-8.507059173023463e+37
+
+# Values next to a DOUBLE midpoint at every bit length, both signs: one row averages to the cast, two rows v and
+# v + 1 to v + 1/2, three rows v, v and v + 1 to v + 1/3 (where their sum fits); the reference parses the exact
+# average as text
+statement ok
+CREATE TABLE near_midpoint AS
+SELECT row_number() OVER () AS id, b, ((m << (b - 53)) + (1::HUGEINT << (b - 54)) + delta) AS v, sign
+FROM (VALUES (1::HUGEINT << 52), ((1::HUGEINT << 52) + 1), ((1::HUGEINT << 53) - 1)) t1(m),
+     range(55, 127) t2(b),
+     (VALUES (-1), (0), (1)) t3(delta),
+     (VALUES (1), (-1)) t4(sign);
+
+query I
+SELECT count(*) FROM near_midpoint
+----
+1296
+
+query IIII
+SELECT count(a3),
+       count(*) FILTER (a1 <> (v * sign)::DOUBLE),
+       count(*) FILTER (a2 <> (v::VARCHAR || '.5')::DOUBLE * sign),
+       count(*) FILTER (a3 <> (v::VARCHAR || '.' || repeat('3', 60))::DOUBLE * sign)
+FROM (
+	SELECT n.id, any_value(n.v) AS v, any_value(n.sign) AS sign,
+	       avg(x) FILTER (k = 0) AS a1, avg(x) FILTER (k < 2) AS a2, avg(x) FILTER (k IN (1, 2, 3) AND n.b < 126) AS a3
+	FROM near_midpoint n,
+	     LATERAL (VALUES (0, n.v * n.sign), (1, (n.v + 1) * n.sign), (2, n.v * n.sign), (3, n.v * n.sign)) r(k, x)
+	GROUP BY n.id
+)
+----
+1278	0	0	0
+
+# The same values as DECIMAL(38, s) units, all below 10**38, against the text of the exact value
+statement ok
+CREATE MACRO decimal_text(a, s) AS (
+	SELECT CASE WHEN a < 0 THEN '-' ELSE '' END || t[1:length(t) - s] || '.' || t[length(t) - s + 1:]
+	FROM (SELECT lpad(abs(a)::VARCHAR, greatest(length(abs(a)::VARCHAR), s + 1)::INTEGER, '0') AS t)
+);
+
+query IIIII
+SELECT count(*),
+       count(*) FILTER (avg_10 <> decimal_text(u, 10)::DOUBLE),
+       count(*) FILTER (avg_28 <> decimal_text(u, 28)::DOUBLE),
+       count(*) FILTER (avg_38 <> decimal_text(u, 38)::DOUBLE),
+       count(*) FILTER (avg_10 <> decimal_text(u, 10)::DECIMAL(38,10)::DOUBLE)
+FROM (
+	SELECT id, any_value(v * sign) AS u,
+	       avg(decimal_text(v * sign, 10)::DECIMAL(38,10)) AS avg_10,
+	       avg(decimal_text(v * sign, 28)::DECIMAL(38,28)) AS avg_28,
+	       avg(decimal_text(v * sign, 38)::DECIMAL(38,38)) AS avg_38
+	FROM near_midpoint
+	GROUP BY id
+)
+----
+1296	0	0	0	0
+
+# Imported states of every physical width with counts up to 2**64 - 1, against Python's Fraction reference: three per
+# type that the long double finalizer got wrong, then states at the scales where the divisor changes shape (10**15 and
+# 10**16 around the exact DOUBLE division, 10**19 and 10**20 around a third factor) and states whose long division
+# corrects a quotient digit estimate twice
+statement ok
+CREATE TABLE imported_states(type VARCHAR, count UBIGINT, value VARCHAR, expected VARCHAR);
+
+statement ok
+INSERT INTO imported_states VALUES
+	('SMALLINT', 17727961128659576870, '2127920965381719103', '0.12003190609108769'),
+	('SMALLINT', 2318541279673496346, '-34184490494998471', '-0.014743964575783801'),
+	('SMALLINT', 45900, '-163851195512333986', '-3569742821619.477'),
+	('DECIMAL(4,2)', 14057088803881695, '-9223372036854775807', '-6.5613671262486815'),
+	('DECIMAL(4,2)', 33456720432232, '-120504305573720599', '-36.017967098062456'),
+	('DECIMAL(4,2)', 13731182861665618123, '-53999077694998925', '-3.932587471815865e-05'),
+	('INTEGER', 18446744073709551615, '-1703289601029844889667971165365268039', '-9.233551429042629e+16'),
+	('INTEGER', 6923551965278946082, '94667890289811848250416311544609396735', '1.3673312595119335e+19'),
+	('INTEGER', 6062398241243616826, '777914116757979258240087111547005488', '1.283178844084649e+17'),
+	('DECIMAL(9,4)', 9223372036854775807, '-132655902616724405129420654134522428751', '-1438258178100781.2'),
+	('DECIMAL(9,4)', 3, '21230858065361237334043624734720001', '7.076952688453746e+29'),
+	('DECIMAL(9,4)', 29906756, '10405686598834769010813304831999999', '3.4793765658952674e+22'),
+	('BIGINT', 9007199254740990, '1137023128790582459444458437870305279', '1.2623492571146396e+20'),
+	('BIGINT', 4349086000065042000, '2286825904892943904015081748792640001', '5.2581758669723795e+17'),
+	('BIGINT', 18446744073709551614, '-27660160590382392505260272401090396415', '-1.499460310169526e+18'),
+	('DECIMAL(18,6)', 17421531743247189387, '493974127777972222506416718099961594', '28354230561.23885'),
+	('DECIMAL(18,6)', 11292342874798673477, '517148524884226863466775967443741160', '45796388811.24984'),
+	('DECIMAL(18,6)', 7862168160913996092, '-42270840206698498787083032826051980', '-5376486401.911862'),
+	('HUGEINT', 2, '-16691628488376684379200822047754158081', '-8.345814244188343e+36'),
+	('HUGEINT', 18446744073709551615, '-65555578455542044184410545892111461121', '-3.553775029002131e+18'),
+	('HUGEINT', 12016377655385861260, '-42192483043543427858149185282460339201', '-3.511248086034674e+18'),
+	('DECIMAL(38,0)', 9007199254740993, '22028693556194911178137265079790849', '2.445676278849941e+18'),
+	('DECIMAL(38,0)', 12984467857341903568, '-279646290156152545696558999997586721', '-2.1536985052339292e+16'),
+	('DECIMAL(38,0)', 827632525851066671, '9738334981108182430068062966772454399', '1.1766496212910565e+19'),
+	('DECIMAL(38,10)', 2775281265249, '-347059813434354561005677468798828126', '-12505392436438.912'),
+	('DECIMAL(38,10)', 1, '107793887439152278258319359999999999', '1.0779388743915227e+25'),
+	('DECIMAL(38,10)', 9007199254740995, '277968786831971464609288980392992496', '3086073472.679766'),
+	('DECIMAL(38,28)', 99980425, '394112019272367669182853544551647928', '0.3941891818047059'),
+	('DECIMAL(38,28)', 9223372036854775808, '-6602827784381766775262839219607049535', '-7.158800228374361e-11'),
+	('DECIMAL(38,28)', 17995866752404586457, '65536359118569878397237106038780565736', '3.6417450751469353e-10'),
+	('DECIMAL(38,38)', 10, '-170141183460469231731687303715884105727', '-0.17014118346046922'),
+	('DECIMAL(38,38)', 13, '639480719029743123349802861837146732', '0.0004919082454074947'),
+	('DECIMAL(38,38)', 18446744073709551615, '-3440041936080692953692541614432597', '-1.864850470269964e-24'),
+	('DECIMAL(38,15)', 85, '-251667259663857012561', '-2960.791290163024'),
+	('DECIMAL(38,15)', 4716, '-62417908534915181894015231535361900', '-1.3235349562110938e+16'),
+	('DECIMAL(38,15)', 18118270698365290188, '37725179990138051570174011430110552', '2.0821622890059692'),
+	('DECIMAL(38,16)', 4709997527278222059, '-15450488037207115575086452470937101', '-0.3280360116480895'),
+	('DECIMAL(38,16)', 1741306660752266443, '-273616028042399301594', '-1.571325914093694e-14'),
+	('DECIMAL(38,16)', 4310001221363913057, '-26869200360515908', '-6.234151449268747e-19'),
+	('DECIMAL(38,19)', 5204440937660914226, '19215022476843936842363729799749037', '0.0003692043527249623'),
+	('DECIMAL(38,19)', 12413512279009054878, '-25208313420788330141751380397705814', '-0.0002030715631015645'),
+	('DECIMAL(38,19)', 279459027864540402, '-67878453086293849917295302317097454324', '-24.289232523629884'),
+	('DECIMAL(38,20)', 11891780743971290574, '-205558748763921186687217', '-1.7285783617237659e-16'),
+	('DECIMAL(38,20)', 10325977861573396813, '-6822043417844', '-6.60668026728125e-27'),
+	('DECIMAL(38,20)', 15616711490576907237, '-1452719048282815045399507878986', '-9.302336469232865e-10'),
+	('HUGEINT', 1554822847058210384, '85070591730234667129541957907630085800', '5.471400931057308e+19'),
+	('HUGEINT', 11921073323452299065, '85070591730234615865843651860898884938', '7.136152041182018e+18'),
+	('HUGEINT', 3658, '85070591730234615865843652198399819657', '2.3256039292026958e+34'),
+	('DECIMAL(38,15)', 9, '9007199254740992', '1.0007999171934436'),
+	('DECIMAL(38,15)', 10, '9007199254740992', '0.9007199254740992'),
+	('DECIMAL(38,15)', 9, '9007199254740993', '1.0007999171934436'),
+	('DECIMAL(38,16)', 1, '9007199254740992', '0.9007199254740992');
+
+query III
+SELECT type, count(*), bool_and(ok) FROM (
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::BIGINT}, 'avg', ['SMALLINT'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'SMALLINT'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::BIGINT}, 'avg', ['DECIMAL(4,2)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(4,2)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['INTEGER'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'INTEGER'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(9,4)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(9,4)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['BIGINT'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'BIGINT'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(18,6)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(18,6)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['HUGEINT'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'HUGEINT'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,0)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,0)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,10)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,10)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,15)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,15)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,16)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,16)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,19)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,19)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,20)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,20)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,28)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,28)'
+UNION ALL
+SELECT type, finalize(to_aggregate_state({'count': count, 'value': value::HUGEINT}, 'avg', ['DECIMAL(38,38)'])) = expected::DOUBLE AS ok FROM imported_states WHERE type = 'DECIMAL(38,38)'
+) GROUP BY type ORDER BY type
+----
+BIGINT	3	true
+DECIMAL(18,6)	3	true
+DECIMAL(38,0)	3	true
+DECIMAL(38,10)	3	true
+DECIMAL(38,15)	6	true
+DECIMAL(38,16)	4	true
+DECIMAL(38,19)	3	true
+DECIMAL(38,20)	3	true
+DECIMAL(38,28)	3	true
+DECIMAL(38,38)	3	true
+DECIMAL(4,2)	3	true
+DECIMAL(9,4)	3	true
+HUGEINT	6	true
+INTEGER	3	true
+SMALLINT	3	true
