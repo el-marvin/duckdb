@@ -118,6 +118,9 @@ unique_ptr<BoundAtClause> Binder::BindAtClause(optional_ptr<AtClause> at_clause)
 	if (expr->HasParameter()) {
 		throw ParameterNotResolvedException();
 	}
+	if (!expr->IsFoldable()) {
+		throw BinderException(*expr, "AT clause must be a constant expression");
+	}
 	auto val = ExpressionExecutor::EvaluateScalar(context, *expr);
 	return make_uniq<BoundAtClause>(at_clause->Unit(), std::move(val));
 }

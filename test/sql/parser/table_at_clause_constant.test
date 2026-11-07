@@ -1,0 +1,166 @@
+# name: test/sql/parser/table_at_clause_constant.test
+# description: A table AT clause value must fold to a constant at bind
+# group: [parser]
+
+# No built in catalog supports time travel, so an AT value that binds ends at the catalog lookup with
+# "Catalog type does not support time travel"
+
+statement ok
+CREATE TABLE tbl(i INTEGER)
+
+statement ok
+CREATE SEQUENCE seq
+
+statement error
+SELECT * FROM tbl AT (VERSION => (random() * 10)::BIGINT)
+----
+AT clause must be a constant expression
+
+statement error
+SELECT * FROM tbl AT (TIMESTAMP => TIMESTAMP '2020-01-01' + to_seconds((random() * 10)::BIGINT))
+----
+AT clause must be a constant expression
+
+statement error
+SELECT * FROM tbl AT (VERSION => uuid()::VARCHAR)
+----
+AT clause must be a constant expression
+
+statement error
+SELECT * FROM tbl AT (VERSION => nextval('seq'))
+----
+AT clause must be a constant expression
+
+statement error
+SELECT currval('seq')
+----
+currval: sequence is not yet defined in this session
+
+statement error
+SELECT * FROM tbl AT (VERSION => 1 + (random() * 0)::BIGINT)
+----
+AT clause must be a constant expression
+
+statement error
+SELECT * FROM tbl AT (VERSION => CASE WHEN random() < 2 THEN 1 END)
+----
+AT clause must be a constant expression
+
+statement error
+SELECT * FROM (SELECT * FROM tbl AT (VERSION => (random() * 10)::BIGINT))
+----
+AT clause must be a constant expression
+
+statement error
+CREATE VIEW v AS SELECT * FROM tbl AT (VERSION => (random() * 10)::BIGINT)
+----
+AT clause must be a constant expression
+
+statement ok
+CREATE VIEW vw AS SELECT * FROM tbl
+
+statement error
+SELECT * FROM vw AT (VERSION => (random() * 10)::BIGINT)
+----
+AT clause must be a constant expression
+
+statement ok
+CREATE MACRO volatile_version(x) AS x + random()::BIGINT
+
+statement error
+SELECT * FROM tbl AT (VERSION => volatile_version(1))
+----
+AT clause must be a constant expression
+
+# Stable within the query, so folded at bind like a constant
+
+statement error
+SELECT * FROM tbl AT (TIMESTAMP => now())
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM tbl AT (TIMESTAMP => current_timestamp)
+----
+Catalog type does not support time travel
+
+# Constant expressions fold as before
+
+statement error
+SELECT * FROM tbl AT (VERSION => 1 + 1)
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM tbl AT (VERSION => NULL)
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM tbl AT (TIMESTAMP => '2020-01-01'::TIMESTAMP + INTERVAL 1 DAY)
+----
+Catalog type does not support time travel
+
+statement ok
+SET VARIABLE v = 3
+
+statement error
+SELECT * FROM tbl AT (VERSION => getvariable('v'))
+----
+Catalog type does not support time travel
+
+# Binding folds a NULL argument through the addition, which drops the volatile call
+
+statement error
+SELECT * FROM tbl AT (VERSION => NULL + random()::BIGINT)
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM tbl AT (VERSION => i)
+----
+AT clause cannot contain column names
+
+statement error
+SELECT * FROM tbl AT (VERSION => (SELECT 1))
+----
+AT clause cannot contain subqueries
+
+statement ok
+PREPARE p AS SELECT * FROM tbl AT (VERSION => $1)
+
+statement error
+EXECUTE p(1)
+----
+Catalog type does not support time travel
+
+statement ok
+PREPARE q AS SELECT * FROM tbl AT (VERSION => $1 + random()::BIGINT)
+
+statement error
+EXECUTE q(1)
+----
+AT clause must be a constant expression
+
+# A typed parameter is bound again at EXECUTE, where it is a constant and only the volatile function is refused
+
+statement ok
+PREPARE t AS SELECT * FROM tbl AT (VERSION => $1::BIGINT)
+
+statement error
+EXECUTE t(1)
+----
+Catalog type does not support time travel
+
+statement ok
+PREPARE r AS SELECT * FROM tbl AT (VERSION => $1::BIGINT + random()::BIGINT)
+
+statement error
+EXECUTE r(1)
+----
+AT clause must be a constant expression
+
+statement error
+EXECUTE r(NULL)
+----
+Catalog type does not support time travel
