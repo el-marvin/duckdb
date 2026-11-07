@@ -93,6 +93,8 @@ struct ICUStrptime : public ICUDateFunc {
 	}
 
 	static uint64_t ToMicros(Calendar *calendar, const ParseResult &parsed, const StrpTimeFormat &format) {
+		// Fields left by an earlier row or by the calendar's creation time must not change this row
+		calendar->Clear();
 		// Get the parts in the current time zone
 		uint64_t micros = parsed.GetMicros();
 		calendar->Set(CAL_EXTENDED_YEAR, parsed.data[0]); // strptime doesn't understand eras
@@ -105,7 +107,7 @@ struct ICUStrptime : public ICUDateFunc {
 		micros %= Interval::MICROS_PER_MSEC;
 
 		// This overrides the TZ setting, so only use it if an offset was parsed.
-		// Note that we don't bother/worry about the DST setting because the two just combine.
+		// The DST offset stays cleared, so the parsed offset is the whole offset.
 		if (format.HasFormatSpecifier(StrTimeSpecifier::UTC_OFFSET)) {
 			calendar->Set(CAL_ZONE_OFFSET, UnsafeNumericCast<int32_t>(parsed.data[7] * Interval::MSECS_PER_SEC));
 		}
@@ -114,6 +116,8 @@ struct ICUStrptime : public ICUDateFunc {
 	}
 
 	static uint64_t ToNanos(Calendar *calendar, const ParseResult &parsed, const StrpTimeFormat &format) {
+		// Fields left by an earlier row or by the calendar's creation time must not change this row
+		calendar->Clear();
 		// Get the parts in the current time zone
 		uint64_t nanos = parsed.data[6];
 		calendar->Set(CAL_EXTENDED_YEAR, parsed.data[0]); // strptime doesn't understand eras
@@ -126,7 +130,7 @@ struct ICUStrptime : public ICUDateFunc {
 		nanos %= Interval::NANOS_PER_MSEC;
 
 		// This overrides the TZ setting, so only use it if an offset was parsed.
-		// Note that we don't bother/worry about the DST setting because the two just combine.
+		// The DST offset stays cleared, so the parsed offset is the whole offset.
 		if (format.HasFormatSpecifier(StrTimeSpecifier::UTC_OFFSET)) {
 			calendar->Set(CAL_ZONE_OFFSET, UnsafeNumericCast<int32_t>(parsed.data[7] * Interval::MSECS_PER_SEC));
 		}
