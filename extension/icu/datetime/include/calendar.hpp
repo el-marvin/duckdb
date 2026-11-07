@@ -88,6 +88,8 @@ public:
 	virtual void SetTime(int64_t millis) = 0;
 	//! Unsets all fields and drops any failure, so that the time is computed from the fields set afterwards alone
 	virtual void Clear() = 0;
+	//! Whether a day its month lacks (see HandleHasMonth) moves into the next month, the default, or fails
+	virtual void SetLenientDays(bool lenient) = 0;
 	//! The instant that the calendar is set to, computing it from the fields if needed
 	virtual int64_t GetTime() = 0;
 	//! The value of a field, computing the fields from the time if needed
@@ -135,6 +137,9 @@ public:
 
 	void SetTime(int64_t millis) override;
 	void Clear() override;
+	void SetLenientDays(bool lenient) override {
+		lenient_days = lenient;
+	}
 	int64_t GetTime() override;
 	int32_t Get(CalendarField field) override;
 	bool HasFailed() const override {
@@ -172,6 +177,10 @@ protected:
 	virtual int32_t HandleGetMonthLength(int32_t eyear, int32_t month) const;
 	//! The number of days in a year of this calendar system
 	virtual int32_t HandleGetYearLength(int32_t eyear) const;
+	//! Whether a year of this calendar system has the month, numbered from 0 as in the longest year
+	virtual bool HandleHasMonth(int32_t eyear, int32_t month) const {
+		return true;
+	}
 	//! Computes the era, year, month, day of month, day of year and extended year of a Julian day
 	virtual void HandleComputeFields(int32_t julian_day) = 0;
 	//! The extended year that the currently set fields describe
@@ -323,6 +332,7 @@ private:
 	bool fields_virtually_set;
 	//! Whether the last operation ran into a value that cannot be represented
 	mutable bool failed;
+	bool lenient_days;
 	int32_t first_day_of_week;
 	int32_t minimal_days_in_first_week;
 };

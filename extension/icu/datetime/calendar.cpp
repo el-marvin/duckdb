@@ -107,7 +107,8 @@ static constexpr int64_t MIN_MILLIS = int64_t(MIN_JULIAN - JULIAN_1970_CE) * MIL
 FieldCalendar::FieldCalendar(unique_ptr<TimeZone> zone_p)
     : gregorian_year(0), gregorian_month(0), gregorian_dom(0), gregorian_doy(0), zone(std::move(zone_p)), time(0),
       fields(), stamp(), next_stamp(STAMP_MINIMUM_USER), time_set(false), fields_set(false), all_fields_set(false),
-      fields_virtually_set(false), failed(false), first_day_of_week(CAL_SUNDAY), minimal_days_in_first_week(1) {
+      fields_virtually_set(false), failed(false), lenient_days(true), first_day_of_week(CAL_SUNDAY),
+      minimal_days_in_first_week(1) {
 	SetTime(GetNow());
 }
 
@@ -115,7 +116,7 @@ FieldCalendar::FieldCalendar(const FieldCalendar &other)
     : gregorian_year(other.gregorian_year), gregorian_month(other.gregorian_month), gregorian_dom(other.gregorian_dom),
       gregorian_doy(other.gregorian_doy), zone(other.zone->Copy()), time(other.time), next_stamp(other.next_stamp),
       time_set(other.time_set), fields_set(other.fields_set), all_fields_set(other.all_fields_set),
-      fields_virtually_set(other.fields_virtually_set), failed(other.failed),
+      fields_virtually_set(other.fields_virtually_set), failed(other.failed), lenient_days(other.lenient_days),
       first_day_of_week(other.first_day_of_week), minimal_days_in_first_week(other.minimal_days_in_first_week) {
 	for (idx_t i = 0; i < CAL_FIELD_COUNT; i++) {
 		fields[i] = other.fields[i];
@@ -269,7 +270,7 @@ void FieldCalendar::UpdateTime() {
 	if (failed) {
 		return;
 	}
-	// the calendar is always lenient, so the fields are recomputed to normalize them
+	// the fields are recomputed from the time, which normalizes the values a lenient calendar accepted
 	fields_set = false;
 	time_set = true;
 	fields_virtually_set = false;
@@ -457,6 +458,17 @@ int32_t FieldCalendar::ComputeJulianDay() {
 }
 
 void FieldCalendar::ComputeTime() {
+	if (!lenient_days && stamp[CAL_DATE] >= STAMP_MINIMUM_USER) {
+		const auto eyear = HandleGetExtendedYear();
+		const auto month =
+		    (IsSet(CAL_MONTH) || IsSet(CAL_ORDINAL_MONTH)) ? InternalGetMonth() : GetDefaultMonthInYear(eyear);
+		const auto month_length = HandleGetMonthLength(eyear, month);
+		const auto day = InternalGet(CAL_DATE);
+		if (failed || day < 1 || day > month_length || !HandleHasMonth(eyear, month)) {
+			failed = true;
+			return;
+		}
+	}
 	const auto julian_day = ComputeJulianDay();
 	const auto millis = Grego::JulianDayToMillis(julian_day);
 
