@@ -17,42 +17,20 @@
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/planner/expression_binder.hpp"
 #include "duckdb/parser/expression/lambda_expression.hpp"
+#include "duckdb/planner/column_qualifier.hpp"
 
 namespace duckdb {
 
 void ExpressionBinder::ReplaceMacroParametersInLambda(FunctionExpression &function,
                                                       vector<identifier_set_t> &lambda_params) {
-	for (auto &child : function.GetArgumentsMutable()) {
-		if (child.GetExpression().GetExpressionClass() != ExpressionClass::LAMBDA) {
-			ReplaceMacroParameters(child.GetExpressionMutable(), lambda_params);
-			continue;
-		}
-
-		// Special-handling for LHS lambda parameters.
-		// We do not replace them, and we add them to the lambda_params vector.
-		auto &lambda_expr = child.GetExpressionMutable()->Cast<LambdaExpression>();
-		string error_message;
-		auto column_ref_expressions = lambda_expr.ExtractColumnRefExpressions(error_message);
-
-		if (!error_message.empty()) {
-			// Possibly a JSON function, replace both LHS and RHS.
-			ReplaceMacroParameters(lambda_expr.LeftMutable(), lambda_params);
-			ReplaceMacroParameters(lambda_expr.RightMutable(), lambda_params);
-			continue;
-		}
-
-		// Push the lambda parameter names of this level.
-		lambda_params.emplace_back();
-		for (const auto &column_ref_expr : column_ref_expressions) {
-			const auto &column_ref = column_ref_expr.get().Cast<ColumnRefExpression>();
-			lambda_params.back().emplace(column_ref.GetName());
-		}
-
-		// Only replace in the RHS of the expression.
-		ReplaceMacroParameters(lambda_expr.RightMutable(), lambda_params);
-
-		lambda_params.pop_back();
-	}
+	ColumnQualifier::EnumerateCallChildren(
+	    binder, function, [&](unique_ptr<ParsedExpression> &child) { ReplaceMacroParameters(child, lambda_params); },
+	    [&](LambdaExpression &lambda, identifier_set_t &parameters) {
+		    // a lambda parameter shadows a macro parameter of the same name in the lambda body
+		    lambda_params.push_back(std::move(parameters));
+		    ReplaceMacroParameters(lambda.RightMutable(), lambda_params);
+		    lambda_params.pop_back();
+	    });
 }
 
 void ExpressionBinder::ReplaceMacroParameters(unique_ptr<ParsedExpression> &expr,

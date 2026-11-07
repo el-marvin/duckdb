@@ -15,6 +15,7 @@
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/tableref/expressionlistref.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/column_qualifier.hpp"
 #include "duckdb/planner/expression_binder/insert_binder.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -159,51 +160,22 @@ unique_ptr<LogicalOperator> Binder::ResolveInputProjection(LogicalInsert &insert
 	return std::move(projection);
 }
 
-void DoUpdateSetQualify(unique_ptr<ParsedExpression> &expr, const string &table_name,
+void DoUpdateSetQualify(Binder &binder, unique_ptr<ParsedExpression> &expr, const string &table_name,
                         vector<identifier_set_t> &lambda_params);
 
-void DoUpdateSetQualifyInLambda(FunctionExpression &function, const string &table_name,
+void DoUpdateSetQualifyInLambda(Binder &binder, FunctionExpression &function, const string &table_name,
                                 vector<identifier_set_t> &lambda_params) {
-	for (auto &child : function.GetArgumentsMutable()) {
-		if (child.GetExpression().GetExpressionClass() != ExpressionClass::LAMBDA) {
-			DoUpdateSetQualify(child.GetExpressionMutable(), table_name, lambda_params);
-			continue;
-		}
-
-		// Special-handling for LHS lambda parameters.
-		// We do not qualify them, and we add them to the lambda_params vector.
-		auto &lambda_expr = child.GetExpressionMutable()->Cast<LambdaExpression>();
-		string error_message;
-		auto column_ref_expressions = lambda_expr.ExtractColumnRefExpressions(error_message);
-
-		if (!error_message.empty()) {
-			// Possibly a JSON function, qualify both LHS and RHS.
-			ParsedExpressionIterator::EnumerateChildren(
-			    *lambda_expr.LeftMutable(),
-			    [&](unique_ptr<ParsedExpression> &child) { DoUpdateSetQualify(child, table_name, lambda_params); });
-			ParsedExpressionIterator::EnumerateChildren(
-			    *lambda_expr.RightMutable(),
-			    [&](unique_ptr<ParsedExpression> &child) { DoUpdateSetQualify(child, table_name, lambda_params); });
-			continue;
-		}
-
-		// Push the lambda parameter names of this level.
-		lambda_params.emplace_back();
-		for (const auto &column_ref_expr : column_ref_expressions) {
-			const auto &column_ref = column_ref_expr.get().Cast<ColumnRefExpression>();
-			lambda_params.back().emplace(column_ref.GetName());
-		}
-
-		// Only qualify in the RHS of the expression.
-		ParsedExpressionIterator::EnumerateChildren(
-		    *lambda_expr.RightMutable(),
-		    [&](unique_ptr<ParsedExpression> &child) { DoUpdateSetQualify(child, table_name, lambda_params); });
-
-		lambda_params.pop_back();
-	}
+	ColumnQualifier::EnumerateCallChildren(
+	    binder, function,
+	    [&](unique_ptr<ParsedExpression> &child) { DoUpdateSetQualify(binder, child, table_name, lambda_params); },
+	    [&](LambdaExpression &lambda, identifier_set_t &parameters) {
+		    lambda_params.push_back(std::move(parameters));
+		    DoUpdateSetQualify(binder, lambda.RightMutable(), table_name, lambda_params);
+		    lambda_params.pop_back();
+	    });
 }
 
-void DoUpdateSetQualify(unique_ptr<ParsedExpression> &expr, const string &table_name,
+void DoUpdateSetQualify(Binder &binder, unique_ptr<ParsedExpression> &expr, const string &table_name,
                         vector<identifier_set_t> &lambda_params) {
 	// We avoid ambiguity with EXCLUDED columns by qualifying all column references.
 	switch (expr->GetExpressionClass()) {
@@ -226,7 +198,7 @@ void DoUpdateSetQualify(unique_ptr<ParsedExpression> &expr, const string &table_
 		// Special-handling for lambdas, which are inside function expressions.
 		auto &function = expr->Cast<FunctionExpression>();
 		if (function.IsLambdaFunction()) {
-			return DoUpdateSetQualifyInLambda(function, table_name, lambda_params);
+			return DoUpdateSetQualifyInLambda(binder, function, table_name, lambda_params);
 		}
 		break;
 	}
@@ -237,8 +209,9 @@ void DoUpdateSetQualify(unique_ptr<ParsedExpression> &expr, const string &table_
 		break;
 	}
 
-	ParsedExpressionIterator::EnumerateChildren(
-	    *expr, [&](unique_ptr<ParsedExpression> &child) { DoUpdateSetQualify(child, table_name, lambda_params); });
+	ParsedExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<ParsedExpression> &child) {
+		DoUpdateSetQualify(binder, child, table_name, lambda_params);
+	});
 }
 
 unique_ptr<UpdateSetInfo> CreateSetInfoForReplace(TableCatalogEntry &table, InsertQueryNode &insert,
@@ -663,11 +636,11 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 		if (on_conflict_info.set_info) {
 			for (auto &col : on_conflict_info.set_info->expressions) {
 				vector<identifier_set_t> lambda_params;
-				DoUpdateSetQualify(col, table_name, lambda_params);
+				DoUpdateSetQualify(*this, col, table_name, lambda_params);
 			}
 			if (on_conflict_info.set_info->condition) {
 				vector<identifier_set_t> lambda_params;
-				DoUpdateSetQualify(on_conflict_info.set_info->condition, table_name, lambda_params);
+				DoUpdateSetQualify(*this, on_conflict_info.set_info->condition, table_name, lambda_params);
 				update_action->condition = std::move(on_conflict_info.set_info->condition);
 			}
 			update_action->update_info = std::move(on_conflict_info.set_info);

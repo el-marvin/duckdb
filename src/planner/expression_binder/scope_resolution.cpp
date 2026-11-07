@@ -182,7 +182,7 @@ ColumnResolution ExpressionBinder::ResolveColumn(ColumnRefExpression &colref, id
 //! scope, so a parameter that happens to share a name with an outer column must not pull the
 //! expression out to that scope. The parameter names are read exactly as `ColumnQualifier` reads them,
 //! so the resolver sees the same names a real bind would.
-static void CollectResolvableColumns(ParsedExpression &expr, vector<identifier_set_t> &lambda_params,
+static void CollectResolvableColumns(Binder &binder, ParsedExpression &expr, vector<identifier_set_t> &lambda_params,
                                      vector<reference<ColumnRefExpression>> &result) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::SUBQUERY:
@@ -197,120 +197,55 @@ static void CollectResolvableColumns(ParsedExpression &expr, vector<identifier_s
 		result.push_back(col_ref);
 		return;
 	}
-	case ExpressionClass::LAMBDA: {
-		auto &lambda = expr.Cast<LambdaExpression>();
-		string error_message;
-		auto parameters = lambda.ExtractColumnRefExpressions(error_message);
-		if (!error_message.empty()) {
-			// the LHS is not a parameter list, so this is the JSON arrow operator: both sides are
-			// ordinary expressions and nothing is bound by the lambda
-			CollectResolvableColumns(*lambda.LeftMutable(), lambda_params, result);
-			CollectResolvableColumns(*lambda.RightMutable(), lambda_params, result);
-			return;
+	case ExpressionClass::FUNCTION: {
+		auto &function = expr.Cast<FunctionExpression>();
+		if (!function.IsLambdaFunction()) {
+			break;
 		}
-		lambda_params.emplace_back();
-		for (auto &parameter : parameters) {
-			lambda_params.back().emplace(parameter.get().Cast<ColumnRefExpression>().GetName());
-		}
-		// only the body can reference anything outside the lambda
-		CollectResolvableColumns(*lambda.RightMutable(), lambda_params, result);
-		lambda_params.pop_back();
+		ColumnQualifier::EnumerateCallChildren(
+		    binder, function,
+		    [&](unique_ptr<ParsedExpression> &child) {
+			    CollectResolvableColumns(binder, *child, lambda_params, result);
+		    },
+		    [&](LambdaExpression &lambda, identifier_set_t &parameters) {
+			    lambda_params.push_back(std::move(parameters));
+			    CollectResolvableColumns(binder, *lambda.RightMutable(), lambda_params, result);
+			    lambda_params.pop_back();
+		    });
 		return;
 	}
 	default:
 		break;
 	}
 	ParsedExpressionIterator::EnumerateChildren(
-	    expr, [&](ParsedExpression &child) { CollectResolvableColumns(child, lambda_params, result); });
-}
-
-//! Reads lambda declarations as `ColumnQualifier::QualifyColumnNames` does, since that walk decides which names stay
-//! bare: only a lambda passed as a function argument declares parameters, and any other arrow is the JSON operator.
-static bool ReferencesLambdaParameter(ParsedExpression &expr, optional_ptr<vector<DummyBinding>> lambda_bindings,
-                                      vector<identifier_set_t> &declared_params) {
-	switch (expr.GetExpressionClass()) {
-	case ExpressionClass::SUBQUERY:
-		return false;
-	case ExpressionClass::COLUMN_REF: {
-		auto &col_ref = expr.Cast<ColumnRefExpression>();
-		return !col_ref.IsQualified() &&
-		       !LambdaExpression::IsLambdaParameter(declared_params, col_ref.GetColumnName()) &&
-		       LambdaRefExpression::FindMatchingBinding(lambda_bindings, col_ref.GetColumnName());
-	}
-	case ExpressionClass::FUNCTION: {
-		auto &function = expr.Cast<FunctionExpression>();
-		if (!function.IsLambdaFunction()) {
-			break;
-		}
-		for (auto &argument : function.GetArgumentsMutable()) {
-			auto &child = *argument.GetExpressionMutable();
-			if (child.GetExpressionClass() != ExpressionClass::LAMBDA) {
-				if (ReferencesLambdaParameter(child, lambda_bindings, declared_params)) {
-					return true;
-				}
-				continue;
-			}
-			auto &lambda = child.Cast<LambdaExpression>();
-			string error_message;
-			auto parameters = lambda.ExtractColumnRefExpressions(error_message);
-			if (!error_message.empty()) {
-				if (ReferencesLambdaParameter(*lambda.LeftMutable(), lambda_bindings, declared_params) ||
-				    ReferencesLambdaParameter(*lambda.RightMutable(), lambda_bindings, declared_params)) {
-					return true;
-				}
-				continue;
-			}
-			declared_params.emplace_back();
-			for (auto &parameter : parameters) {
-				declared_params.back().emplace(parameter.get().Cast<ColumnRefExpression>().GetName());
-			}
-			auto found = ReferencesLambdaParameter(*lambda.RightMutable(), lambda_bindings, declared_params);
-			declared_params.pop_back();
-			if (found) {
-				return true;
-			}
-		}
-		return false;
-	}
-	default:
-		break;
-	}
-	bool found = false;
-	ParsedExpressionIterator::EnumerateChildren(expr, [&](ParsedExpression &child) {
-		found = found || ReferencesLambdaParameter(child, lambda_bindings, declared_params);
-	});
-	return found;
+	    expr, [&](ParsedExpression &child) { CollectResolvableColumns(binder, child, lambda_params, result); });
 }
 
 bool ExpressionBinder::ReferencesLambdaParameter(ParsedExpression &expr) {
 	if (!lambda_bindings) {
 		return false;
 	}
-	vector<identifier_set_t> declared_params;
-	return duckdb::ReferencesLambdaParameter(expr, lambda_bindings, declared_params);
+	vector<reference<ColumnRefExpression>> columns;
+	vector<identifier_set_t> lambda_params;
+	CollectResolvableColumns(binder, expr, lambda_params, columns);
+	for (auto &column : columns) {
+		auto &col_ref = column.get();
+		if (!col_ref.IsQualified() &&
+		    LambdaRefExpression::FindMatchingBinding(lambda_bindings, col_ref.GetColumnName())) {
+			return true;
+		}
+	}
+	return false;
 }
 
 optional_idx ExpressionBinder::ResolveAggregateOwner(FunctionExpression &aggregate, idx_t start) {
-	vector<reference<ColumnRefExpression>> columns;
-	vector<identifier_set_t> lambda_params;
-	for (auto &child : aggregate.GetArgumentsMutable()) {
-		CollectResolvableColumns(*child.GetExpressionMutable(), lambda_params, columns);
-	}
-	if (aggregate.Filter()) {
-		CollectResolvableColumns(*aggregate.FilterMutable(), lambda_params, columns);
-	}
-	if (aggregate.OrderBy()) {
-		for (auto &order : aggregate.OrderByMutable()->orders) {
-			CollectResolvableColumns(*order.expression, lambda_params, columns);
-		}
-	}
-	return ResolveOwner(columns, start);
+	return ResolveExpressionOwner(aggregate, start);
 }
 
 optional_idx ExpressionBinder::ResolveExpressionOwner(ParsedExpression &expr, idx_t start) {
 	vector<reference<ColumnRefExpression>> columns;
 	vector<identifier_set_t> lambda_params;
-	CollectResolvableColumns(expr, lambda_params, columns);
+	CollectResolvableColumns(binder, expr, lambda_params, columns);
 	return ResolveOwner(columns, start);
 }
 

@@ -1,0 +1,171 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_json_arrow.test
+# description: A JSON arrow inside an ordinary function in a lambda body names the lambda parameter, and a single arrow at a lambda position is still a lambda
+# group: [lambdas]
+
+require json
+
+statement ok
+CREATE TABLE t AS SELECT '{"f": "bbbb"}'::JSON AS k;
+
+# the group is over the column k, the body's k is the parameter
+
+query I
+SELECT list_transform(['{"f": "a"}'::JSON], lambda k: concat(k -> 'f', '')) FROM t GROUP BY concat(k -> 'f', '');
+----
+['"a"']
+
+query I
+SELECT list_transform(['{"f": "a"}'::JSON], lambda k: concat(k ->> 'f', '')) FROM t GROUP BY concat(k ->> 'f', '');
+----
+[a]
+
+query I
+SELECT list_transform(['{"f": "a"}'::JSON], lambda k: lower(k -> 'f')) FROM t GROUP BY lower(k -> 'f');
+----
+['"a"']
+
+query II
+SELECT lower(k -> 'f'), list_transform(['{"f": "a"}'::JSON], lambda k: lower(k -> 'f')) FROM t GROUP BY lower(k -> 'f') HAVING list_transform(['{"f": "a"}'::JSON], lambda k: lower(k -> 'f')) = ['"a"'] ORDER BY list_transform(['{"f": "a"}'::JSON], lambda k: lower(k -> 'f'));
+----
+"bbbb"	['"a"']
+
+query II
+SELECT lower(k -> 'f'), row_number() OVER () FROM t GROUP BY lower(k -> 'f') QUALIFY list_transform(['{"f": "a"}'::JSON], lambda k: lower(k -> 'f')) = ['"a"'];
+----
+"bbbb"	1
+
+# the arrow over the grouped column outside the lambda is still the group
+
+query II
+SELECT lower(k -> 'f'), list_transform([1], lambda x: lower(k -> 'f')) FROM t GROUP BY lower(k -> 'f');
+----
+"bbbb"	['"bbbb"']
+
+statement error
+SELECT list_transform([1], lambda x: lower(k -> 'f')) FROM t GROUP BY lower(k ->> 'f');
+----
+must appear in the GROUP BY clause
+
+# a lambda whose body holds a JSON arrow on its own parameter
+
+query I
+SELECT list_transform(['{"f": 1}'::JSON, NULL, '{"g": 2}'::JSON], lambda x: x -> 'f') FROM t;
+----
+[1, NULL, NULL]
+
+# a keyword lambda is a lambda in any position, and errors where the function takes none
+
+statement error
+SELECT concat(lambda x: x, '');
+----
+This scalar function does not support lambdas!
+
+# a macro cannot hand a parameter on to a lambda position
+
+statement error
+CREATE MACRO apply_f(l, f) AS list_transform(l, f);
+----
+Invalid lambda expression!
+
+# under the single arrow syntax, an arrow at the lambda position stays a lambda
+
+statement ok
+SET lambda_syntax = 'ENABLE_SINGLE_ARROW';
+
+query I
+SELECT list_transform([1, 2], x -> x + 1) FROM (SELECT 10 AS x);
+----
+[2, 3]
+
+query I
+SELECT (SELECT max(list_transform([1], x -> x + 1)[1])) FROM range(3) t(x);
+----
+2
+2
+2
+
+query I
+SELECT (SELECT max(list_reduce([1, 2, 3], (x, y) -> x + y))) FROM range(3) t(x);
+----
+6
+6
+6
+
+query I
+SELECT (SELECT max(invoke(x -> x + 1, 41))) FROM range(3) t(x);
+----
+42
+42
+42
+
+query I
+SELECT (SELECT max(l.list_transform(x -> x + 1)[1]) FROM (SELECT [1] AS l) i) FROM range(3) t(x);
+----
+2
+2
+2
+
+query I
+SELECT (SELECT max(l.list_transform(x -> x + 1)[1]) FROM (SELECT 7 AS x)) FROM (SELECT [1] AS l UNION ALL SELECT [2] UNION ALL SELECT [3]);
+----
+4
+
+# a call written on a column in a macro body, expanded three times in one statement
+
+statement ok
+CREATE MACRO plus_one_each(v, x) AS v.list_transform(x -> x + 1);
+
+query III
+SELECT plus_one_each(l, 100), plus_one_each(s, 100), plus_one_each(l, 100) FROM (SELECT [1, 2, 3] AS l, [4, 5] AS s);
+----
+[2, 3, 4]	[5, 6]	[2, 3, 4]
+
+# the same arrow in a function that takes no lambda is the JSON operator over the outer column
+
+query I
+SELECT (SELECT max(lower(x -> '$.a'))) FROM (SELECT '{"a": 1}'::JSON AS x UNION ALL SELECT '{"a": 2}'::JSON);
+----
+2
+
+# ON CONFLICT DO UPDATE SET leaves the parameter bare although the table has a column of its name, also in a call
+# written on a qualified column
+
+statement ok
+CREATE TABLE ul (id INTEGER PRIMARY KEY, l INTEGER[], v INTEGER[], x INTEGER);
+
+statement ok
+INSERT INTO ul VALUES (1, [1, 2], NULL, 100);
+
+statement ok
+INSERT INTO ul VALUES (1, [5], NULL, 7) ON CONFLICT DO UPDATE SET v = list_transform(l, x -> x + 1);
+
+query I
+SELECT v FROM ul;
+----
+[2, 3]
+
+statement ok
+INSERT INTO ul VALUES (1, [5], NULL, 7) ON CONFLICT DO UPDATE SET v = excluded.l.list_transform(x -> x + 10);
+
+query I
+SELECT v FROM ul;
+----
+[15]
+
+statement ok
+INSERT INTO ul VALUES (1, [5], NULL, 7) ON CONFLICT DO UPDATE SET v = ul.l.list_transform(x -> x + 20);
+
+query I
+SELECT v FROM ul;
+----
+[21, 22]
+
+# a bare column in the lambda body is the existing row's
+
+statement ok
+INSERT INTO ul VALUES (1, [5], NULL, 7) ON CONFLICT DO UPDATE SET v = list_transform(l, lambda q: x);
+
+query I
+SELECT v FROM ul;
+----
+[100, 100]

@@ -454,20 +454,27 @@ BindResult ExpressionBinder::BindFunction(FunctionExpression &function, ScalarFu
 	return BindResult(std::move(result));
 }
 
+optional_idx ExpressionBinder::GetLambdaArgumentIndex(ScalarFunctionCatalogEntry &function) {
+	if (!function.functions.functions.front()->HasBindLambdaCallback()) {
+		return optional_idx();
+	}
+	// list lambda functions use the existing (list, lambda) shape; invoke is the only lambda
+	// function that accepts the lambda expression as the first argument.
+	return optional_idx(function.name == "invoke" ? 0 : 1);
+}
+
 BindResult ExpressionBinder::BindLambdaFunction(FunctionExpression &function, ScalarFunctionCatalogEntry &func,
                                                 idx_t depth) {
-	// get the callback function for the lambda parameter types
-	auto &scalar_function = *func.functions.functions.front();
-	auto bind_lambda_function = scalar_function.GetBindLambdaCallback();
-	if (!bind_lambda_function) {
+	auto lambda_argument_index = GetLambdaArgumentIndex(func);
+	if (!lambda_argument_index.IsValid()) {
 		return BindResult("This scalar function does not support lambdas!");
 	}
+	// get the callback function for the lambda parameter types
+	auto bind_lambda_function = func.functions.functions.front()->GetBindLambdaCallback();
 
 	auto &args = function.GetArgumentsMutable();
 
-	// list lambda functions use the existing (list, lambda) shape; invoke is the only lambda
-	// function that accepts the lambda expression as the first argument.
-	const idx_t lambda_expr_idx = func.name == "invoke" ? 0 : 1;
+	const idx_t lambda_expr_idx = lambda_argument_index.GetIndex();
 	if (args.size() <= lambda_expr_idx ||
 	    args[lambda_expr_idx].GetExpression().GetExpressionClass() != ExpressionClass::LAMBDA) {
 		return BindResult("This scalar function requires a lambda expression!");

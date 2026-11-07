@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/identifier.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enums/join_type.hpp"
 #include "duckdb/common/enums/merge_action_type.hpp"
@@ -263,6 +264,8 @@ public:
 	optional_ptr<DummyBinding> macro_binding;
 	//! The intermediate lambda bindings to bind nested lambdas (if any)
 	optional_ptr<vector<DummyBinding>> lambda_bindings;
+	//! Per qualified name as written in a call, the written argument that takes a lambda (see ColumnQualifier)
+	unordered_map<string, optional_idx> lambda_argument_positions;
 
 	unordered_map<TableIndex, LogicalOperator *> recursive_ctes;
 

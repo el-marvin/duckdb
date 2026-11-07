@@ -13,6 +13,7 @@
 namespace duckdb {
 class ColumnAliasBinder;
 class HavingBinder;
+class LambdaExpression;
 
 class ColumnQualifier {
 public:
@@ -45,6 +46,15 @@ public:
 
 	optional_ptr<CatalogEntry> QualifyFunction(FunctionExpression &function);
 
+	//! Whether argument index of the call binds as a lambda, filling in the parameter names it declares
+	static bool TryGetLambdaParameters(Binder &binder, const FunctionExpression &function, idx_t index,
+	                                   identifier_set_t &parameters);
+	//! Visits the children of a call, handing each argument that binds as a lambda to lambda_callback instead
+	static void EnumerateCallChildren(
+	    Binder &binder, FunctionExpression &function,
+	    const std::function<void(unique_ptr<ParsedExpression> &child)> &callback,
+	    const std::function<void(LambdaExpression &lambda, identifier_set_t &parameters)> &lambda_callback);
+
 private:
 	Binder &binder;
 	optional_ptr<vector<DummyBinding>> lambda_bindings;
@@ -60,6 +70,11 @@ private:
 	bool TableNameExists(const Identifier &table_name);
 
 	unique_ptr<ParsedExpression> QualifyColumnNameInternal(ColumnRefExpression &col_ref, ErrorData &error);
+	//! The argument of the call as written that takes a lambda, looked up once per function name and binder
+	static optional_idx GetLambdaArgumentPosition(Binder &binder, const FunctionExpression &function);
+	//! The function entry of the call; dot_call says it is written on a column, as in "x.lower()"
+	static optional_ptr<CatalogEntry> FindFunction(Binder &binder, const FunctionExpression &function,
+	                                               const QualifiedName &name, bool &dot_call);
 };
 
 } // namespace duckdb

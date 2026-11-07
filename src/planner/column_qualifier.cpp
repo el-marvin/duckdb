@@ -1,5 +1,6 @@
 #include "duckdb/planner/column_qualifier.hpp"
 
+#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
@@ -7,6 +8,7 @@
 #include "duckdb/parser/expression/lambda_expression.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/expression/positional_reference_expression.hpp"
+#include "duckdb/planner/expression_binder.hpp"
 #include "duckdb/planner/expression_binder/having_binder.hpp"
 #include "duckdb/planner/planner_extension.hpp"
 
@@ -257,39 +259,40 @@ void ColumnQualifier::QualifyColumnNames(unique_ptr<ParsedExpression> &expr, vec
 	});
 }
 
+optional_ptr<CatalogEntry> ColumnQualifier::FindFunction(Binder &binder, const FunctionExpression &function,
+                                                         const QualifiedName &name, bool &dot_call) {
+	dot_call = false;
+	QueryErrorContext error_context(function.GetQueryLocation());
+	EntryLookupInfo function_lookup(CatalogType::SCALAR_FUNCTION_ENTRY, QualifiedName(name.Name()), error_context);
+	// resolve the qualification: this decides whether a leading component (e.g. "s1" in "s1.s2.my_macro()") is a
+	// catalog or the outermost schema of a nested schema path. The name as written is left alone - the dot-call
+	// rewrite turns the qualification into a column reference and needs it unresolved.
+	auto bound_name = Binder::BindTableName(binder.EntryRetriever(), name);
+	auto func = binder.GetCatalogEntry(EntryLookupInfo(function_lookup, bound_name), OnEntryNotFound::RETURN_NULL);
+	if (func) {
+		return func;
+	}
+	if (name.Schema().empty()) {
+		return nullptr;
+	}
+	// the schema is set - a function of that name in the system catalog makes this a dot call on a column
+	func = binder.GetCatalogEntry(Identifier::InvalidCatalog(), Identifier::InvalidSchema(), function_lookup,
+	                              OnEntryNotFound::RETURN_NULL);
+	dot_call = func != nullptr;
+	return func;
+}
+
 optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &function) {
 	D_ASSERT(!ExpressionBinder::IsUnnestFunction(function.FunctionName()));
-	// lookup the function in the catalog
-	QueryErrorContext error_context(function.GetQueryLocation());
 	// promote a lone qualifier that names an attached database to a catalog, so that "db.f()" is not mistaken for a
 	// dot-call on a column named "db" by the rewrite below
 	binder.BindSchemaOrCatalog(function.GetQualifiedNameMutable());
 
-	EntryLookupInfo function_lookup(CatalogType::SCALAR_FUNCTION_ENTRY, QualifiedName(function.FunctionName()),
-	                                error_context);
-	// resolve the qualification: this decides whether a leading component (e.g. "s1" in "s1.s2.my_macro()") is a
-	// catalog or the outermost schema of a nested schema path. The name as written is left alone - the dot-call
-	// rewrite below turns the qualification into a column reference and needs it unresolved.
-	auto bound_name = Binder::BindTableName(binder.EntryRetriever(), function.GetQualifiedName());
-	auto func = binder.GetCatalogEntry(EntryLookupInfo(function_lookup, bound_name), OnEntryNotFound::RETURN_NULL);
-	if (func) {
-		// found the function - we are done
+	bool dot_call;
+	auto func = FindFunction(binder, function, function.GetQualifiedName(), dot_call);
+	if (!dot_call) {
 		return func;
 	}
-	// not a table function - check if the schema is set
-	if (function.GetQualifiedName().Schema().empty()) {
-		// schema is not set - leave it as-is
-		return nullptr;
-	}
-	// the schema is set - check if we can turn this the schema into a column ref
-	// does this function exist in the system catalog?
-	func = binder.GetCatalogEntry(Identifier::InvalidCatalog(), Identifier::InvalidSchema(), function_lookup,
-	                              OnEntryNotFound::RETURN_NULL);
-	if (!func) {
-		// we could not find the function - bail
-		return nullptr;
-	}
-	// the function exists in the system catalog - turn this into a dot call
 	ErrorData error;
 	unique_ptr<ColumnRefExpression> colref;
 	if (function.GetQualifiedName().Catalog().empty()) {
@@ -303,50 +306,105 @@ optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &
 		new_colref = std::move(colref);
 	}
 	new_colref->ClearAlias();
-	// we can! transform this into a function call on the column
+	// transform this into a function call on the column
 	// i.e. "x.lower()" becomes "lower(x)"
 	function.GetArgumentsMutable().insert(function.GetArgumentsMutable().begin(), std::move(new_colref));
 	function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Name()));
 	return func;
 }
 
+optional_idx ColumnQualifier::GetLambdaArgumentPosition(Binder &binder, const FunctionExpression &function) {
+	string key;
+	for (auto &part : function.GetQualifiedName().Path()) {
+		key += part.GetIdentifierName();
+		key += '\0';
+	}
+	auto cached = binder.lambda_argument_positions.find(key);
+	if (cached != binder.lambda_argument_positions.end()) {
+		return cached->second;
+	}
+	auto name = function.GetQualifiedName();
+	binder.BindSchemaOrCatalog(name);
+	bool dot_call;
+	auto func = FindFunction(binder, function, name, dot_call);
+	optional_idx position;
+	if (func && func->type == CatalogType::SCALAR_FUNCTION_ENTRY) {
+		auto lambda_index = ExpressionBinder::GetLambdaArgumentIndex(func->Cast<ScalarFunctionCatalogEntry>());
+		// the receiver of a dot call is the function's first argument, so the written arguments start at the second
+		if (lambda_index.IsValid() && (!dot_call || lambda_index.GetIndex() > 0)) {
+			position = optional_idx(lambda_index.GetIndex() - (dot_call ? 1 : 0));
+		}
+	}
+	binder.lambda_argument_positions.emplace(std::move(key), position);
+	return position;
+}
+
+bool ColumnQualifier::TryGetLambdaParameters(Binder &binder, const FunctionExpression &function, idx_t index,
+                                             identifier_set_t &parameters) {
+	auto &argument = function.GetArguments()[index].GetExpression();
+	if (argument.GetExpressionClass() != ExpressionClass::LAMBDA) {
+		return false;
+	}
+	auto &lambda = argument.Cast<LambdaExpression>();
+	if (lambda.GetLambdaSyntaxType() != LambdaSyntaxType::LAMBDA_KEYWORD) {
+		auto position = GetLambdaArgumentPosition(binder, function);
+		if (!position.IsValid() || position.GetIndex() != index) {
+			return false;
+		}
+	}
+	string error_message;
+	auto column_refs = lambda.ExtractColumnRefExpressions(error_message);
+	if (!error_message.empty()) {
+		return false;
+	}
+	for (auto &column_ref : column_refs) {
+		parameters.insert(column_ref.get().Cast<ColumnRefExpression>().GetName());
+	}
+	return true;
+}
+
+void ColumnQualifier::EnumerateCallChildren(
+    Binder &binder, FunctionExpression &function,
+    const std::function<void(unique_ptr<ParsedExpression> &child)> &callback,
+    const std::function<void(LambdaExpression &lambda, identifier_set_t &parameters)> &lambda_callback) {
+	auto &arguments = function.GetArgumentsMutable();
+	for (idx_t i = 0; i < arguments.size(); i++) {
+		auto &child = arguments[i].GetExpressionMutable();
+		identifier_set_t parameters;
+		if (TryGetLambdaParameters(binder, function, i, parameters)) {
+			lambda_callback(child->Cast<LambdaExpression>(), parameters);
+		} else {
+			callback(child);
+		}
+	}
+	if (function.FilterMutable()) {
+		callback(function.FilterMutable());
+	}
+	if (function.OrderByMutable()) {
+		for (auto &order : function.OrderByMutable()->orders) {
+			callback(order.expression);
+		}
+	}
+}
+
 void ColumnQualifier::QualifyColumnNamesInLambda(FunctionExpression &function,
                                                  vector<identifier_set_t> &lambda_params) {
-	for (auto &child : function.GetArgumentsMutable()) {
-		if (child.GetExpression().GetExpressionClass() != ExpressionClass::LAMBDA) {
-			// not a lambda expression
-			QualifyColumnNames(child.GetExpressionMutable(), lambda_params, true);
-			continue;
-		}
-
-		// special-handling for LHS lambda parameters
-		// we do not qualify them, and we add them to the lambda_params vector
-		auto &lambda_expr = child.GetExpressionMutable()->Cast<LambdaExpression>();
-		string error_message;
-		auto column_ref_expressions = lambda_expr.ExtractColumnRefExpressions(error_message);
-
-		if (!error_message.empty()) {
-			// possibly a JSON function, qualify both LHS and RHS
-			QualifyColumnNames(lambda_expr.LeftMutable(), lambda_params, true);
-			QualifyColumnNames(lambda_expr.RightMutable(), lambda_params, true);
-			continue;
-		}
-
-		// push this level
-		lambda_params.emplace_back();
-
-		// push the lambda parameter names
-		for (const auto &column_ref_expr : column_ref_expressions) {
-			const auto &column_ref = column_ref_expr.get().Cast<ColumnRefExpression>();
-			lambda_params.back().emplace(column_ref.GetName());
-		}
-
-		// only qualify in RHS
-		QualifyColumnNames(lambda_expr.RightMutable(), lambda_params, true);
-
-		// pop this level
-		lambda_params.pop_back();
-	}
+	EnumerateCallChildren(
+	    binder, function,
+	    [&](unique_ptr<ParsedExpression> &child) {
+		    if (child->GetExpressionClass() != ExpressionClass::LAMBDA) {
+			    QualifyColumnNames(child, lambda_params, true);
+			    return;
+		    }
+		    auto &arrow = child->Cast<LambdaExpression>();
+		    QualifyColumnNames(arrow.LeftMutable(), lambda_params, true);
+		    QualifyColumnNames(arrow.RightMutable(), lambda_params, true);
+	    },
+	    [&](LambdaExpression &lambda, identifier_set_t &parameters) {
+		    lambda_params.push_back(std::move(parameters));
+		    QualifyColumnNames(lambda.RightMutable(), lambda_params, true);
+		    lambda_params.pop_back();
+	    });
 }
 
 unique_ptr<ParsedExpression> ColumnQualifier::QualifyColumnNameWithManyDotsInternal(ColumnRefExpression &col_ref,
