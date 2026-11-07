@@ -118,7 +118,7 @@ unique_ptr<BoundAtClause> Binder::BindAtClause(optional_ptr<AtClause> at_clause)
 	return make_uniq<BoundAtClause>(at_clause->Unit(), std::move(val));
 }
 
-vector<CatalogSearchEntry> Binder::GetSearchPath(Catalog &catalog, const vector<Identifier> &schema_path,
+vector<CatalogSearchEntry> Binder::GetSearchPath(const Catalog &catalog, const vector<Identifier> &schema_path,
                                                  bool default_schema_precedence) {
 	vector<CatalogSearchEntry> view_search_path;
 	auto &catalog_name = catalog.GetName();

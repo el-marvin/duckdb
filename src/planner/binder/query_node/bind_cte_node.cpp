@@ -130,8 +130,9 @@ void CTEBindState::Bind(CTEBinding &binding) {
 	query_binder = Binder::CreateBinder(parent_binder.context, parent_binder);
 	query_binder->SetCanContainNulls(true);
 	if (is_trigger_body) {
-		// what a fired trigger's body references is a dependency of that trigger, not of a trigger being created
-		query_binder->SetCatalogLookupCallback(nullptr);
+		auto trigger_schema = Catalog::GetSchema(parent_binder.context, trigger_catalog, trigger_schema_path,
+		                                         OnEntryNotFound::THROW_EXCEPTION);
+		query_binder->PrepareFiredTriggerBody(*trigger_schema);
 	}
 
 	// we clear any expression binders that were added in the mean-time, to ensure we are not binding to any newly added
@@ -179,6 +180,8 @@ BoundCTEData Binder::PrepareCTE(const Identifier &ctename, CommonTableExpression
 	// the CTE is bound lazily - when referenced for the first time we perform the binding
 	result.cte_bind_state = make_shared_ptr<CTEBindState>(*this, *statement.query_node, statement.aliases);
 	result.cte_bind_state->is_trigger_body = statement.is_trigger_body;
+	result.cte_bind_state->trigger_catalog = statement.trigger_catalog;
+	result.cte_bind_state->trigger_schema_path = statement.trigger_schema_path;
 
 	result.child_binder = Binder::CreateBinder(context, this);
 

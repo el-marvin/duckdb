@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/vector.hpp"
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/common/enums/cte_materialize.hpp"
 
 namespace duckdb {
@@ -36,6 +37,9 @@ struct CommonTableExpressionInfo {
 	bool is_trigger_generated = false;
 	//! Whether this CTE is the body of a trigger fired by the expansion
 	bool is_trigger_body = false;
+	//! The catalog and schema of that trigger, in which its body binds
+	Identifier trigger_catalog;
+	vector<Identifier> trigger_schema_path;
 
 	CTEMaterialize GetMaterializedForSerialization(Serializer &serializer) const;
 	unique_ptr<SelectStatement> GetQueryForSerialization(Serializer &serializer) const;

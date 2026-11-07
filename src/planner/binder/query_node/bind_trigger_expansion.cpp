@@ -324,6 +324,12 @@ static vector<pair<column_t, Identifier>> ReferencedVirtualColumns(vector<unique
 	return result;
 }
 
+static void MarkTriggerBody(CommonTableExpressionInfo &cte, const TriggerCatalogEntry &trigger) {
+	cte.is_trigger_body = true;
+	cte.trigger_catalog = trigger.ParentCatalog().GetName();
+	cte.trigger_schema_path = trigger.ParentSchema().GetSchemaPath();
+}
+
 static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<TriggerCatalogEntry>> &after_triggers,
                                 const Identifier &base_cte_name, const string &uuid_suffix,
                                 const identifier_set_t &injected_names, const TableCatalogEntry &table,
@@ -341,7 +347,7 @@ static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<
 		trig_cte->query_node = trigger.trigger_action->Copy();
 		trig_cte->materialized = CTEMaterialize::CTE_MATERIALIZE_DEFAULT;
 		trig_cte->is_trigger_generated = true;
-		trig_cte->is_trigger_body = true;
+		MarkTriggerBody(*trig_cte, trigger);
 
 		// Scoped to this body so sibling triggers can't see the alias.
 		auto &body_map = trig_cte->query_node->cte_map.map;
@@ -388,7 +394,7 @@ static unique_ptr<SelectNode> BuildTriggerChain(const QueryNode &node, const Tab
 		trig_cte->query_node = before_triggers[i].get().trigger_action->Copy();
 		trig_cte->materialized = CTEMaterialize::CTE_MATERIALIZE_DEFAULT;
 		trig_cte->is_trigger_generated = true;
-		trig_cte->is_trigger_body = true;
+		MarkTriggerBody(*trig_cte, before_triggers[i].get());
 		outer->cte_map.map[body_cte_name] = std::move(trig_cte);
 	}
 
@@ -609,6 +615,15 @@ string Binder::RowScopeName(TriggerEventType event_type) {
 	}
 }
 
+void Binder::SetTriggerBodySearchPath(const SchemaCatalogEntry &trigger_schema) {
+	entry_retriever.SetSearchPath(GetSearchPath(trigger_schema.ParentCatalog(), trigger_schema.GetSchemaPath(), true));
+}
+
+void Binder::PrepareFiredTriggerBody(const SchemaCatalogEntry &trigger_schema) {
+	SetCatalogLookupCallback(nullptr);
+	SetTriggerBodySearchPath(trigger_schema);
+}
+
 unique_ptr<ExpressionBinder> Binder::SetupRowScope(TableIndex table_index, const vector<Identifier> &col_names,
                                                    const vector<LogicalType> &col_types, const string &scope_name) {
 	bind_context.AddGenericBinding(table_index, Identifier(scope_name), col_names, col_types);
@@ -674,8 +689,7 @@ BoundStatement Binder::ExpandRowTriggers(QueryNode &node, vector<unique_ptr<Pars
 		auto &trigger = triggers[i].get();
 
 		auto child_binder = Binder::CreateBinder(context, this);
-		// what a fired trigger's body references is a dependency of that trigger, not of a trigger being created
-		child_binder->SetCatalogLookupCallback(nullptr);
+		child_binder->PrepareFiredTriggerBody(trigger.ParentSchema());
 		auto body_copy = trigger.trigger_action->Copy();
 		auto bound_body = child_binder->Bind(*body_copy);
 
