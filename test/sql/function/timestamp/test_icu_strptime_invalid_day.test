@@ -1,0 +1,306 @@
+# name: test/sql/function/timestamp/test_icu_strptime_invalid_day.test
+# description: The ICU strptime rejects a day its month does not have, as the core strptime does, in the session calendar
+# group: [timestamp]
+
+require icu
+
+statement ok
+SET Calendar = 'gregorian';
+
+statement ok
+SET TimeZone = 'UTC';
+
+# The core strptime and the ICU strptime (%Z) reject the same text
+statement error
+SELECT strptime('2023-02-29', '%Y-%m-%d');
+----
+Conversion Error
+
+statement error
+SELECT strptime('2023-02-29 UTC', '%Y-%m-%d %Z');
+----
+Conversion Error
+
+query II
+SELECT try_strptime('2023-02-29', '%Y-%m-%d'), try_strptime('2023-02-29 UTC', '%Y-%m-%d %Z');
+----
+NULL	NULL
+
+query II
+SELECT TRY(strptime('2023-02-29', '%Y-%m-%d')), TRY(strptime('2023-02-29 UTC', '%Y-%m-%d %Z'));
+----
+NULL	NULL
+
+# Every field class side by side: a day past its month (including the century and year 1 rules), the leap days that
+# exist, and the month, day and time values the parse itself rejects
+query III
+SELECT s, try_strptime(s, '%Y-%m-%d %H:%M:%S'), try_strptime(s || ' UTC', '%Y-%m-%d %H:%M:%S %Z')
+FROM (VALUES
+	(1, '2023-02-29 00:00:00'), (2, '2023-02-30 00:00:00'), (3, '2023-02-31 00:00:00'), (4, '2023-04-31 00:00:00'),
+	(5, '2023-06-31 00:00:00'), (6, '2023-09-31 00:00:00'), (7, '2023-11-31 00:00:00'), (8, '1900-02-29 00:00:00'),
+	(9, '0001-02-29 00:00:00'), (10, '2024-02-30 00:00:00'), (11, '2024-02-29 00:00:00'), (12, '2000-02-29 00:00:00'),
+	(13, '0000-02-29 00:00:00'), (14, '2023-02-28 00:00:00'), (15, '2023-04-30 00:00:00'), (16, '2023-12-31 00:00:00'),
+	(17, '2023-13-01 00:00:00'), (18, '2023-00-01 00:00:00'), (19, '2023-01-32 00:00:00'), (20, '2023-01-00 00:00:00'),
+	(21, '2023-01-01 24:00:00'), (22, '2023-01-01 23:60:00'), (23, '2023-01-01 23:59:60'), (24, '2023-01-01 23:59:61'),
+	(25, '2023-01-01 23:59:59'), (26, NULL)
+) t(i, s) ORDER BY i
+----
+2023-02-29 00:00:00	NULL	NULL
+2023-02-30 00:00:00	NULL	NULL
+2023-02-31 00:00:00	NULL	NULL
+2023-04-31 00:00:00	NULL	NULL
+2023-06-31 00:00:00	NULL	NULL
+2023-09-31 00:00:00	NULL	NULL
+2023-11-31 00:00:00	NULL	NULL
+1900-02-29 00:00:00	NULL	NULL
+0001-02-29 00:00:00	NULL	NULL
+2024-02-30 00:00:00	NULL	NULL
+2024-02-29 00:00:00	2024-02-29 00:00:00	2024-02-29 00:00:00+00
+2000-02-29 00:00:00	2000-02-29 00:00:00	2000-02-29 00:00:00+00
+0000-02-29 00:00:00	0001-02-29 (BC) 00:00:00	0001-02-29 (BC) 00:00:00+00
+2023-02-28 00:00:00	2023-02-28 00:00:00	2023-02-28 00:00:00+00
+2023-04-30 00:00:00	2023-04-30 00:00:00	2023-04-30 00:00:00+00
+2023-12-31 00:00:00	2023-12-31 00:00:00	2023-12-31 00:00:00+00
+2023-13-01 00:00:00	NULL	NULL
+2023-00-01 00:00:00	NULL	NULL
+2023-01-32 00:00:00	NULL	NULL
+2023-01-00 00:00:00	NULL	NULL
+2023-01-01 24:00:00	NULL	NULL
+2023-01-01 23:60:00	NULL	NULL
+2023-01-01 23:59:60	NULL	NULL
+2023-01-01 23:59:61	NULL	NULL
+2023-01-01 23:59:59	2023-01-01 23:59:59	2023-01-01 23:59:59+00
+NULL	NULL	NULL
+
+# Every month and day of years around the leap year rules give the same result in both
+query III
+SELECT count(*), count(*) FILTER ((c IS NULL) != (i IS NULL)), count(*) FILTER (c::TIMESTAMPTZ != i) FROM (
+	SELECT try_strptime(s, '%Y-%m-%d') c, try_strptime(s || ' UTC', '%Y-%m-%d %Z') i
+	FROM (
+		SELECT printf('%04d-%02d-%02d', y, m, d) s
+		FROM (SELECT unnest([0, 1, 2, 3, 4, 1896, 1900, 1904, 1996, 2000, 2004, 2096, 2100, 2104, 2400]) y), range(1, 13) u(m), range(1, 32) v(d)
+	)
+)
+----
+5580	0	0
+
+query II
+SELECT try_strptime('2023-2-29', '%Y-%-m-%-d'), try_strptime('2023-2-29 UTC', '%Y-%-m-%-d %Z');
+----
+NULL	NULL
+
+# The leap day that exists parses with strptime too
+query II
+SELECT strptime('2024-02-29', '%Y-%m-%d'), strptime('2024-02-29 UTC', '%Y-%m-%d %Z');
+----
+2024-02-29 00:00:00	2024-02-29 00:00:00+00
+
+# A format list with %z also parses through the ICU calendar
+query II
+SELECT try_strptime('2023-02-29 +0100', '%Y-%m-%d %z'), try_strptime('2023-02-29 +0100', ['%Y-%m-%d %z']);
+----
+NULL	NULL
+
+query II
+SELECT try_strptime('2024-02-29 +0100', '%Y-%m-%d %z'), try_strptime('2024-02-29 +0100', ['%Y-%m-%d %z']);
+----
+2024-02-28 23:00:00+00	2024-02-28 23:00:00+00
+
+statement error
+SELECT strptime('2023-02-29 +0100', ['%Y-%m-%d %z']);
+----
+Conversion Error
+
+# The core strptime takes any offset up to 99:99, and so does the ICU one
+query II
+SELECT try_strptime('2023-01-01 -2599', '%Y-%m-%d %z'), try_strptime('2023-01-01 -2599', ['%Y-%m-%d %z']);
+----
+2023-01-02 02:39:00+00	2023-01-02 02:39:00+00
+
+# A format whose day the month does not have gives way to a later format of the list
+query II
+SELECT try_strptime('2023-11-31', ['%Y-%m-%d', '%Y-%H-%M']), try_strptime('2023-11-31 UTC', ['%Y-%m-%d %Z', '%Y-%H-%M %Z']);
+----
+2023-01-01 11:31:00	2023-01-01 11:31:00+00
+
+# TIMESTAMP_NS and TIMESTAMP_TZ_NS
+query II
+SELECT try_strptime('2023-02-29 12:00:00.123456789', '%Y-%m-%d %H:%M:%S.%n'), try_strptime('2023-02-29 12:00:00.123456789 UTC', '%Y-%m-%d %H:%M:%S.%n %Z');
+----
+NULL	NULL
+
+statement error
+SELECT strptime('2023-02-29 12:00:00.123456789 UTC', '%Y-%m-%d %H:%M:%S.%n %Z');
+----
+Conversion Error
+
+query II
+SELECT strptime('2024-02-29 12:00:00.123456789', '%Y-%m-%d %H:%M:%S.%n'), strptime('2024-02-29 12:00:00.123456789 UTC', '%Y-%m-%d %H:%M:%S.%n %Z');
+----
+2024-02-29 12:00:00.123456789	2024-02-29 12:00:00.123456789+00
+
+# A format list with %z and %n parses with the session calendar and nanoseconds
+query II
+SELECT try_strptime('2023-02-29 12:00:00.123456789', ['%Y-%m-%d %H:%M:%S.%n %z', '%Y-%m-%d %H:%M:%S.%n']), try_strptime('2024-02-29 12:00:00.123456789', ['%Y-%m-%d %H:%M:%S.%n %z', '%Y-%m-%d %H:%M:%S.%n']);
+----
+NULL	2024-02-29 12:00:00.123456789+00
+
+# A rejected row does not change the rows after it, with the session zone or a zone named in the text
+query II
+SELECT s, try_strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d %Z', '%Y-%m-%d'])
+FROM (VALUES
+	(1, '2023-02-29 UTC'), (2, '2023-03-01 UTC'), (3, '2023-02-29 America/New_York'), (4, '2023-03-01 America/New_York'),
+	(5, '2024-02-29 America/New_York'), (6, '2023-02-29 +0100'), (7, '2023-03-01 +0100'), (8, '2023-02-29'),
+	(9, '2023-03-01')
+) t(i, s) ORDER BY i
+----
+2023-02-29 UTC	NULL
+2023-03-01 UTC	2023-03-01 00:00:00+00
+2023-02-29 America/New_York	NULL
+2023-03-01 America/New_York	2023-03-01 05:00:00+00
+2024-02-29 America/New_York	2024-02-29 05:00:00+00
+2023-02-29 +0100	NULL
+2023-03-01 +0100	2023-02-28 23:00:00+00
+2023-02-29	NULL
+2023-03-01	2023-03-01 00:00:00+00
+
+statement error
+SELECT strptime('2023-02-29 America/New_York', '%Y-%m-%d %Z');
+----
+Conversion Error
+
+# The session calendar decides how long a month is. The results are printed under the Gregorian calendar, so the
+# expected instants do not depend on how another calendar prints a timestamp.
+statement ok
+CREATE TABLE calendar_results (i INTEGER, calendar VARCHAR, s VARCHAR, ts TIMESTAMPTZ);
+
+# The Japanese calendar has the Gregorian months, but keeps the Julian calendar before October 1582. The month length
+# it reports for October 1582 is 31, as in ICU's own non lenient mode, so the ten days the switch skipped are accepted
+# and land after it.
+statement ok
+SET Calendar = 'japanese';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'japanese', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(1, '2023-02-29'), (2, '2024-02-29'), (3, '1500-02-29'), (4, '1582-10-04'), (5, '1582-10-10'), (6, '1582-10-15')
+) t(i, s);
+
+statement error
+SELECT strptime('2023-02-29 UTC', '%Y-%m-%d %Z');
+----
+Conversion Error
+
+# The second Persian month has 31 days and the seventh 30, the reverse of February and July; the last month has 30
+# days in a leap year only
+statement ok
+SET Calendar = 'persian';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'persian', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(10, '1402-02-31'), (11, '1402-07-30'), (12, '1402-07-31'), (13, '1402-12-30'), (14, '1403-12-30')
+) t(i, s);
+
+statement error
+SELECT strptime('1402-07-31 UTC', '%Y-%m-%d %Z');
+----
+Conversion Error
+
+query I
+SELECT strptime('1402-02-31 UTC', '%Y-%m-%d %Z') = strptime('1402-03-01 UTC', '%Y-%m-%d %Z') - INTERVAL 1 DAY;
+----
+true
+
+# The first Indian month has 31 days in a leap year only
+statement ok
+SET Calendar = 'indian';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'indian', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(20, '1945-01-31'), (21, '1946-01-31'), (22, '1945-02-31')
+) t(i, s);
+
+# Every Coptic month but the thirteenth has 30 days
+statement ok
+SET Calendar = 'coptic';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'coptic', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(30, '1740-01-30'), (31, '1740-01-31')
+) t(i, s);
+
+statement ok
+SET Calendar = 'islamic-civil';
+
+# A day of the year is computed by the parse, so only a day the text names is checked
+statement ok
+INSERT INTO calendar_results SELECT i, 'islamic-civil', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(40, '1445-01-30'), (41, '1445-02-30')
+) t(i, s) UNION ALL SELECT 42, 'islamic-civil', '1445-031', try_strptime('1445-031 UTC', '%Y-%j %Z');
+
+statement ok
+SET Calendar = 'islamic-umalqura';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'islamic-umalqura', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(50, '1445-01-30'), (51, '1445-02-30')
+) t(i, s);
+
+# The month before a leap month is measured without it
+statement ok
+SET Calendar = 'chinese';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'chinese', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(60, '2024-01-29'), (61, '2024-01-30'), (62, '2024-02-30'), (63, '2017-06-29'), (64, '2017-06-30')
+) t(i, s);
+
+# Adar I, the sixth month, exists only in a leap year
+statement ok
+SET Calendar = 'hebrew';
+
+statement ok
+INSERT INTO calendar_results SELECT i, 'hebrew', s, try_strptime(s || ' UTC', '%Y-%m-%d %Z') FROM (VALUES
+	(70, '5784-06-01'), (71, '5783-06-01'), (72, '5783-07-29'), (73, '5783-07-30')
+) t(i, s);
+
+statement error
+SELECT strptime('5783-06-01 UTC', '%Y-%m-%d %Z');
+----
+Conversion Error
+
+statement ok
+SET Calendar = 'gregorian';
+
+query III
+SELECT calendar, s, ts FROM calendar_results ORDER BY i
+----
+japanese	2023-02-29	NULL
+japanese	2024-02-29	2024-02-29 00:00:00+00
+japanese	1500-02-29	1500-03-10 00:00:00+00
+japanese	1582-10-04	1582-10-14 00:00:00+00
+japanese	1582-10-10	1582-10-20 00:00:00+00
+japanese	1582-10-15	1582-10-15 00:00:00+00
+persian	1402-02-31	2023-05-21 00:00:00+00
+persian	1402-07-30	2023-10-22 00:00:00+00
+persian	1402-07-31	NULL
+persian	1402-12-30	NULL
+persian	1403-12-30	2025-03-20 00:00:00+00
+indian	1945-01-31	NULL
+indian	1946-01-31	2024-04-20 00:00:00+00
+indian	1945-02-31	2023-05-21 00:00:00+00
+coptic	1740-01-30	2023-10-11 00:00:00+00
+coptic	1740-01-31	NULL
+islamic-civil	1445-01-30	2023-08-17 00:00:00+00
+islamic-civil	1445-02-30	NULL
+islamic-civil	1445-031	2023-08-18 00:00:00+00
+islamic-umalqura	1445-01-30	NULL
+islamic-umalqura	1445-02-30	2023-09-15 00:00:00+00
+chinese	2024-01-29	2024-03-09 00:00:00+00
+chinese	2024-01-30	NULL
+chinese	2024-02-30	2024-04-08 00:00:00+00
+chinese	2017-06-29	2017-07-22 00:00:00+00
+chinese	2017-06-30	NULL
+hebrew	5784-06-01	2024-02-10 00:00:00+00
+hebrew	5783-06-01	NULL
+hebrew	5783-07-29	2023-03-22 00:00:00+00
+hebrew	5783-07-30	NULL

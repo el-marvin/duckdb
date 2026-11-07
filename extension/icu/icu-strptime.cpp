@@ -92,9 +92,17 @@ struct ICUStrptime : public ICUDateFunc {
 		}
 	}
 
+	//! A day that the parse computed from the day of the year or a week is a Gregorian date already
+	static bool NamesDayOfMonth(const StrpTimeFormat &format) {
+		return format.HasFormatSpecifier(StrTimeSpecifier::DAY_OF_MONTH_PADDED) ||
+		       format.HasFormatSpecifier(StrTimeSpecifier::DAY_OF_MONTH);
+	}
+
 	static uint64_t ToMicros(Calendar *calendar, const ParseResult &parsed, const StrpTimeFormat &format) {
 		// Fields left by an earlier row or by the calendar's creation time must not change this row
 		calendar->Clear();
+		// As in the core strptime, a day the text names must exist in its month
+		calendar->SetLenientDays(!NamesDayOfMonth(format));
 		// Get the parts in the current time zone
 		uint64_t micros = parsed.GetMicros();
 		calendar->Set(CAL_EXTENDED_YEAR, parsed.data[0]); // strptime doesn't understand eras
@@ -118,6 +126,7 @@ struct ICUStrptime : public ICUDateFunc {
 	static uint64_t ToNanos(Calendar *calendar, const ParseResult &parsed, const StrpTimeFormat &format) {
 		// Fields left by an earlier row or by the calendar's creation time must not change this row
 		calendar->Clear();
+		calendar->SetLenientDays(!NamesDayOfMonth(format));
 		// Get the parts in the current time zone
 		uint64_t nanos = parsed.data[6];
 		calendar->Set(CAL_EXTENDED_YEAR, parsed.data[0]); // strptime doesn't understand eras

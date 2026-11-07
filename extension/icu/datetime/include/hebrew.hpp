@@ -51,6 +51,9 @@ protected:
 	int64_t HandleComputeMonthStart(int32_t eyear, int32_t month, bool use_month) const override;
 	int32_t HandleGetMonthLength(int32_t eyear, int32_t month) const override;
 	int32_t HandleGetYearLength(int32_t eyear) const override;
+	bool HandleHasMonth(int32_t eyear, int32_t month) const override {
+		return month != ADAR_1 || IsLeapYear(eyear);
+	}
 	void HandleComputeFields(int32_t julian_day) override;
 	int32_t HandleGetExtendedYear() override;
 	int32_t HandleGetLimit(CalendarField field, LimitType type) const override;
