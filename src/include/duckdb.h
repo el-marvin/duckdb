@@ -3326,7 +3326,7 @@ DUCKDB_C_API void duckdb_destroy_cast_function(duckdb_cast_function *cast_functi
 #if DUCKDB_API_VERSION_AT_LEAST(1, 5, 6)
 /*!
  * Retrieve a database catalog instance by name. This function can only be called from within the context of an active
- * transaction, e.g. during execution of a registered function callback. Otherwise returns `nullptr`.
+ * transaction, e.g., during execution of a registered function callback. Otherwise returns `nullptr`.
  *
  * history:
  * - unstable: v1.5.0
@@ -4576,7 +4576,7 @@ DUCKDB_C_API duckdb_state duckdb_open_ext(const char *path, duckdb_database *out
 /*!
  * Closes the specified database and de-allocates all memory allocated for that database. This should be called after
  * you are done with any database allocated through `duckdb_open` or `duckdb_open_ext`. Note that failing to call
- * `duckdb_close` (in case of e.g. a program crash) will not cause data corruption. Still, it is recommended to always
+ * `duckdb_close` (in case of e.g., a program crash) will not cause data corruption. Still, it is recommended to always
  * correctly close a database object after you are done with it.
  *
  * history:
@@ -4637,7 +4637,7 @@ DUCKDB_C_API size_t duckdb_config_count(void);
 #if DUCKDB_API_VERSION_AT_LEAST(0, 2, 8)
 /*!
  * Obtains a human-readable name and description of a specific configuration option. This can be used to e.g. display
- * configuration options. This will succeed unless `index` is out of range (i.e. `>= duckdb_config_count`).
+ * configuration options. This will succeed unless `index` is out of range (i.e., `>= duckdb_config_count`).
  *
  * The result name or description MUST NOT be freed.
  *
@@ -6935,8 +6935,8 @@ DUCKDB_C_API bool *duckdb_nullmask_data(duckdb_result *result, idx_t col);
  * This function supersedes all `duckdb_value` functions, as well as the `duckdb_column_data` and `duckdb_nullmask_data`
  * functions. It results in significantly better performance, and should be preferred in newer code-bases.
  *
- * If this function is used, none of the other result functions can be used and vice versa (i.e. this function cannot be
- * mixed with the legacy result functions).
+ * If this function is used, none of the other result functions can be used and vice versa (i.e., this function cannot
+ * be mixed with the legacy result functions).
  *
  * Use `duckdb_result_chunk_count` to figure out how many chunks there are in the result.
  *
@@ -6994,8 +6994,8 @@ DUCKDB_C_API idx_t duckdb_result_chunk_count(duckdb_result result);
  *
  * This function can only be used on duckdb_results created with 'duckdb_pending_prepared_streaming'
  *
- * If this function is used, none of the other result functions can be used and vice versa (i.e. this function cannot be
- * mixed with the legacy result functions or the materialized result functions).
+ * If this function is used, none of the other result functions can be used and vice versa (i.e., this function cannot
+ * be mixed with the legacy result functions or the materialized result functions).
  *
  * It is not known beforehand how many chunks will be returned by this result.
  *
@@ -9818,7 +9818,8 @@ DUCKDB_C_API duckdb_interval duckdb_value_interval(duckdb_result *result, idx_t 
 
 #if (DUCKDB_API_VERSION_BELOW(1, 0, 0) || DUCKDB_API_ALLOW_DEPRECATED)
 /*!
- * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release.
+ * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release. Use `duckdb_value_string` instead.
+ * This function does not work correctly if the string contains null bytes.
  *
  * history:
  * - stable: v0.1.0
@@ -9836,6 +9837,9 @@ DUCKDB_C_API char *duckdb_value_varchar(duckdb_result *result, idx_t col, idx_t 
 /*!
  * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release.
  *
+ * No support for nested types, and for other complex types. The resulting field "string.data" must be freed with
+ * `duckdb_free`.
+ *
  * history:
  * - stable: v0.6.0
  * - deprecated: v1.0.0
@@ -9850,7 +9854,8 @@ DUCKDB_C_API duckdb_string duckdb_value_string(duckdb_result *result, idx_t col,
 
 #if DUCKDB_API_VERSION_AT_LEAST(0, 2, 9) && (DUCKDB_API_VERSION_BELOW(1, 0, 0) || DUCKDB_API_ALLOW_DEPRECATED)
 /*!
- * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release.
+ * **DEPRECATION NOTICE**: This method is scheduled for removal in a future release. Use `duckdb_value_string_internal`
+ * instead. This function does not work correctly if the string contains null bytes.
  *
  * history:
  * - stable: v0.2.9
@@ -9997,8 +10002,8 @@ DUCKDB_C_API void *duckdb_vector_get_data(duckdb_vector vector);
  * If all values are valid, this function MIGHT return NULL!
  *
  * The validity mask is a bitset that signifies null-ness within the data chunk. It is a series of uint64_t values,
- * where each uint64_t value contains validity for 64 tuples. The bit is set to 1 if the value is valid (i.e. not NULL)
- * or 0 if the value is invalid (i.e. NULL).
+ * where each uint64_t value contains validity for 64 tuples. The bit is set to 1 if the value is valid (i.e., not NULL)
+ * or 0 if the value is invalid (i.e., NULL).
  *
  * Validity of a specific value can be obtained like this:
  *
@@ -10236,7 +10241,7 @@ DUCKDB_C_API void duckdb_vector_reference_value(duckdb_vector vector, duckdb_val
 
 #if DUCKDB_API_VERSION_AT_LEAST(1, 5, 6)
 /*!
- * Changes `to_vector` to reference `from_vector. After, the vectors share ownership of the data.
+ * Changes `to_vector` to reference `from_vector`. After, the vectors share ownership of the data.
  *
  * history:
  * - unstable: v1.3.0
@@ -10251,7 +10256,7 @@ DUCKDB_C_API void duckdb_vector_reference_vector(duckdb_vector to_vector, duckdb
 
 #if DUCKDB_API_VERSION_AT_LEAST(0, 3, 3)
 /*!
- * Returns whether or not a row is valid (i.e. not NULL) in the given validity mask.
+ * Returns whether or not a row is valid (i.e., not NULL) in the given validity mask.
  *
  * history:
  * - stable: v0.3.3

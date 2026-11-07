@@ -80,7 +80,7 @@ functions:
 
       The validity mask is a bitset that signifies null-ness within the data chunk.
       It is a series of uint64_t values, where each uint64_t value contains validity for 64 tuples.
-      The bit is set to 1 if the value is valid (i.e. not NULL) or 0 if the value is invalid (i.e. NULL).
+      The bit is set to 1 if the value is valid (i.e., not NULL) or 0 if the value is invalid (i.e., NULL).
 
       Validity of a specific value can be obtained like this:
 
@@ -340,7 +340,7 @@ functions:
         description: The vector to reference.
     return_type: opaque
     description: |
-      Changes `to_vector` to reference `from_vector. After, the vectors share ownership of the data.
+      Changes `to_vector` to reference `from_vector`. After, the vectors share ownership of the data.
   validity_row_is_valid:
     offset: 205
     lifecycle:
@@ -355,7 +355,7 @@ functions:
         description: The row index
     return_type: bool
     description: |
-      Returns whether or not a row is valid (i.e. not NULL) in the given validity mask.
+      Returns whether or not a row is valid (i.e., not NULL) in the given validity mask.
     return_description: true if the row is valid, false otherwise
   validity_set_row_validity:
     offset: 206

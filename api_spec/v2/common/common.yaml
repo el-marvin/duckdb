@@ -160,9 +160,9 @@ structs:
       16-byte storage for a variable-size, byte-backed value: VARCHAR, BLOB,
       BIT, or BIGNUM. The bytes are inlined when the length is at most
       BYTES_INLINE_LENGTH, in value.inlined.inlined; otherwise
-      value.pointer.ptr holds them and value.pointer.prefix repeats the first
-      4. The union is transparent, so read the fields directly. VARCHAR and
-      BLOB carry no further encoding; BIT and BIGNUM do. For BIT, byte 0 is the
+      value.pointer.ptr holds them and value.pointer.prefix repeats the first 4.
+      The union is transparent, so read the fields directly. VARCHAR and BLOB
+      carry no further encoding; BIT and BIGNUM do. For BIT, byte 0 is the
       padding-bit count and bytes 1.. are the data; BIGNUM is decoded via
       `[[bignum_decode]]`.
     fields:
