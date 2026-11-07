@@ -1,0 +1,433 @@
+# name: test/sql/catalog/comment_on_keyword_names.test
+# description: COMMENT ON accepts every bare name that the CREATE or DROP of the same object kind accepts
+# group: [catalog]
+
+# semi, anti and verbose are type_function keywords: DROP MACRO, DROP MACRO TABLE, DROP TYPE and calls take them bare
+
+statement ok
+CREATE MACRO "semi"(x) AS x + 1
+
+statement ok
+COMMENT ON MACRO semi IS 'scalar semi'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'semi'
+----
+scalar semi
+
+statement ok
+COMMENT ON FUNCTION semi IS 'function semi'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'semi'
+----
+function semi
+
+statement ok
+COMMENT ON MACRO main.semi IS 'qualified semi'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'semi'
+----
+qualified semi
+
+statement ok
+COMMENT ON MACRO 'semi' IS 'string literal semi'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'semi'
+----
+string literal semi
+
+statement ok
+COMMENT ON MACRO semi IS NULL
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'semi'
+----
+NULL
+
+statement ok
+CREATE MACRO "anti"(x) AS TABLE SELECT x AS a
+
+statement ok
+COMMENT ON MACRO TABLE anti IS 'table anti'
+
+query II
+SELECT function_type, comment FROM duckdb_functions() WHERE function_name = 'anti'
+----
+table_macro	table anti
+
+statement ok
+COMMENT ON MACRO TABLE main.anti IS 'qualified anti'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'anti'
+----
+qualified anti
+
+statement ok
+COMMENT ON MACRO TABLE 'anti' IS 'string literal anti'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'anti'
+----
+string literal anti
+
+statement ok
+COMMENT ON MACRO TABLE anti IS NULL
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'anti'
+----
+NULL
+
+statement ok
+CREATE TYPE "verbose" AS INTEGER
+
+statement ok
+COMMENT ON TYPE verbose IS 'type verbose'
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'verbose'
+----
+type verbose
+
+statement ok
+COMMENT ON TYPE main.verbose IS 'qualified verbose'
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'verbose'
+----
+qualified verbose
+
+statement ok
+COMMENT ON TYPE 'verbose' IS 'string literal verbose'
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'verbose'
+----
+string literal verbose
+
+statement ok
+COMMENT ON TYPE verbose IS NULL
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'verbose'
+----
+NULL
+
+# IS and BY are type_function keywords too, so DROP and COMMENT ON take them as names
+statement ok
+CREATE MACRO "is"(x) AS x
+
+statement ok
+COMMENT ON MACRO is IS 'macro is'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'is'
+----
+macro is
+
+statement ok
+DROP MACRO is
+
+statement ok
+CREATE TYPE "by" AS INTEGER
+
+statement ok
+COMMENT ON TYPE by IS 'type by'
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'by'
+----
+type by
+
+statement ok
+DROP TYPE by
+
+# A missing name is still a syntax error
+statement error
+COMMENT ON MACRO IS 'no name'
+----
+Parser Error: syntax error
+
+statement error
+COMMENT ON MACRO TABLE IS 'no name'
+----
+Parser Error: syntax error
+
+statement error
+COMMENT ON TYPE IS 'no name'
+----
+Parser Error: syntax error
+
+# The kind still selects the catalog entry
+statement error
+COMMENT ON MACRO TABLE semi IS 'wrong kind'
+----
+Catalog Error: Table Macro Function with name semi does not exist!
+
+statement error
+COMMENT ON MACRO anti IS 'wrong kind'
+----
+Catalog Error: Macro Function with name anti does not exist!
+
+statement error
+COMMENT ON TYPE semi IS 'wrong kind'
+----
+Catalog Error: Type with name semi does not exist!
+
+# left is a type_function keyword and the name of a system function
+statement error
+COMMENT ON FUNCTION left IS 'system function'
+----
+Can not comment on System Catalog entries
+
+statement ok
+DROP MACRO semi
+
+statement ok
+DROP MACRO TABLE anti
+
+statement ok
+DROP TYPE verbose
+
+# Tables, views, sequences and indexes take no bare type_function keyword that is not also a column_name keyword in CREATE or DROP, nor in COMMENT ON
+
+statement error
+CREATE TABLE semi(i INTEGER)
+----
+Parser Error: syntax error
+
+statement ok
+CREATE TABLE "semi"("anti" INTEGER)
+
+statement error
+COMMENT ON TABLE semi IS 'bare'
+----
+Parser Error: syntax error
+
+statement error
+DROP TABLE semi
+----
+Parser Error: syntax error
+
+statement ok
+COMMENT ON TABLE "semi" IS 'quoted semi'
+
+query I
+SELECT comment FROM duckdb_tables() WHERE table_name = 'semi'
+----
+quoted semi
+
+statement ok
+COMMENT ON COLUMN "semi".anti IS 'column anti'
+
+query I
+SELECT comment FROM duckdb_columns() WHERE table_name = 'semi' AND column_name = 'anti'
+----
+column anti
+
+statement ok
+CREATE VIEW "verbose" AS SELECT 1 AS i
+
+statement error
+COMMENT ON VIEW verbose IS 'bare'
+----
+Parser Error: syntax error
+
+statement error
+DROP VIEW verbose
+----
+Parser Error: syntax error
+
+statement ok
+COMMENT ON VIEW "verbose" IS 'quoted verbose'
+
+query I
+SELECT comment FROM duckdb_views() WHERE view_name = 'verbose'
+----
+quoted verbose
+
+statement ok
+CREATE SEQUENCE "freeze"
+
+statement error
+COMMENT ON SEQUENCE freeze IS 'bare'
+----
+Parser Error: syntax error
+
+statement error
+DROP SEQUENCE freeze
+----
+Parser Error: syntax error
+
+statement ok
+COMMENT ON SEQUENCE "freeze" IS 'quoted freeze'
+
+query I
+SELECT comment FROM duckdb_sequences() WHERE sequence_name = 'freeze'
+----
+quoted freeze
+
+statement ok
+CREATE INDEX "asof" ON "semi"("anti")
+
+statement error
+COMMENT ON INDEX asof IS 'bare'
+----
+Parser Error: syntax error
+
+statement error
+DROP INDEX asof
+----
+Parser Error: syntax error
+
+statement ok
+COMMENT ON INDEX "asof" IS 'quoted asof'
+
+query I
+SELECT comment FROM duckdb_indexes() WHERE index_name = 'asof'
+----
+quoted asof
+
+# Unreserved (abort) and column_name (coalesce, time) keywords stay accepted bare for every kind
+
+statement ok
+CREATE MACRO abort(x) AS x
+
+statement ok
+CREATE MACRO time(x) AS x
+
+statement ok
+CREATE MACRO coalesce(x) AS TABLE SELECT x AS a
+
+statement ok
+CREATE TYPE coalesce AS VARCHAR
+
+statement ok
+CREATE TABLE abort(coalesce INTEGER)
+
+statement ok
+CREATE VIEW coalesce AS SELECT 1 AS i
+
+statement ok
+CREATE SEQUENCE abort
+
+statement ok
+CREATE INDEX coalesce ON abort(coalesce)
+
+statement ok
+COMMENT ON MACRO abort IS 'macro abort'
+
+statement ok
+COMMENT ON FUNCTION time IS 'function time'
+
+statement ok
+COMMENT ON MACRO TABLE coalesce IS 'table macro coalesce'
+
+statement ok
+COMMENT ON TYPE coalesce IS 'type coalesce'
+
+statement ok
+COMMENT ON TABLE abort IS 'table abort'
+
+statement ok
+COMMENT ON COLUMN abort.coalesce IS 'column coalesce'
+
+statement ok
+COMMENT ON VIEW coalesce IS 'view coalesce'
+
+statement ok
+COMMENT ON SEQUENCE abort IS 'sequence abort'
+
+statement ok
+COMMENT ON INDEX coalesce IS 'index coalesce'
+
+query II
+SELECT function_name, comment FROM duckdb_functions() WHERE function_name IN ('abort', 'coalesce', 'time') AND comment IS NOT NULL ORDER BY ALL
+----
+abort	macro abort
+coalesce	table macro coalesce
+time	function time
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'coalesce'
+----
+type coalesce
+
+query I
+SELECT comment FROM duckdb_tables() WHERE table_name = 'abort'
+----
+table abort
+
+query I
+SELECT comment FROM duckdb_columns() WHERE table_name = 'abort' AND column_name = 'coalesce'
+----
+column coalesce
+
+query I
+SELECT comment FROM duckdb_views() WHERE view_name = 'coalesce'
+----
+view coalesce
+
+query I
+SELECT comment FROM duckdb_sequences() WHERE sequence_name = 'abort'
+----
+sequence abort
+
+query I
+SELECT comment FROM duckdb_indexes() WHERE index_name = 'coalesce'
+----
+index coalesce
+
+# A reserved keyword (select) needs quotes for every kind
+
+statement ok
+CREATE MACRO "select"(x) AS x
+
+statement ok
+CREATE TYPE "select" AS INTEGER
+
+statement ok
+CREATE TABLE "select"(i INTEGER)
+
+statement error
+COMMENT ON MACRO select IS 'bare'
+----
+Parser Error: syntax error
+
+statement error
+COMMENT ON TYPE select IS 'bare'
+----
+Parser Error: syntax error
+
+statement error
+COMMENT ON TABLE select IS 'bare'
+----
+Parser Error: syntax error
+
+statement ok
+COMMENT ON MACRO "select" IS 'macro select'
+
+statement ok
+COMMENT ON TYPE "select" IS 'type select'
+
+statement ok
+COMMENT ON TABLE "select" IS 'table select'
+
+query I
+SELECT comment FROM duckdb_functions() WHERE function_name = 'select'
+----
+macro select
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'select'
+----
+type select
+
+query I
+SELECT comment FROM duckdb_tables() WHERE table_name = 'select'
+----
+table select

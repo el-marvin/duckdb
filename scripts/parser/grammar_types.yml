@@ -756,6 +756,12 @@ StringList:
     - DottedIdentifier
     - CommentTarget
     - CommentStringLiteralIdentifier
+    - CommentFunctionTarget
+    - CommentFunctionName
+    - CommentTableMacroTarget
+    - CommentTableFunctionName
+    - CommentTypeTarget
+    - CommentTypeName
     - ColumnAliases
     - TriggerColumnList
     - RepositoryPublicKey
@@ -1327,11 +1333,21 @@ CommonTableExpressionMap:
   rules:
     - WithClause
 
+CommentOnEntry:
+  type: "pair<CatalogType, vector<string>>"
+  rules:
+    - CommentOnEntry
+    - CommentOnTableMacroEntry
+    - CommentOnFunctionEntry
+    - CommentOnTypeEntry
+    - CommentOnObjectEntry
+
 CatalogType:
   type: "CatalogType"
   by_value: false
   rules:
-    - CommentOnType
+    - CommentOnObjectType
+    - CommentOnFunctionType
     - CommentTable
     - CommentSequence
     - CommentFunction
