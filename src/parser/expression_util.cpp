@@ -60,6 +60,19 @@ bool ExpressionUtil::ListEquals(const vector<unique_ptr<Expression>> &a, const v
 	return ExpressionListEquals<Expression>(a, b);
 }
 
+bool ExpressionUtil::ListEqualsWithAliases(const vector<unique_ptr<ParsedExpression>> &a,
+                                           const vector<unique_ptr<ParsedExpression>> &b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < a.size(); i++) {
+		if (a[i]->GetAlias() != b[i]->GetAlias() || !a[i]->Equals(*b[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ExpressionUtil::SetEquals(const vector<unique_ptr<ParsedExpression>> &a,
                                const vector<unique_ptr<ParsedExpression>> &b) {
 	return ExpressionSetEquals<ParsedExpression, parsed_expression_map_t<idx_t>>(a, b);

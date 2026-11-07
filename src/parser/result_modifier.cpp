@@ -82,6 +82,9 @@ bool OrderModifier::Equals(const ResultModifier &other_p) const {
 		if (orders[i].type != other.orders[i].type) {
 			return false;
 		}
+		if (orders[i].null_order != other.orders[i].null_order) {
+			return false;
+		}
 		if (!BaseExpression::Equals(*orders[i].expression, *other.orders[i].expression)) {
 			return false;
 		}

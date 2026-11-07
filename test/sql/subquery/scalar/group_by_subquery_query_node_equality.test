@@ -1,0 +1,131 @@
+# name: test/sql/subquery/scalar/group_by_subquery_query_node_equality.test
+# description: A select list subquery matches a GROUP BY subquery only when their query nodes denote the same query
+# group: [scalar]
+
+statement ok
+CREATE TABLE b AS SELECT 1 AS v
+
+# GROUP BY ALL
+query I
+SELECT (SELECT count(*) FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x) GROUP BY ALL)) FROM range(1) GROUP BY (SELECT count(*) FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x)))
+----
+2
+
+query I
+SELECT (SELECT count(*) FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x))) FROM range(1) GROUP BY (SELECT count(*) FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x) GROUP BY ALL))
+----
+3
+
+# null order of an ORDER BY
+query I
+SELECT (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS FIRST LIMIT 1) FROM range(1) GROUP BY (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS LAST LIMIT 1)
+----
+NULL
+
+query I
+SELECT (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x LIMIT 1) FROM range(1) GROUP BY (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS FIRST LIMIT 1)
+----
+1
+
+query I
+SELECT ((SELECT 1 AS x) UNION ALL (SELECT NULL) ORDER BY x NULLS FIRST LIMIT 1) FROM range(1) GROUP BY ((SELECT 1 AS x) UNION ALL (SELECT NULL) ORDER BY x NULLS LAST LIMIT 1)
+----
+NULL
+
+# null order of an aggregate ORDER BY
+query I
+SELECT (SELECT first(x ORDER BY x NULLS FIRST) FROM (VALUES (1), (NULL)) t(x)) FROM range(1) GROUP BY (SELECT first(x ORDER BY x NULLS LAST) FROM (VALUES (1), (NULL)) t(x))
+----
+NULL
+
+# the ORDER BY of a grouped query is matched to a select list aggregate only with the same null order
+query II
+SELECT g, first(x ORDER BY x NULLS FIRST) AS f FROM (VALUES (1, 1), (1, NULL), (2, 3)) t(g, x) GROUP BY g ORDER BY first(x ORDER BY x NULLS LAST)
+----
+1	NULL
+2	3
+
+query I
+SELECT DISTINCT first(x ORDER BY x NULLS FIRST) AS f FROM (VALUES (1, 1), (1, NULL), (2, 3)) t(g, x) GROUP BY g ORDER BY first(x ORDER BY x NULLS LAST)
+----
+NULL
+3
+
+# two GROUP BY subqueries that differ only in the null order stay two groups
+query II
+SELECT (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS FIRST LIMIT 1), (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS LAST LIMIT 1) FROM range(1) GROUP BY (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS FIRST LIMIT 1), (SELECT x FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS LAST LIMIT 1)
+----
+NULL	1
+
+# under GROUPING SETS each spelling of the ORDER BY is its own grouping column, as ORDER BY 1 ASC already is
+query II
+SELECT (SELECT 1 ORDER BY 1) AS a, (SELECT 1 ORDER BY 1 NULLS LAST) AS b FROM range(1) GROUP BY GROUPING SETS ((SELECT 1 ORDER BY 1), (SELECT 1 ORDER BY 1 NULLS LAST)) ORDER BY a, b
+----
+1	NULL
+NULL	1
+
+query II
+SELECT (SELECT 1 ORDER BY 1) AS a, (SELECT 1 ORDER BY 1 ASC) AS b FROM range(1) GROUP BY GROUPING SETS ((SELECT 1 ORDER BY 1), (SELECT 1 ORDER BY 1 ASC)) ORDER BY a, b
+----
+1	NULL
+NULL	1
+
+# a materialized CTE is evaluated once, so both reads see one random value
+query I
+SELECT (WITH c AS MATERIALIZED (SELECT random() AS r) SELECT (SELECT r FROM c) = (SELECT r FROM c)) FROM range(1) GROUP BY (WITH c AS NOT MATERIALIZED (SELECT random() AS r) SELECT (SELECT r FROM c) = (SELECT r FROM c))
+----
+true
+
+# a CTE body sees only the CTEs defined before it, so here a reads the table b
+query I
+SELECT (WITH a AS (SELECT * FROM b), b AS (SELECT 2 AS v) SELECT v FROM a) FROM range(1) GROUP BY (WITH b AS (SELECT 2 AS v), a AS (SELECT * FROM b) SELECT v FROM a)
+----
+1
+
+# the alias of a USING KEY aggregate names the column it updates
+query I
+SELECT (WITH RECURSIVE t(k, a, c) USING KEY (k, sum(a) AS a) AS (SELECT 1, 1, 10 UNION ALL SELECT k, a + 1, c + 1 FROM t WHERE a < 3) SELECT a * 100 + c FROM t) FROM range(1) GROUP BY (WITH RECURSIVE t(k, a, c) USING KEY (k, sum(a) AS c) AS (SELECT 1, 1, 10 UNION ALL SELECT k, a + 1, c + 1 FROM t WHERE a < 3) SELECT a * 100 + c FROM t)
+----
+612
+
+# a correlated select list subquery binds only when it matches the GROUP BY subquery, so these show the match is kept
+query I rowsort
+SELECT (SELECT count(*) + r.i FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x) GROUP BY ALL)) FROM range(2) r(i) GROUP BY (SELECT count(*) + r.i FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x) GROUP BY ALL))
+----
+2
+3
+
+query I rowsort
+SELECT (SELECT x + r.i FROM (VALUES (1), (NULL)) t(x) ORDER BY x DESC NULLS LAST LIMIT 1) FROM range(2) r(i) GROUP BY (SELECT x + r.i FROM (VALUES (1), (NULL)) t(x) ORDER BY x DESC NULLS LAST LIMIT 1)
+----
+1
+2
+
+query I rowsort
+SELECT (SELECT first(x ORDER BY x NULLS LAST) + r.i FROM (VALUES (1), (NULL)) t(x)) FROM range(2) r(i) GROUP BY (SELECT first(x ORDER BY x NULLS LAST) + r.i FROM (VALUES (1), (NULL)) t(x))
+----
+1
+2
+
+query I rowsort
+SELECT (WITH b AS MATERIALIZED (SELECT 2 AS v), a AS (SELECT * FROM b) SELECT v + r.i FROM a) FROM range(2) r(i) GROUP BY (WITH b AS MATERIALIZED (SELECT 2 AS v), a AS (SELECT * FROM b) SELECT v + r.i FROM a)
+----
+2
+3
+
+query I rowsort
+SELECT (WITH RECURSIVE t(k, a, c) USING KEY (k, sum(a) AS a) AS (SELECT 1, 1, 10 UNION ALL SELECT k, a + 1, c + 1 FROM t WHERE a < 3) SELECT a * 100 + c + r.i FROM t) FROM range(2) r(i) GROUP BY (WITH RECURSIVE t(k, a, c) USING KEY (k, sum(a) AS a) AS (SELECT 1, 1, 10 UNION ALL SELECT k, a + 1, c + 1 FROM t WHERE a < 3) SELECT a * 100 + c + r.i FROM t)
+----
+612
+613
+
+statement error
+SELECT (SELECT count(*) + r.i FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x) GROUP BY ALL)) FROM range(2) r(i) GROUP BY (SELECT count(*) + r.i FROM (SELECT x FROM (VALUES (1), (1), (2)) t(x)))
+----
+must appear in the GROUP BY clause
+
+# a default null order is not the same text as an explicit one, so the subqueries no longer match
+statement error
+SELECT (SELECT x + r.i FROM (VALUES (1), (NULL)) t(x) ORDER BY x LIMIT 1) FROM range(2) r(i) GROUP BY (SELECT x + r.i FROM (VALUES (1), (NULL)) t(x) ORDER BY x NULLS LAST LIMIT 1)
+----
+must appear in the GROUP BY clause

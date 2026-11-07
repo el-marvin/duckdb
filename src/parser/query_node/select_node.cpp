@@ -136,6 +136,9 @@ bool SelectNode::Equals(const QueryNode *other_p) const {
 	if (groups.grouping_sets != other.groups.grouping_sets) {
 		return false;
 	}
+	if (aggregate_handling != other.aggregate_handling) {
+		return false;
+	}
 	if (!SampleOptions::Equals(sample.get(), other.sample.get())) {
 		return false;
 	}
