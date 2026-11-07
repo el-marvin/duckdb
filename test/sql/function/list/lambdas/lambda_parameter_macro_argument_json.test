@@ -1,0 +1,47 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_macro_argument_json.test
+# description: The JSON arrow in a macro body is not read as a lambda that a macro argument could be captured by
+# group: [lambdas]
+
+require json
+
+statement ok
+CREATE TABLE j AS SELECT '{"k": 5}'::JSON AS b;
+
+statement ok
+CREATE MACRO json_arrow(p) AS TABLE SELECT concat(b -> '$.k', p) AS r FROM j;
+
+query I
+SELECT * FROM json_arrow((SELECT b FROM (SELECT 'z' AS b)));
+----
+5z
+
+statement ok
+CREATE MACRO json_qualified_arrow(p) AS TABLE SELECT concat(j.b -> '$.k', p) AS r FROM j;
+
+query I
+SELECT * FROM json_qualified_arrow((SELECT j FROM (SELECT 'z' AS j)));
+----
+5z
+
+statement ok
+CREATE MACRO json_in_lambda(a) AS list_transform(['{"k": 5}'::JSON], lambda x: concat(x -> '$.k', a));
+
+query I
+SELECT json_in_lambda(list_transform([1], lambda x: x)::VARCHAR);
+----
+['5[1]']
+
+query II
+SELECT 'z' AS x, json_in_lambda(x);
+----
+z	[5z]
+
+# a macro parameter on the right of a JSON arrow, with an argument whose subquery binds the arrow's column name
+
+statement ok
+CREATE MACRO json_path_argument(p) AS TABLE SELECT concat(b -> p, '') AS r FROM j;
+
+query I
+SELECT r FROM json_path_argument((SELECT '$.k' FROM (SELECT 1 AS b) WHERE b = 1));
+----
+5

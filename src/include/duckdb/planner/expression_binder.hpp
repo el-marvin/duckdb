@@ -246,6 +246,12 @@ public:
 	//! Enables special-handling of lambda parameters during macro replacement by tracking them in the lambda_params
 	//! vector.
 	void ReplaceMacroParametersInLambda(FunctionExpression &function, vector<identifier_set_t> &lambda_params);
+	//! Renames the body lambda parameters that a name substituted from the caller would bind to.
+	static void RenameLambdaParametersCapturingArguments(const vector<reference<unique_ptr<ParsedExpression>>> &body,
+	                                                     Binder &binder, DummyBinding &macro_binding,
+	                                                     optional_ptr<Binder> dummy_binder,
+	                                                     optional_ptr<ParsedExpression> window_aggregate = nullptr,
+	                                                     optional_ptr<ParsedExpression> caller_window = nullptr);
 
 	static LogicalType GetExpressionReturnType(const Expression &expr);
 
@@ -342,7 +348,8 @@ protected:
 	virtual BindResult BindMacro(FunctionExpression &expr, ScalarMacroCatalogEntry &macro, idx_t depth,
 	                             unique_ptr<ParsedExpression> &expr_ptr);
 	void FindAggregateExprs(unique_ptr<ParsedExpression> &expr, vector<reference<unique_ptr<ParsedExpression>>> &exprs);
-	void UnfoldWindowMacroExpression(unique_ptr<ParsedExpression> &expr, ScalarMacroFunction &macro_def);
+	void UnfoldWindowMacroExpression(unique_ptr<ParsedExpression> &expr, ScalarMacroFunction &macro_def,
+	                                 Binder &dummy_binder);
 	MacroFunction &UnfoldMacroExpression(FunctionExpression &function, ScalarMacroCatalogEntry &macro_func,
 	                                     unique_ptr<ParsedExpression> &expr, idx_t depth);
 

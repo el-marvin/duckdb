@@ -1,0 +1,746 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_macro_argument.test
+# description: A name in a macro argument keeps its meaning at the call site and is not captured by a lambda parameter of the macro body
+# group: [lambdas]
+
+statement ok
+CREATE TABLE t AS SELECT 99 AS s;
+
+statement ok
+CREATE MACRO m(a) AS list_transform([1], lambda x: a);
+
+# a select list alias named like the body's lambda parameter
+
+query II
+SELECT s AS x, m(x) FROM t;
+----
+99	[99]
+
+query II
+SELECT 99 AS x, m(x);
+----
+99	[99]
+
+query II
+SELECT s AS X, m(X) FROM t;
+----
+99	[99]
+
+query II
+SELECT {'d': 5} AS x, m(x['d']);
+----
+{'d': 5}	[5]
+
+# a dotted name on an alias does not bind at the call site, and does not bind to the body's parameter either
+statement error
+SELECT {'d': 5} AS x, m(x.d);
+----
+Binder Error: Referenced table "x" not found!
+
+query II
+SELECT s AS x, m(x) FROM t GROUP BY x;
+----
+99	[99]
+
+query I
+SELECT s AS x FROM t GROUP BY s HAVING m(x) = [99];
+----
+99
+
+query I
+SELECT s AS x FROM (VALUES (2), (1), (3)) v(s) ORDER BY m(x);
+----
+1
+2
+3
+
+query I
+SELECT s AS x FROM t WHERE m(x) = [99];
+----
+99
+
+# the caller's own lambda parameter
+
+query I
+SELECT list_transform([5], lambda x: m(x));
+----
+[[5]]
+
+query I
+SELECT [m(x) FOR x IN [5, 6]];
+----
+[[5], [6]]
+
+# a column of an enclosing query, passed bare
+
+query I
+SELECT (SELECT m(x) FROM range(1)) FROM (SELECT 99 AS x) t2;
+----
+[99]
+
+# an argument that relied on the capture names nothing at the call site
+
+statement error
+SELECT m(x + 1) FROM t;
+----
+<REGEX>:Binder Error:.*column "x" not found.*
+
+# the shapes that bind no caller name to a body parameter are unchanged
+
+query I
+SELECT m(s) FROM t;
+----
+[99]
+
+query I
+SELECT m(x) FROM (SELECT 99 AS x) t2;
+----
+[99]
+
+query I
+SELECT m(t2.x) FROM (SELECT 99 AS x) t2;
+----
+[99]
+
+# nested lambdas in the body
+
+statement ok
+CREATE MACRO nested_lambdas(a) AS list_transform([1], lambda x: list_transform([10], lambda y: x + y + a));
+
+query II
+SELECT 100 AS x, nested_lambdas(x);
+----
+100	[[111]]
+
+query II
+SELECT 100 AS y, nested_lambdas(y);
+----
+100	[[111]]
+
+statement ok
+CREATE MACRO shadowed_lambdas(a) AS list_transform([1], lambda x: list_transform([10], lambda x: x + a));
+
+query II
+SELECT 100 AS x, shadowed_lambdas(x);
+----
+100	[[110]]
+
+# the new name avoids every name of the body and the arguments
+
+statement ok
+CREATE MACRO taken_name(a) AS list_transform([1], lambda x: list_transform([10], lambda "0_1_x": x + "0_1_x" + a));
+
+query II
+SELECT 100 AS x, taken_name(x);
+----
+100	[[111]]
+
+query III
+SELECT 100 AS x, 1000 AS "0_1_x", m(x + "0_1_x");
+----
+100	1000	[1100]
+
+# the new name is not substituted by a macro parameter of that name
+
+statement ok
+CREATE MACRO unused_parameter(a, "0_1_x") AS list_transform([1], lambda x: x + a);
+
+query II
+SELECT 100 AS x, unused_parameter(x, 1000);
+----
+100	[101]
+
+# the new name cannot be the name of a table in scope
+
+statement ok
+CREATE TABLE x_1 AS SELECT 50 AS d;
+
+statement ok
+CREATE MACRO field_plus(a) AS list_transform([{'d': 1}], lambda x: x.d + a);
+
+query II
+SELECT 7 AS x, field_plus(x) FROM x_1;
+----
+7	[8]
+
+statement ok
+CREATE MACRO table_alias_x_1(a) AS TABLE SELECT list_transform([{'d': 1}], lambda x: x.d + a) AS r FROM (SELECT 50 AS d) x_1;
+
+query II
+SELECT * FROM (SELECT 7 AS x) t2, table_alias_x_1(x);
+----
+7	[8]
+
+# a parameter named like the dummy binding's prefix
+
+statement ok
+CREATE MACRO prefix_named(a) AS list_transform([1], lambda macro_parameters: a);
+
+query II
+SELECT 5 AS macro_parameters, prefix_named(macro_parameters);
+----
+5	[5]
+
+# a renamed reference keeps the name struct_pack gives its field
+
+statement ok
+CREATE MACRO pack_field(a) AS list_transform([1], lambda x: struct_pack(x).x + a);
+
+query II
+SELECT 99 AS x, pack_field(x);
+----
+99	[100]
+
+statement ok
+CREATE MACRO pack_type(a) AS list_transform([1], lambda x: struct_pack(x, v := a));
+
+query II
+SELECT 99 AS x, typeof(pack_type(x));
+----
+99	STRUCT(x INTEGER, v INTEGER)[]
+
+statement ok
+CREATE MACRO dot_pack(a) AS list_transform([1], lambda x: x.struct_pack().x + a);
+
+query II
+SELECT 99 AS x, dot_pack(x);
+----
+99	[100]
+
+# a qualified reference whose last name is a renamed parameter becomes a substitution point
+
+statement ok
+CREATE MACRO field_of_argument(a, b) AS list_transform([1], lambda x: a.x + b);
+
+query II
+SELECT 3 AS x, field_of_argument({'x': 5}, x);
+----
+3	[8]
+
+statement ok
+CREATE MACRO field_in_nested_lambda(a, b) AS list_transform([{'x': 7}], lambda y: list_transform([1], lambda x: a.x + b + y.x));
+
+query III
+SELECT 3 AS x, {'x': 1000} AS y, field_in_nested_lambda(y, x);
+----
+3	{'x': 1000}	[[1010]]
+
+# one new name per original name, so identical lambdas still match
+
+statement ok
+CREATE TABLE g AS SELECT [1, 2] AS l, 1 AS k;
+
+statement ok
+CREATE MACRO grouped_lambda(a) AS TABLE SELECT list_transform(l, lambda x: x + a) AS r FROM g GROUP BY list_transform(l, lambda x: x + a);
+
+query II
+SELECT * FROM (SELECT 10 AS x) t2, grouped_lambda(x);
+----
+10	[11, 12]
+
+statement ok
+CREATE MACRO grouped_subquery(a) AS (SELECT list_transform(l, lambda x: x + a) FROM g GROUP BY list_transform(l, lambda x: x + a));
+
+query II
+SELECT 10 AS x, grouped_subquery(x);
+----
+10	[11, 12]
+
+# a schema qualified unnest in the body
+
+statement ok
+CREATE MACRO qualified_unnest(a) AS main.unnest(a);
+
+query I
+SELECT qualified_unnest([1, 2]);
+----
+1
+2
+
+# a qualified reference in a body subquery is not a macro parameter, so nothing is renamed
+
+statement ok
+CREATE MACRO subquery_qualified(t2) AS (SELECT list_transform([1], lambda x: t2.s || alias(x)) FROM (SELECT 'a' AS s) t2);
+
+query III
+SELECT 'ignored' AS x, subquery_qualified(x), subquery_qualified('ignored');
+----
+ignored	[ax]	[ax]
+
+# two parameters and the index parameter
+
+statement ok
+CREATE MACRO reduce_macro(a) AS list_reduce([1, 2], lambda x, y: x + y + a);
+
+query II
+SELECT s AS y, reduce_macro(y) FROM t;
+----
+99	102
+
+statement ok
+CREATE MACRO index_macro(a) AS list_transform([10, 20], lambda x, i: i + a);
+
+query II
+SELECT 5 AS i, index_macro(i);
+----
+5	[6, 7]
+
+# the comprehension syntax
+
+statement ok
+CREATE MACRO comprehension(a) AS [a FOR x IN [1]];
+
+query II
+SELECT s AS x, comprehension(x) FROM t;
+----
+99	[99]
+
+statement ok
+CREATE MACRO filtered_comprehension(a) AS [x + a FOR x IN [1, 2] IF x > a];
+
+query II
+SELECT 1 AS x, filtered_comprehension(x);
+----
+1	[3]
+
+# a subquery in the body
+
+statement ok
+CREATE MACRO subquery_body(a) AS (SELECT list_transform([1], lambda x: a));
+
+query II
+SELECT s AS x, subquery_body(x) FROM t;
+----
+99	[99]
+
+# default and named arguments
+
+statement ok
+CREATE MACRO default_argument(a, b := 7) AS list_transform([1], lambda x: a + b);
+
+query II
+SELECT s AS x, default_argument(x) FROM t;
+----
+99	[106]
+
+query II
+SELECT s AS x, default_argument(1, b := x) FROM t;
+----
+99	[100]
+
+# nested macros
+
+statement ok
+CREATE MACRO passes_argument(b) AS m(b);
+
+query II
+SELECT s AS x, passes_argument(x) FROM t;
+----
+99	[99]
+
+statement ok
+CREATE MACRO passes_parameter(a) AS list_transform([5], lambda x: m(x));
+
+query I
+SELECT passes_parameter(0);
+----
+[[5]]
+
+statement ok
+CREATE MACRO passes_expression(b) AS list_transform([1], lambda x: m(x + b));
+
+query II
+SELECT 100 AS x, passes_expression(x);
+----
+100	[[101]]
+
+# an argument that is itself a lambda
+
+statement ok
+CREATE MACRO apply_inner(l, f) AS list_transform(l, lambda x: list_transform([x], f));
+
+query II
+SELECT s AS x, apply_inner([1, 2], lambda y: y + x) FROM t;
+----
+99	[[100], [101]]
+
+query I
+SELECT apply_inner([1, 2], lambda y: y * 10);
+----
+[[10], [20]]
+
+query I
+SELECT apply_inner([1, 2], lambda x: x * 10);
+----
+[[10], [20]]
+
+# a macro parameter named like a column of the caller
+
+statement ok
+CREATE MACRO parameter_named_s(s) AS list_transform([1], lambda x: s + x);
+
+query I
+SELECT parameter_named_s(s) FROM t;
+----
+[100]
+
+query II
+SELECT s AS x, parameter_named_s(x) FROM t;
+----
+99	[100]
+
+# a body lambda parameter named like a column or an alias of the caller
+
+statement ok
+CREATE MACRO parameter_s(a) AS list_transform([1], lambda s: s + a);
+
+query I
+SELECT parameter_s(s) FROM t;
+----
+[100]
+
+query II
+SELECT s AS q, parameter_s(q) FROM t;
+----
+99	[100]
+
+query II
+SELECT 5 AS s, parameter_s(s);
+----
+5	[6]
+
+statement ok
+CREATE TABLE u AS SELECT {'d': 50} AS u, 7 AS z;
+
+statement ok
+CREATE MACRO field_of_parameter(a) AS list_transform([{'d': 1}], lambda u: u.d + a);
+
+query I
+SELECT field_of_parameter(z) FROM u;
+----
+[8]
+
+query I
+SELECT field_of_parameter(u.z) FROM u;
+----
+[8]
+
+# a dot call on a renamed parameter, in the body and in an argument
+
+statement ok
+CREATE MACRO dot_call(a) AS list_transform(['ab'], lambda x: x.upper() || a);
+
+query I
+SELECT dot_call('z');
+----
+[ABz]
+
+query II
+SELECT 'z' AS x, dot_call(x);
+----
+z	[ABz]
+
+statement ok
+CREATE MACRO field_dot_call(a) AS list_transform([{'d': 'ab'}], lambda x: x.d.upper() || a);
+
+query II
+SELECT 'z' AS x, field_dot_call(x);
+----
+z	[ABz]
+
+query II
+SELECT 'ab' AS x, m(x.upper());
+----
+ab	[AB]
+
+# a schema qualified call in an argument names no column
+
+statement ok
+CREATE MACRO lower_macro(v) AS lower(v);
+
+statement ok
+CREATE MACRO schema_call(a) AS list_transform(['AB'], lambda main: main.lower(main) || a);
+
+query II
+SELECT 'z' AS q, schema_call(main.lower_macro(q));
+----
+z	[abz]
+
+query II
+SELECT 'z' AS main, schema_call(main);
+----
+z	[abz]
+
+statement ok
+CREATE MACRO unused_schema_argument(main) AS list_transform(['AB'], lambda x: main.lower(x) || alias(x));
+
+query III
+SELECT 'ignored' AS x, unused_schema_argument(x), unused_schema_argument('ignored');
+----
+ignored	[abx]	[abx]
+
+# a repeated parameter is still rejected when an argument names it
+
+statement ok
+CREATE MACRO duplicate_names(l, a) AS list_transform(l[1], lambda x, x: x + a);
+
+statement error
+SELECT duplicate_names([[10]], 5);
+----
+duplicate column name "x"
+
+statement error
+SELECT 5 AS x, duplicate_names([[10]], x);
+----
+duplicate column name
+
+# a lambda passed to COLUMNS
+
+statement ok
+CREATE MACRO extract_many(x, y) AS (SELECT struct_pack(*COLUMNS(lambda z: z IN y)) FROM (SELECT unnest(x)));
+
+query II
+SELECT ['a'] AS z, extract_many({'a': 1, 'b': 2}, z);
+----
+[a]	{'a': 1}
+
+# a table macro, with a lateral column passed bare
+
+statement ok
+CREATE MACRO table_macro(a) AS TABLE SELECT list_transform([1], lambda x: x + a) AS r;
+
+query I
+SELECT * FROM table_macro(5);
+----
+[6]
+
+query II
+SELECT * FROM (SELECT 99 AS x) t2, table_macro(x);
+----
+99	[100]
+
+query II
+SELECT * FROM (SELECT 99 AS x) t2, table_macro(t2.x);
+----
+99	[100]
+
+statement ok
+CREATE MACRO table_dot_call(a) AS TABLE SELECT list_transform(['ab'], lambda x: x.upper() || a) AS r;
+
+query II
+SELECT * FROM (SELECT 'z' AS x) t2, table_dot_call(x);
+----
+z	[ABz]
+
+statement ok
+CREATE MACRO table_unused_parameter(a, "0_1_x") AS TABLE SELECT list_transform([1], lambda x: x + a) AS r;
+
+query II
+SELECT * FROM (SELECT 100 AS x) t2, table_unused_parameter(x, 1000);
+----
+100	[101]
+
+statement ok
+CREATE MACRO table_where(a) AS TABLE SELECT 1 AS r WHERE list_transform([1], lambda x: a) = [99];
+
+query II
+SELECT * FROM (SELECT 99 AS x) t2, table_where(x);
+----
+99	1
+
+statement ok
+CREATE MACRO table_union(a) AS TABLE SELECT list_transform([1], lambda x: a) AS r UNION ALL SELECT list_transform([2], lambda x: a);
+
+query I
+SELECT r FROM (SELECT 99 AS x) t2, table_union(x);
+----
+[99]
+[99]
+
+# a parameter is renamed only when an argument names it, so the column names of a table macro stay as they are
+
+statement ok
+CREATE MACRO unnamed_table_macro(a) AS TABLE SELECT list_transform([1], lambda x: x + a);
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM unnamed_table_macro(5));
+----
+list_transform(list_value(1), (lambda x: (x + 5)))
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM (SELECT 99 AS x) t2, unnamed_table_macro(x));
+----
+x
+list_transform(list_value(1), (lambda "0_1_x": ("0_1_x" + x)))
+
+# a lambda that no argument is substituted into, and a name the argument's own lambda binds, rename nothing
+
+statement ok
+CREATE MACRO lambda_without_argument(a) AS TABLE SELECT a AS b, list_transform([1], lambda x: x + 1);
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM (SELECT 5 AS x) t2, lambda_without_argument(x)) WHERE column_name LIKE 'list%';
+----
+list_transform(list_value(1), (lambda x: (x + 1)))
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM unnamed_table_macro(list_sum(list_transform([1], lambda x: x))));
+----
+list_transform(list_value(1), (lambda x: (x + list_sum(list_transform(list_value(1), (lambda x: x))))))
+
+# a table macro does not substitute a qualified reference named like its parameter, so nothing is renamed
+
+statement ok
+CREATE MACRO qualified_in_table_macro(t2) AS TABLE SELECT list_transform([1], lambda x: x + t2.s) FROM (SELECT 1 AS s) t2;
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT * FROM (SELECT 5 AS x) t9, qualified_in_table_macro(x)) WHERE column_name LIKE 'list%';
+----
+list_transform(list_value(1), (lambda x: (x + t2.s)))
+
+# the window form, whose OVER clause the caller writes
+
+statement ok
+CREATE MACRO aggregate_in_lambda(a) AS list_transform([1], lambda x: sum(a));
+
+query I
+SELECT aggregate_in_lambda(s) OVER () FROM t;
+----
+[99]
+
+query II
+SELECT s AS x, aggregate_in_lambda(x) OVER () FROM t;
+----
+99	[99]
+
+query II
+SELECT s AS x, aggregate_in_lambda(s) OVER (PARTITION BY x) FROM t;
+----
+99	[99]
+
+statement ok
+CREATE TABLE w AS SELECT * FROM (VALUES (1, 10), (2, 20), (2, 30)) v(s, g);
+
+query II
+SELECT s AS x, aggregate_in_lambda(g) FILTER (WHERE x = 2) OVER () FROM w ORDER BY g;
+----
+1	[50]
+2	[50]
+2	[50]
+
+query II
+SELECT s AS x, aggregate_in_lambda(g) OVER (PARTITION BY x ORDER BY g) FROM w ORDER BY g;
+----
+1	[10]
+2	[20]
+2	[50]
+
+# a renamed dot call around the window aggregate
+
+statement ok
+CREATE MACRO dot_call_around_aggregate(a) AS list_transform([1], lambda x: x.greatest(sum(a)));
+
+query I
+SELECT dot_call_around_aggregate(x.g) OVER () FROM (VALUES (10)) x(g);
+----
+[10]
+
+query II
+SELECT g AS x, dot_call_around_aggregate(g) OVER (PARTITION BY x) FROM (VALUES (10)) v(g);
+----
+10	[10]
+
+# the deprecated arrow syntax
+
+statement ok
+SET lambda_syntax='ENABLE_SINGLE_ARROW';
+
+statement ok
+CREATE MACRO arrow_macro(a) AS list_transform([1], x -> a);
+
+query II
+SELECT s AS x, arrow_macro(x) FROM t;
+----
+99	[99]
+
+# asking whether a qualified call is a dot call records no dependency of the statement on the function
+
+statement ok
+CREATE SCHEMA dep;
+
+statement ok
+CREATE MACRO dep.f() AS 42;
+
+statement ok
+CREATE MACRO ignore_argument(v) AS 100;
+
+statement ok
+CREATE MACRO discards_call(a) AS list_transform([1], lambda x: ignore_argument(dep.f()) + a);
+
+statement ok
+CREATE TABLE defaults (v INTEGER[] DEFAULT discards_call(7));
+
+statement ok
+DROP MACRO dep.f;
+
+statement ok
+INSERT INTO defaults DEFAULT VALUES;
+
+query I
+SELECT * FROM defaults;
+----
+[107]
+
+# a view asks whether a qualified call is a dot call with its own database's search path
+
+statement ok
+ATTACH ':memory:' AS db2;
+
+statement ok
+USE db2;
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE MACRO s.abs() AS 100;
+
+statement ok
+CREATE MACRO view_table_macro(a) AS TABLE SELECT list_transform([1], lambda s: s.abs() + a) AS r;
+
+statement ok
+CREATE VIEW v AS SELECT r FROM (VALUES (7)) s(g), view_table_macro(s.g);
+
+query I
+SELECT * FROM v;
+----
+[107]
+
+statement ok
+USE memory;
+
+query I
+SELECT * FROM db2.v;
+----
+[107]
+
+statement ok
+USE db2;
+
+statement ok
+CREATE MACRO subquery_macro(a) AS (SELECT list_transform([1], lambda s: s.abs() + a));
+
+statement ok
+CREATE VIEW v2 AS SELECT subquery_macro(s.g) AS r FROM (VALUES (7)) s(g);
+
+query I
+SELECT * FROM v2;
+----
+[107]
+
+statement ok
+USE memory;
+
+query I
+SELECT * FROM db2.v2;
+----
+[107]
