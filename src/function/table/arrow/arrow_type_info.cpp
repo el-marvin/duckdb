@@ -1,5 +1,8 @@
 #include "duckdb/function/table/arrow/arrow_type_info.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/limits.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 
 namespace duckdb {
 
@@ -19,6 +22,22 @@ ArrowTypeInfo::~ArrowTypeInfo() {
 
 ArrowStructInfo::ArrowStructInfo(vector<shared_ptr<ArrowType>> children)
     : ArrowTypeInfo(ArrowTypeInfoType::STRUCT), children(std::move(children)) {
+}
+
+ArrowStructInfo::ArrowStructInfo(vector<shared_ptr<ArrowType>> children_p, const vector<int8_t> &union_type_ids)
+    : ArrowStructInfo(std::move(children_p)) {
+	D_ASSERT(union_type_ids.size() == children.size() && children.size() < NO_UNION_CHILD);
+	union_child_indexes.resize(NumericLimits<int8_t>::Maximum() + 1, NO_UNION_CHILD);
+	for (idx_t child_idx = 0; child_idx < union_type_ids.size(); child_idx++) {
+		auto type_id = NumericCast<idx_t>(union_type_ids[child_idx]);
+		D_ASSERT(union_child_indexes[type_id] == NO_UNION_CHILD);
+		union_child_indexes[type_id] = NumericCast<union_tag_t>(child_idx);
+	}
+}
+
+void ArrowStructInfo::ThrowUnlistedUnionTypeId(int8_t type_id) {
+	throw InvalidInputException("Arrow union row has type id %d, which is not one of the type ids of the union",
+	                            type_id);
 }
 
 idx_t ArrowStructInfo::ChildCount() const {

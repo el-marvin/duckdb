@@ -1325,7 +1325,7 @@ void ArrowToDuckDBConversion::ColumnArrowToDuckDB(Vector &vector, ArrowArray &ar
 		}
 
 		for (idx_t row_idx = 0; row_idx < size; row_idx++) {
-			auto tag = NumericCast<uint8_t>(type_ids[row_idx]);
+			auto tag = union_info.GetUnionChildIndex(type_ids[row_idx]);
 
 			auto out_of_range = tag >= array.n_children;
 			if (out_of_range) {

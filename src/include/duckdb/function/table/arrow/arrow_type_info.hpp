@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unique_ptr.hpp"
@@ -60,15 +61,30 @@ public:
 
 public:
 	explicit ArrowStructInfo(vector<shared_ptr<ArrowType>> children);
+	//! The children of a union, with the distinct type id from 0 to 127 that the rows of each child carry
+	ArrowStructInfo(vector<shared_ptr<ArrowType>> children, const vector<int8_t> &union_type_ids);
 	~ArrowStructInfo() override;
 
 public:
 	idx_t ChildCount() const;
 	const ArrowType &GetChild(idx_t index) const;
 	const vector<shared_ptr<ArrowType>> &GetChildren() const;
+	//! The position of the union child whose rows carry the type id, which is the tag of the DuckDB union
+	union_tag_t GetUnionChildIndex(int8_t type_id) const {
+		if (type_id >= 0 && union_child_indexes[static_cast<idx_t>(type_id)] != NO_UNION_CHILD) {
+			return union_child_indexes[static_cast<idx_t>(type_id)];
+		}
+		ThrowUnlistedUnionTypeId(type_id);
+	}
+
+private:
+	static constexpr union_tag_t NO_UNION_CHILD = NumericLimits<union_tag_t>::Maximum();
+	[[noreturn]] static void ThrowUnlistedUnionTypeId(int8_t type_id);
 
 private:
 	vector<shared_ptr<ArrowType>> children;
+	//! The child position of each union type id from 0 to 127, or NO_UNION_CHILD for an id the union does not list
+	vector<union_tag_t> union_child_indexes;
 };
 
 struct ArrowDateTimeInfo : public ArrowTypeInfo {

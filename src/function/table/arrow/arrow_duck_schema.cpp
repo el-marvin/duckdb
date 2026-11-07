@@ -221,6 +221,55 @@ unique_ptr<ArrowType> ArrowType::GetTypeFromFormat(string &format) {
 	return nullptr;
 }
 
+static InvalidInputException InvalidUnionFormat(const string &format) {
+	return InvalidInputException(
+	    "Invalid Arrow sparse union format string \"%s\": expected \"+us:\" and one type id from "
+	    "0 to 127 per child, separated by commas",
+	    format);
+}
+
+//! The type ids of a sparse union format "+us:I,J,...", in child order
+static vector<int8_t> ParseUnionTypeIds(const string &format, idx_t child_count) {
+	const string prefix = "+us:";
+	if (!StringUtil::StartsWith(format, prefix)) {
+		throw InvalidUnionFormat(format);
+	}
+	vector<int8_t> type_ids;
+	vector<bool> listed(NumericLimits<int8_t>::Maximum() + 1, false);
+	auto list = format.substr(prefix.size());
+	if (StringUtil::EndsWith(list, ",")) {
+		throw InvalidUnionFormat(format);
+	}
+	for (auto &entry : StringUtil::Split(list, ',')) {
+		if (entry.empty()) {
+			throw InvalidUnionFormat(format);
+		}
+		idx_t type_id = 0;
+		for (auto c : entry) {
+			if (!StringUtil::CharacterIsDigit(c)) {
+				throw InvalidUnionFormat(format);
+			}
+			type_id = type_id * 10 + static_cast<idx_t>(c - '0');
+			if (type_id >= listed.size()) {
+				throw InvalidUnionFormat(format);
+			}
+		}
+		if (listed[type_id]) {
+			throw InvalidInputException("Invalid Arrow sparse union format string \"%s\": type id %d is listed twice",
+			                            format, type_id);
+		}
+		listed[type_id] = true;
+		type_ids.push_back(static_cast<int8_t>(type_id));
+	}
+	if (type_ids.size() != child_count) {
+		throw InvalidInputException(
+		    "Invalid Arrow sparse union format string \"%s\": the number of type ids (%d) differs from the number of "
+		    "children (%d)",
+		    format, type_ids.size(), child_count);
+	}
+	return type_ids;
+}
+
 unique_ptr<ArrowType> ArrowType::GetTypeFromFormat(ClientContext &context, ArrowSchema &schema, string &format) {
 	auto type = GetTypeFromFormat(format);
 
@@ -261,11 +310,7 @@ unique_ptr<ArrowType> ArrowType::GetTypeFromFormat(ClientContext &context, Arrow
 		if (format[2] != 's') {
 			throw NotImplementedException("Unsupported Internal Arrow Type: \"%c\" Union", format[2]);
 		}
-		D_ASSERT(format[3] == ':');
-
-		std::string prefix = "+us:";
-		// TODO: what are these type ids actually for?
-		auto type_ids = StringUtil::Split(format.substr(prefix.size()), ',');
+		auto type_ids = ParseUnionTypeIds(format, static_cast<idx_t>(schema.n_children));
 
 		child_list_t<LogicalType> members;
 		vector<shared_ptr<ArrowType>> children;
@@ -279,7 +324,7 @@ unique_ptr<ArrowType> ArrowType::GetTypeFromFormat(ClientContext &context, Arrow
 			members.emplace_back(type->name, children.back()->GetDuckType());
 		}
 
-		auto type_info = make_uniq<ArrowStructInfo>(std::move(children));
+		auto type_info = make_uniq<ArrowStructInfo>(std::move(children), type_ids);
 		auto union_type = make_uniq<ArrowType>(LogicalType::UNION(members), std::move(type_info));
 		return union_type;
 	} else if (format == "+r") {
