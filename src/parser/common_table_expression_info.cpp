@@ -34,6 +34,7 @@ unique_ptr<CommonTableExpressionInfo> CommonTableExpressionInfo::Copy() const {
 	result->is_trigger_body = is_trigger_body;
 	result->trigger_catalog = trigger_catalog;
 	result->trigger_schema_path = trigger_schema_path;
+	result->trigger_transition_source = trigger_transition_source;
 	return result;
 }
 

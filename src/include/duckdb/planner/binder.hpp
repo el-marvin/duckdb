@@ -25,6 +25,7 @@
 #include "duckdb/parser/tableref/delimgetref.hpp"
 #include "duckdb/parser/tokens.hpp"
 #include "duckdb/planner/bind_context.hpp"
+#include "duckdb/planner/binding_alias.hpp"
 #include "duckdb/planner/bound_statement.hpp"
 #include "duckdb/planner/bound_tokens.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -118,7 +119,7 @@ enum class BindingMode : uint8_t {
 	EXTRACT_REPLACEMENT_SCANS,
 	EXTRACT_QUALIFIED_NAMES
 };
-enum class BinderType : uint8_t { REGULAR_BINDER, VIEW_BINDER };
+enum class BinderType : uint8_t { REGULAR_BINDER, VIEW_BINDER, TRIGGER_BODY_BINDER };
 
 struct CorrelatedColumnInfo {
 	ColumnBinding binding;
@@ -310,6 +311,10 @@ public:
 	void SetTriggerBodySearchPath(const SchemaCatalogEntry &trigger_schema);
 	//! Binds as a fired trigger's body: in the trigger's schema, recording nothing for a trigger being created
 	void PrepareFiredTriggerBody(const SchemaCatalogEntry &trigger_schema);
+	//! The scope a fired trigger's body binds in: no name of the firing statement, except a given CTE of its changed
+	//! rows
+	static shared_ptr<Binder> CreateTriggerBodyScope(Binder &parent,
+	                                                 const Identifier &transition_source = Identifier());
 	void BindCreateViewInfo(CreateViewInfo &base);
 	static void BindView(ClientContext &context, const SelectStatement &stmt, const Identifier &catalog_name,
 	                     const vector<Identifier> &schema_path, optional_ptr<LogicalDependencyList> dependencies,
@@ -464,6 +469,8 @@ private:
 	shared_ptr<Binder> parent;
 	//! What kind of node we are binding using this binder
 	BinderType binder_type = BinderType::REGULAR_BINDER;
+	//! For a trigger body scope, the one CTE of the firing statement it can see, if any
+	BindingAlias trigger_transition_source;
 	//! Global binder state
 	shared_ptr<GlobalBinderState> global_binder_state;
 	//! Active binders
@@ -494,6 +501,8 @@ private:
 private:
 	//! Determine the depth of the binder
 	idx_t GetBinderDepth() const;
+	//! Whether the CTE lookup for the given name continues past this binder to its parent
+	bool SeesOuterCTE(const BindingAlias &name) const;
 	//! Increase the depth of the binder
 	void IncreaseDepth();
 	//! Bind the expressions of generated columns to check for errors

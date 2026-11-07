@@ -127,13 +127,15 @@ bool CTEBindState::IsBound() const {
 void CTEBindState::Bind(CTEBinding &binding) {
 	// we are lazily binding the CTE
 	// we need to bind it as if we were binding it during PrepareCTE
-	query_binder = Binder::CreateBinder(parent_binder.context, parent_binder);
-	query_binder->SetCanContainNulls(true);
 	if (is_trigger_body) {
+		query_binder = Binder::CreateTriggerBodyScope(parent_binder, trigger_transition_source);
 		auto trigger_schema = Catalog::GetSchema(parent_binder.context, trigger_catalog, trigger_schema_path,
 		                                         OnEntryNotFound::THROW_EXCEPTION);
 		query_binder->PrepareFiredTriggerBody(*trigger_schema);
+	} else {
+		query_binder = Binder::CreateBinder(parent_binder.context, parent_binder);
 	}
+	query_binder->SetCanContainNulls(true);
 
 	// we clear any expression binders that were added in the mean-time, to ensure we are not binding to any newly added
 	// correlated columns
@@ -182,6 +184,7 @@ BoundCTEData Binder::PrepareCTE(const Identifier &ctename, CommonTableExpression
 	result.cte_bind_state->is_trigger_body = statement.is_trigger_body;
 	result.cte_bind_state->trigger_catalog = statement.trigger_catalog;
 	result.cte_bind_state->trigger_schema_path = statement.trigger_schema_path;
+	result.cte_bind_state->trigger_transition_source = statement.trigger_transition_source;
 
 	result.child_binder = Binder::CreateBinder(context, this);
 

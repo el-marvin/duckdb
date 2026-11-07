@@ -68,7 +68,7 @@ Binder::Binder(ClientContext &context, shared_ptr<Binder> parent_p, BinderType b
 		// We have to inherit macro and lambda parameter bindings and from the parent binder, if there is a parent.
 		macro_binding = parent->macro_binding;
 		lambda_bindings = parent->lambda_bindings;
-		if (binder_type != BinderType::VIEW_BINDER) {
+		if (binder_type == BinderType::REGULAR_BINDER) {
 			// inherit expression binders from parent
 			active_binders = parent->active_binders;
 		}
@@ -215,12 +215,24 @@ optional_ptr<CTEBinding> Binder::GetCTEBinding(const BindingAlias &name) {
 			}
 			result = entry;
 		}
-		if (!current.parent || current.binder_type != BinderType::REGULAR_BINDER) {
+		if (!current.parent || !current.SeesOuterCTE(name)) {
 			break;
 		}
 		current_binder = *current.parent;
 	}
 	return result;
+}
+
+bool Binder::SeesOuterCTE(const BindingAlias &name) const {
+	switch (binder_type) {
+	case BinderType::REGULAR_BINDER:
+		return true;
+	case BinderType::VIEW_BINDER:
+		return false;
+	case BinderType::TRIGGER_BODY_BINDER:
+		return trigger_transition_source.IsSet() && name == trigger_transition_source;
+	}
+	throw InternalException("Unrecognized binder type");
 }
 
 void Binder::AddBoundView(ViewCatalogEntry &view) {

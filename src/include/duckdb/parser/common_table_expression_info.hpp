@@ -40,6 +40,8 @@ struct CommonTableExpressionInfo {
 	//! The catalog and schema of that trigger, in which its body binds
 	Identifier trigger_catalog;
 	vector<Identifier> trigger_schema_path;
+	//! The CTE of the firing statement's changed rows, the one name outside the body it can read
+	Identifier trigger_transition_source;
 
 	CTEMaterialize GetMaterializedForSerialization(Serializer &serializer) const;
 	unique_ptr<SelectStatement> GetQueryForSerialization(Serializer &serializer) const;

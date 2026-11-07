@@ -188,6 +188,7 @@ struct CTEBindState {
 	bool is_trigger_body = false;
 	Identifier trigger_catalog;
 	vector<Identifier> trigger_schema_path;
+	Identifier trigger_transition_source;
 	shared_ptr<Binder> query_binder;
 	BoundStatement query;
 	vector<Identifier> names;

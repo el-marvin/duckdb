@@ -923,19 +923,20 @@ BaseColumnPrunerMode EnumUtil::FromString<BaseColumnPrunerMode>(const char *valu
 const StringUtil::EnumStringLiteral *GetBinderTypeValues() {
 	static constexpr StringUtil::EnumStringLiteral values[] {
 		{ static_cast<uint32_t>(BinderType::REGULAR_BINDER), "REGULAR_BINDER" },
-		{ static_cast<uint32_t>(BinderType::VIEW_BINDER), "VIEW_BINDER" }
+		{ static_cast<uint32_t>(BinderType::VIEW_BINDER), "VIEW_BINDER" },
+		{ static_cast<uint32_t>(BinderType::TRIGGER_BODY_BINDER), "TRIGGER_BODY_BINDER" }
 	};
 	return values;
 }
 
 template<>
 const char* EnumUtil::ToChars<BinderType>(BinderType value) {
-	return StringUtil::EnumToString(GetBinderTypeValues(), 2, "BinderType", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetBinderTypeValues(), 3, "BinderType", static_cast<uint32_t>(value));
 }
 
 template<>
 BinderType EnumUtil::FromString<BinderType>(const char *value) {
-	return static_cast<BinderType>(StringUtil::StringToEnum(GetBinderTypeValues(), 2, "BinderType", value));
+	return static_cast<BinderType>(StringUtil::StringToEnum(GetBinderTypeValues(), 3, "BinderType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetBindingModeValues() {

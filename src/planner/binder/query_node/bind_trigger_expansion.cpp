@@ -324,10 +324,12 @@ static vector<pair<column_t, Identifier>> ReferencedVirtualColumns(vector<unique
 	return result;
 }
 
-static void MarkTriggerBody(CommonTableExpressionInfo &cte, const TriggerCatalogEntry &trigger) {
+static void MarkTriggerBody(CommonTableExpressionInfo &cte, const TriggerCatalogEntry &trigger,
+                            const Identifier &transition_source) {
 	cte.is_trigger_body = true;
 	cte.trigger_catalog = trigger.ParentCatalog().GetName();
 	cte.trigger_schema_path = trigger.ParentSchema().GetSchemaPath();
+	cte.trigger_transition_source = transition_source;
 }
 
 static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<TriggerCatalogEntry>> &after_triggers,
@@ -347,7 +349,7 @@ static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<
 		trig_cte->query_node = trigger.trigger_action->Copy();
 		trig_cte->materialized = CTEMaterialize::CTE_MATERIALIZE_DEFAULT;
 		trig_cte->is_trigger_generated = true;
-		MarkTriggerBody(*trig_cte, trigger);
+		MarkTriggerBody(*trig_cte, trigger, base_cte_name);
 
 		// Scoped to this body so sibling triggers can't see the alias.
 		auto &body_map = trig_cte->query_node->cte_map.map;
@@ -394,7 +396,7 @@ static unique_ptr<SelectNode> BuildTriggerChain(const QueryNode &node, const Tab
 		trig_cte->query_node = before_triggers[i].get().trigger_action->Copy();
 		trig_cte->materialized = CTEMaterialize::CTE_MATERIALIZE_DEFAULT;
 		trig_cte->is_trigger_generated = true;
-		MarkTriggerBody(*trig_cte, before_triggers[i].get());
+		MarkTriggerBody(*trig_cte, before_triggers[i].get(), Identifier());
 		outer->cte_map.map[body_cte_name] = std::move(trig_cte);
 	}
 
@@ -624,6 +626,14 @@ void Binder::PrepareFiredTriggerBody(const SchemaCatalogEntry &trigger_schema) {
 	SetTriggerBodySearchPath(trigger_schema);
 }
 
+shared_ptr<Binder> Binder::CreateTriggerBodyScope(Binder &parent, const Identifier &transition_source) {
+	auto scope = CreateBinder(parent.context, &parent, BinderType::TRIGGER_BODY_BINDER);
+	if (!transition_source.empty()) {
+		scope->trigger_transition_source = BindingAlias(transition_source);
+	}
+	return scope;
+}
+
 unique_ptr<ExpressionBinder> Binder::SetupRowScope(TableIndex table_index, const vector<Identifier> &col_names,
                                                    const vector<LogicalType> &col_types, const string &scope_name) {
 	bind_context.AddGenericBinding(table_index, Identifier(scope_name), col_names, col_types);
@@ -682,13 +692,14 @@ BoundStatement Binder::ExpandRowTriggers(QueryNode &node, vector<unique_ptr<Pars
 	new_rows_proj->ResolveOperatorTypes();
 
 	auto row_scope_name = RowScopeName(event_type);
-	auto new_scope_binder = SetupRowScope(proj_idx, col_names, col_types, row_scope_name);
+	auto row_scope = CreateTriggerBodyScope(*this);
+	auto new_scope_binder = row_scope->SetupRowScope(proj_idx, col_names, col_types, row_scope_name);
 
 	unique_ptr<LogicalOperator> trigger_plan = std::move(new_rows_proj);
 	for (idx_t i = 0; i < triggers.size(); i++) {
 		auto &trigger = triggers[i].get();
 
-		auto child_binder = Binder::CreateBinder(context, this);
+		auto child_binder = Binder::CreateBinder(context, row_scope.get());
 		child_binder->PrepareFiredTriggerBody(trigger.ParentSchema());
 		auto body_copy = trigger.trigger_action->Copy();
 		auto bound_body = child_binder->Bind(*body_copy);
@@ -719,8 +730,7 @@ BoundStatement Binder::ExpandRowTriggers(QueryNode &node, vector<unique_ptr<Pars
 		logi_trig->ResolveOperatorTypes();
 		trigger_plan = std::move(logi_trig);
 	}
-	// remove row_scope_binder
-	PopScope();
+	row_scope->PopScope();
 
 	Identifier trigger_cte_name(string(TRIGGER_BODY_CTE_PREFIX) + "row_" + uuid_suffix);
 	auto trigger_cte_idx = GenerateTableIndex();

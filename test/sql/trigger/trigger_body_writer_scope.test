@@ -1,0 +1,577 @@
+# name: test/sql/trigger/trigger_body_writer_scope.test
+# description: A fired trigger body binds without the names of the statement that fires it: its CTEs, aliases and source tables
+# group: [trigger]
+
+require noforcestorage
+
+statement ok
+CREATE TABLE log(id INTEGER);
+
+statement ok
+INSERT INTO log VALUES (1);
+
+statement ok
+CREATE TABLE out(v VARCHAR, id INTEGER);
+
+# A statement trigger whose body reads table log, fired by a statement with a CTE named log
+statement ok
+CREATE TABLE c(id INTEGER);
+
+statement ok
+CREATE TABLE c2(id INTEGER);
+
+statement ok
+CREATE TRIGGER c_after AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO c2 SELECT * FROM log;
+
+statement ok
+WITH log AS (SELECT 99) INSERT INTO c VALUES (1);
+
+query I
+SELECT id FROM c2;
+----
+1
+
+# BEFORE and AFTER statement bodies, and a FOR EACH ROW body, for INSERT
+statement ok
+CREATE TABLE ins(id INTEGER);
+
+statement ok
+CREATE TRIGGER ins_before BEFORE INSERT ON ins FOR EACH STATEMENT INSERT INTO out SELECT 'ins before', id FROM log;
+
+statement ok
+CREATE TRIGGER ins_after AFTER INSERT ON ins FOR EACH STATEMENT INSERT INTO out SELECT 'ins after', id FROM log;
+
+statement ok
+WITH log AS (SELECT 99 AS id) INSERT INTO ins SELECT id FROM log;
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+ins after	1
+ins before	1
+
+query I
+SELECT id FROM ins;
+----
+99
+
+statement ok
+DELETE FROM out;
+
+statement ok
+CREATE TABLE ins_row(id INTEGER);
+
+statement ok
+CREATE TRIGGER ins_row_after AFTER INSERT ON ins_row FOR EACH ROW INSERT INTO out SELECT 'ins row', id + NEW.id FROM log;
+
+statement ok
+WITH log AS (SELECT 99 AS id) INSERT INTO ins_row SELECT id FROM log;
+
+query TI
+SELECT v, id FROM out;
+----
+ins row	100
+
+statement ok
+DELETE FROM out;
+
+# NEW inside a CTE and a correlated subquery of a FOR EACH ROW body
+statement ok
+CREATE TABLE ins_nested(id INTEGER);
+
+statement ok
+CREATE TRIGGER ins_nested_after AFTER INSERT ON ins_nested FOR EACH ROW WITH x AS (SELECT NEW.id AS id) INSERT INTO out SELECT 'ins nested', id + (SELECT max(id) FROM log WHERE log.id <= NEW.id) FROM x;
+
+statement ok
+WITH log AS (SELECT 99 AS id) INSERT INTO ins_nested VALUES (5), (6);
+
+query TI
+SELECT v, id FROM out ORDER BY id;
+----
+ins nested	6
+ins nested	7
+
+statement ok
+DELETE FROM out;
+
+# UPDATE and DELETE writers with a CTE named log, reading it themselves
+statement ok
+CREATE TABLE upd(id INTEGER, w INTEGER);
+
+statement ok
+INSERT INTO upd VALUES (1, 10), (2, 20);
+
+statement ok
+CREATE TRIGGER upd_before BEFORE UPDATE ON upd FOR EACH STATEMENT INSERT INTO out SELECT 'upd before', id FROM log;
+
+statement ok
+CREATE TRIGGER upd_after AFTER UPDATE ON upd REFERENCING OLD TABLE AS o NEW TABLE AS n FOR EACH STATEMENT INSERT INTO out SELECT 'upd after', log.id * 1000 + n.w FROM n, o, log WHERE n.id = o.id;
+
+statement ok
+WITH log AS (SELECT 2 AS id, 99 AS w) UPDATE upd SET w = log.w FROM log WHERE upd.id = log.id;
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+upd after	1099
+upd before	1
+
+query II
+SELECT id, w FROM upd ORDER BY id;
+----
+1	10
+2	99
+
+statement ok
+DELETE FROM out;
+
+statement ok
+CREATE TABLE del(id INTEGER);
+
+statement ok
+INSERT INTO del VALUES (1), (2), (3);
+
+statement ok
+CREATE TRIGGER del_before BEFORE DELETE ON del FOR EACH STATEMENT INSERT INTO out SELECT 'del before', id FROM log;
+
+statement ok
+CREATE TRIGGER del_after AFTER DELETE ON del REFERENCING OLD TABLE AS o FOR EACH STATEMENT INSERT INTO out SELECT 'del after', o.id + log.id * 10 FROM o, log;
+
+statement ok
+WITH log AS (SELECT 2 AS id) DELETE FROM del WHERE id IN (SELECT id FROM log);
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+del after	12
+del before	1
+
+query I
+SELECT id FROM del ORDER BY id;
+----
+1
+3
+
+statement ok
+DELETE FROM out;
+
+statement ok
+CREATE TABLE del_row(id INTEGER);
+
+statement ok
+INSERT INTO del_row VALUES (1), (2);
+
+statement ok
+CREATE TRIGGER del_row_after AFTER DELETE ON del_row FOR EACH ROW INSERT INTO out SELECT 'del row', id + OLD.id * 10 FROM log;
+
+statement ok
+WITH log AS (SELECT 2 AS id) DELETE FROM del_row WHERE id IN (SELECT id FROM log);
+
+query TI
+SELECT v, id FROM out;
+----
+del row	21
+
+statement ok
+DELETE FROM out;
+
+# A FOR EACH ROW body does not see the target binding of the DELETE: a bare column is the OLD column, whatever the
+# DELETE calls its table or its USING tables
+statement ok
+CREATE TABLE del_bare(id INTEGER);
+
+statement ok
+INSERT INTO del_bare VALUES (1), (2), (3), (4);
+
+statement ok
+CREATE TRIGGER del_bare_after AFTER DELETE ON del_bare FOR EACH ROW INSERT INTO out SELECT 'del bare', id;
+
+statement ok
+DELETE FROM del_bare WHERE id = 1;
+
+statement ok
+DELETE FROM del_bare AS old WHERE old.id = 2;
+
+statement ok
+DELETE FROM del_bare AS q USING log WHERE q.id = log.id + 2;
+
+statement ok
+DELETE FROM del_bare AS log WHERE log.id = 4;
+
+query TI
+SELECT v, id FROM out ORDER BY id;
+----
+del bare	1
+del bare	2
+del bare	3
+del bare	4
+
+statement ok
+DELETE FROM out;
+
+# A CTE of the writer named like the firing table, or like the table the writer reads
+statement ok
+CREATE TABLE named(id INTEGER);
+
+statement ok
+CREATE TRIGGER named_after AFTER INSERT ON named FOR EACH STATEMENT INSERT INTO out SELECT 'named', count(*) FROM named;
+
+statement ok
+WITH named AS (SELECT 99 AS id FROM range(5)) INSERT INTO named SELECT id FROM named LIMIT 2;
+
+query TI
+SELECT v, id FROM out;
+----
+named	2
+
+statement ok
+DELETE FROM out;
+
+statement ok
+CREATE TABLE named_row(id INTEGER);
+
+statement ok
+CREATE TRIGGER named_row_after AFTER INSERT ON named_row FOR EACH ROW INSERT INTO out SELECT 'named row', NEW.id * 10 + count(*) FROM named_row;
+
+statement ok
+WITH named_row AS (SELECT 5 AS id FROM range(4)) INSERT INTO named_row SELECT id FROM named_row LIMIT 1;
+
+query TI
+SELECT v, id FROM out;
+----
+named row	51
+
+statement ok
+DELETE FROM out;
+
+# A CTE of the writer named like a transition table: the transition table wins, as on main
+statement ok
+CREATE TABLE tt(id INTEGER);
+
+statement ok
+CREATE TRIGGER tt_after AFTER INSERT ON tt REFERENCING NEW TABLE AS n FOR EACH STATEMENT INSERT INTO out SELECT 'tt', id FROM n;
+
+statement ok
+WITH n AS (SELECT 99 AS id) INSERT INTO tt VALUES (3);
+
+query TI
+SELECT v, id FROM out;
+----
+tt	3
+
+statement ok
+DELETE FROM out;
+
+# CTEs of the writer named new and old: a FOR EACH ROW body reads its NEW row and the table named new
+statement ok
+CREATE TABLE "new"(id INTEGER);
+
+statement ok
+INSERT INTO "new" VALUES (1);
+
+statement ok
+CREATE TABLE nr(id INTEGER);
+
+statement ok
+CREATE TRIGGER nr_after AFTER INSERT ON nr FOR EACH ROW INSERT INTO out SELECT 'nr', NEW.id * 10 + n.id FROM "new" AS n;
+
+statement ok
+WITH new AS (SELECT 90 AS id), old AS (SELECT 98 AS id) INSERT INTO nr SELECT id - 90 FROM old;
+
+query TI
+SELECT v, id FROM out;
+----
+nr	81
+
+statement ok
+DELETE FROM out;
+
+# A body that declares a CTE named like the writer's reads its own CTE
+statement ok
+CREATE TABLE own(id INTEGER);
+
+statement ok
+CREATE TRIGGER own_after AFTER INSERT ON own FOR EACH STATEMENT WITH log AS (SELECT 7 AS id) INSERT INTO out SELECT 'own', id FROM log;
+
+statement ok
+WITH log AS (SELECT 99 AS id) INSERT INTO own VALUES (1);
+
+query TI
+SELECT v, id FROM out;
+----
+own	7
+
+statement ok
+DELETE FROM out;
+
+# Writer aliases named like a table a statement body reads leave the table visible, as on main
+statement ok
+CREATE TABLE al(id INTEGER);
+
+statement ok
+CREATE TRIGGER al_ins AFTER INSERT ON al FOR EACH STATEMENT INSERT INTO out SELECT 'al insert', id FROM log;
+
+statement ok
+CREATE TRIGGER al_upd AFTER UPDATE ON al FOR EACH STATEMENT INSERT INTO out SELECT 'al update', id FROM log;
+
+statement ok
+CREATE TRIGGER al_del AFTER DELETE ON al FOR EACH STATEMENT INSERT INTO out SELECT 'al delete', id FROM log;
+
+statement ok
+INSERT INTO al AS log VALUES (5);
+
+statement ok
+UPDATE al AS log SET id = log.id + 1;
+
+statement ok
+DELETE FROM al AS log WHERE log.id = 6;
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+al delete	1
+al insert	1
+al update	1
+
+statement ok
+DELETE FROM out;
+
+# RECURSIVE and MATERIALIZED CTEs of the writer
+statement ok
+CREATE TABLE rec(id INTEGER);
+
+statement ok
+CREATE TRIGGER rec_after AFTER INSERT ON rec FOR EACH STATEMENT INSERT INTO out SELECT 'rec', id FROM log;
+
+statement ok
+WITH RECURSIVE log(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM log WHERE id < 5) INSERT INTO rec SELECT max(id) FROM log;
+
+statement ok
+WITH log AS MATERIALIZED (SELECT 42 AS id) INSERT INTO rec SELECT id FROM log;
+
+query TI
+SELECT v, id FROM out;
+----
+rec	1
+rec	1
+
+query I
+SELECT id FROM rec ORDER BY id;
+----
+5
+42
+
+statement ok
+DELETE FROM out;
+
+# A data modifying CTE as the writer, next to a CTE it reads
+statement ok
+CREATE TABLE dml(id INTEGER);
+
+statement ok
+CREATE TRIGGER dml_after AFTER INSERT ON dml FOR EACH STATEMENT INSERT INTO out SELECT 'dml', id FROM log;
+
+query I
+WITH log AS (SELECT 99 AS id), x AS (INSERT INTO dml SELECT id FROM log RETURNING *) SELECT id FROM x;
+----
+99
+
+query TI
+SELECT v, id FROM out;
+----
+dml	1
+
+statement ok
+DELETE FROM out;
+
+# A prepared writer whose CTE takes a parameter, and the plan of the reported case
+statement ok
+CREATE TABLE prep(id INTEGER);
+
+statement ok
+CREATE TRIGGER prep_after AFTER INSERT ON prep FOR EACH STATEMENT INSERT INTO out SELECT 'prep', id FROM log;
+
+statement ok
+PREPARE prep_insert AS WITH log AS (SELECT $1::INTEGER AS id) INSERT INTO prep SELECT id FROM log;
+
+statement ok
+EXECUTE prep_insert(55);
+
+statement ok
+EXECUTE prep_insert(56);
+
+query TI
+SELECT v, id FROM out;
+----
+prep	1
+prep	1
+
+query I
+SELECT id FROM prep ORDER BY id;
+----
+55
+56
+
+statement ok
+DELETE FROM out;
+
+query II
+EXPLAIN WITH log AS (SELECT 99) INSERT INTO c VALUES (1);
+----
+physical_plan	<REGEX>:[\s\S]*Table: (\S*\.)?log\b[\s\S]*
+
+# A writer that is itself a trigger body: the outer body's CTE, its transition table and the CTE of the statement
+# that fires it are not visible to the inner body
+statement ok
+CREATE TABLE inner_t(id INTEGER);
+
+statement ok
+CREATE TRIGGER inner_after AFTER INSERT ON inner_t FOR EACH STATEMENT INSERT INTO out SELECT 'inner', id FROM log;
+
+statement ok
+CREATE TABLE outer_cte(id INTEGER);
+
+statement ok
+CREATE TRIGGER outer_cte_after AFTER INSERT ON outer_cte FOR EACH STATEMENT WITH log AS (SELECT 77 AS id) INSERT INTO inner_t SELECT id FROM log;
+
+statement ok
+INSERT INTO outer_cte VALUES (1);
+
+statement ok
+CREATE TABLE outer_tt(id INTEGER);
+
+statement ok
+CREATE TRIGGER outer_tt_after AFTER INSERT ON outer_tt REFERENCING NEW TABLE AS log FOR EACH STATEMENT INSERT INTO inner_t SELECT id + 1000 FROM log;
+
+statement ok
+INSERT INTO outer_tt VALUES (5);
+
+statement ok
+CREATE TABLE outer_row(id INTEGER);
+
+statement ok
+CREATE TRIGGER outer_row_after AFTER INSERT ON outer_row FOR EACH ROW INSERT INTO inner_t SELECT NEW.id + 2000;
+
+statement ok
+WITH log AS (SELECT 99 AS id) INSERT INTO outer_row VALUES (7);
+
+statement ok
+CREATE TABLE inner_row(id INTEGER);
+
+statement ok
+CREATE TRIGGER inner_row_after AFTER INSERT ON inner_row FOR EACH ROW INSERT INTO out SELECT 'inner row', NEW.id + id FROM log;
+
+statement ok
+CREATE TABLE outer_stmt(id INTEGER);
+
+statement ok
+CREATE TRIGGER outer_stmt_after AFTER INSERT ON outer_stmt FOR EACH STATEMENT WITH log AS (SELECT 77 AS id) INSERT INTO inner_row SELECT id FROM log;
+
+statement ok
+INSERT INTO outer_stmt VALUES (1);
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+inner	1
+inner	1
+inner	1
+inner row	78
+
+query I
+SELECT id FROM inner_t ORDER BY id;
+----
+77
+1005
+2007
+
+statement ok
+DELETE FROM out;
+
+# Each body sees its own CTEs only, not those of a sibling body
+statement ok
+CREATE TABLE q(id INTEGER);
+
+statement ok
+INSERT INTO q VALUES (3);
+
+statement ok
+CREATE TABLE sib(id INTEGER);
+
+statement ok
+CREATE TRIGGER sib_1 AFTER INSERT ON sib FOR EACH STATEMENT WITH q AS (SELECT 50 AS id) INSERT INTO out SELECT 'sib 1', id FROM q;
+
+statement ok
+CREATE TRIGGER sib_2 AFTER INSERT ON sib FOR EACH STATEMENT INSERT INTO out SELECT 'sib 2', id FROM q;
+
+statement ok
+INSERT INTO sib VALUES (1);
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+sib 1	50
+sib 2	3
+
+statement ok
+DELETE FROM out;
+
+# A body name the firing session cannot resolve is an error, also when the writer has a CTE of that name
+statement ok
+CREATE SCHEMA s2;
+
+statement ok
+CREATE TABLE s2.only2(id INTEGER);
+
+statement ok
+INSERT INTO s2.only2 VALUES (2);
+
+statement ok
+CREATE TABLE fb(id INTEGER);
+
+statement ok
+SET search_path = 'main,s2';
+
+statement ok
+CREATE TRIGGER fb_after AFTER INSERT ON fb FOR EACH STATEMENT INSERT INTO out SELECT 'fb', id FROM only2;
+
+statement ok
+INSERT INTO fb VALUES (1);
+
+statement ok
+CREATE TABLE fb_row(id INTEGER);
+
+statement ok
+CREATE TRIGGER fb_row_after AFTER INSERT ON fb_row FOR EACH ROW INSERT INTO out SELECT 'fb row', id + NEW.id FROM only2;
+
+statement ok
+INSERT INTO fb_row VALUES (1);
+
+statement ok
+RESET search_path;
+
+statement error
+WITH only2 AS (SELECT 99 AS id) INSERT INTO fb_row VALUES (3);
+----
+Table with name only2 does not exist
+
+statement error
+INSERT INTO fb VALUES (2);
+----
+Table with name only2 does not exist
+
+statement error
+WITH only2 AS (SELECT 99 AS id) INSERT INTO fb VALUES (3);
+----
+Table with name only2 does not exist
+
+query TI
+SELECT v, id FROM out ORDER BY v;
+----
+fb	2
+fb row	3
+
+query I
+SELECT id FROM fb;
+----
+1
