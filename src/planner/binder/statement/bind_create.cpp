@@ -687,6 +687,21 @@ void Binder::BindLogicalType(LogicalType &type) {
 	});
 }
 
+void Binder::CheckTriggerStorageVersion(Catalog &catalog, const CreateTriggerInfo &info) {
+	auto &attached = catalog.GetAttached();
+	if (!attached.HasStorageManager()) {
+		return;
+	}
+	auto &storage_manager = attached.GetStorageManager();
+	const auto since = StorageVersion::V2_0_0;
+	if (!info.temporary && !attached.IsTemporary() && !storage_manager.InMemory() &&
+	    storage_manager.GetStorageVersion() < since) {
+		string msg = "CREATE TRIGGER is only supported for storage versions v2.0.0 and higher.\n";
+		msg += "Use an in-memory database, ATTACH with (STORAGE_VERSION v2.0.0)";
+		throw BinderException(msg);
+	}
+}
+
 bool BoundBodyContainsTrigger(const LogicalOperator &op);
 
 SchemaCatalogEntry &Binder::BindCreateTriggerInfo(CreateTriggerInfo &create_trigger_info) {
@@ -718,19 +733,8 @@ SchemaCatalogEntry &Binder::BindCreateTriggerInfo(CreateTriggerInfo &create_trig
 
 	auto &schema = BindCreateSchema(create_trigger_info);
 
-	// Block trigger creation on databases with an older storage version
 	auto &catalog = Catalog::GetCatalog(context, create_trigger_info.GetQualifiedName().Catalog());
-	auto &attached = catalog.GetAttached();
-	if (attached.HasStorageManager()) {
-		auto &storage_manager = attached.GetStorageManager();
-		const auto since = StorageVersion::V2_0_0;
-		if (!create_trigger_info.temporary && !attached.IsTemporary() && !storage_manager.InMemory() &&
-		    storage_manager.GetStorageVersion() < since) {
-			string msg = "CREATE TRIGGER is only supported for storage versions v2.0.0 and higher.\n";
-			msg += "Use an in-memory database, ATTACH with (STORAGE_VERSION v2.0.0)";
-			throw BinderException(msg);
-		}
-	}
+	CheckTriggerStorageVersion(catalog, create_trigger_info);
 
 	if (create_trigger_info.timing == TriggerTiming::INSTEAD_OF) {
 		throw NotImplementedException("INSTEAD OF triggers are not yet supported");
@@ -794,6 +798,7 @@ SchemaCatalogEntry &Binder::BindCreateTriggerInfo(CreateTriggerInfo &create_trig
 	// Set up trigger_expanded_tables to match runtime behavior.
 	// Set up trigger_creation_table to detect recursive triggers during the validation.
 	auto validation_binder = Binder::CreateBinder(context);
+	validation_binder->entry_retriever.Inherit(entry_retriever);
 	validation_binder->global_binder_state->trigger_expanded_tables.insert(table);
 	validation_binder->global_binder_state->trigger_creation_table = &table;
 	validation_binder->global_binder_state->trigger_creation_name = create_trigger_info.GetTriggerName();

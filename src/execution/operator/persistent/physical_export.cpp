@@ -47,16 +47,25 @@ static void WriteCatalogEntries(stringstream &ss, catalog_entry_vector_t &entrie
 	ss << '\n';
 }
 
-static void WriteTriggers(CatalogTransaction transaction, stringstream &ss, BoundExportData &exported_tables) {
+catalog_entry_vector_t PhysicalExport::GetTriggerExportOrder(CatalogTransaction transaction,
+                                                             const vector<reference<TableCatalogEntry>> &tables) {
 	catalog_entry_vector_t triggers;
-	for (auto &exported_table : exported_tables.data) {
-		exported_table.entry.ScanTriggers(transaction, [&](CatalogEntry &trigger) { triggers.push_back(trigger); });
+	for (auto &table : tables) {
+		table.get().ScanTriggers(transaction, [&](CatalogEntry &trigger) { triggers.push_back(trigger); });
 	}
 	// binding a trigger depends on the triggers that already exist, so they are recreated in creation order
 	sort(triggers.begin(), triggers.end(), [](const reference<CatalogEntry> &lhs, const reference<CatalogEntry> &rhs) {
 		return lhs.get().oid < rhs.get().oid;
 	});
-	for (auto &trigger : triggers) {
+	return triggers;
+}
+
+static void WriteTriggers(CatalogTransaction transaction, stringstream &ss, BoundExportData &exported_tables) {
+	vector<reference<TableCatalogEntry>> tables;
+	for (auto &exported_table : exported_tables.data) {
+		tables.push_back(exported_table.entry);
+	}
+	for (auto &trigger : PhysicalExport::GetTriggerExportOrder(transaction, tables)) {
 		auto create_info = trigger.get().GetInfo();
 		create_info->StripCatalogQualification();
 		ss << create_info->ToString() << '\n';

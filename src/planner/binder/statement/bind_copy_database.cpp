@@ -5,6 +5,7 @@
 #include "duckdb/catalog/catalog_entry/list.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_trigger_info.hpp"
 #include "duckdb/planner/operator/logical_copy_database.hpp"
 #include "duckdb/execution/operator/persistent/physical_export.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
@@ -60,11 +61,13 @@ unique_ptr<LogicalOperator> Binder::BindCopyDatabaseData(Catalog &source_catalog
 	auto entries = PhysicalExport::GetNaiveExportOrder(context, source_catalog);
 
 	vector<unique_ptr<LogicalOperator>> insert_nodes;
+	vector<reference<TableCatalogEntry>> tables;
 	for (auto &table_ref : entries) {
 		if (table_ref.get().type != CatalogType::TABLE_ENTRY) {
 			continue;
 		}
 		auto &table = table_ref.get().Cast<TableCatalogEntry>();
+		tables.push_back(table);
 		// generate the insert statement
 		InsertStatement insert_stmt;
 		auto &insert_node = *insert_stmt.node;
@@ -105,7 +108,34 @@ unique_ptr<LogicalOperator> Binder::BindCopyDatabaseData(Catalog &source_catalog
 		// use UNION ALL to combine the individual copy statements into a single node
 		result = UnionOperators(std::move(insert_nodes));
 	}
-	return result;
+
+	auto triggers = PhysicalExport::GetTriggerExportOrder(source_catalog.GetCatalogTransaction(context), tables);
+	if (triggers.empty()) {
+		return result;
+	}
+	auto &target_catalog = Catalog::GetCatalog(context, target_database_name);
+	if (!target_catalog.IsDuckCatalog()) {
+		throw NotImplementedException(
+		    "COPY FROM DATABASE cannot copy trigger %s: database %s does not support triggers", triggers[0].get().name,
+		    target_database_name);
+	}
+	// the inserts are bound before the triggers exist in the target, so the copy fires none of them
+	auto info = make_uniq<CopyDatabaseInfo>(target_database_name);
+	for (auto &trigger : triggers) {
+		auto create_info = trigger.get().GetInfo();
+		auto &trigger_info = create_info->Cast<CreateTriggerInfo>();
+		// this path creates the triggers after the data, so the gate runs before any data is copied
+		CheckTriggerStorageVersion(target_catalog, trigger_info);
+		auto trigger_name = trigger_info.GetQualifiedName().WithCatalog(target_database_name);
+		trigger_info.SetQualifiedName(trigger_name);
+		trigger_info.base_table->SetQualifiedName(trigger_name.WithName(trigger_info.base_table->Table()));
+		// binding the trigger in the target records its dependencies there
+		trigger_info.dependencies = LogicalDependencyList();
+		info->entries.push_back(std::move(create_info));
+	}
+	auto copy_triggers = make_uniq<LogicalCopyDatabase>(std::move(info));
+	copy_triggers->children.push_back(std::move(result));
+	return std::move(copy_triggers);
 }
 
 BoundStatement Binder::Bind(CopyDatabaseStatement &stmt) {

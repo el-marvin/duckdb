@@ -1,0 +1,54 @@
+# name: test/sql/copy_database/copy_database_triggers_sqlite.test
+# description: COPY FROM DATABASE into a database whose tables cannot hold triggers fails before any data is copied
+# group: [copy_database]
+
+require sqlite_scanner
+
+require noforcestorage
+
+statement ok
+ATTACH ':memory:' AS src;
+
+statement ok
+USE src;
+
+statement ok
+CREATE TABLE t(i INTEGER);
+
+statement ok
+CREATE TABLE log(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO log VALUES ('x');
+
+statement ok
+INSERT INTO t VALUES (1);
+
+statement ok
+USE memory;
+
+statement ok
+ATTACH '{TEST_DIR}/copy_database_triggers.sqlite' AS lite (TYPE SQLITE);
+
+statement error
+COPY FROM DATABASE src TO lite;
+----
+COPY FROM DATABASE cannot copy trigger "tr": database "lite" does not support triggers
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lite';
+----
+0
+
+statement ok
+COPY FROM DATABASE src TO lite (SCHEMA);
+
+statement error
+COPY FROM DATABASE src TO lite (DATA);
+----
+COPY FROM DATABASE cannot copy trigger "tr": database "lite" does not support triggers
+
+query I
+SELECT count(*) FROM lite.t;
+----
+0

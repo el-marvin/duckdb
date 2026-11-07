@@ -16,6 +16,10 @@ LogicalCopyDatabase::~LogicalCopyDatabase() {
 }
 
 void LogicalCopyDatabase::ResolveTypes() {
+	if (!children.empty()) {
+		types = children[0]->types;
+		return;
+	}
 	types.emplace_back(LogicalType::BOOLEAN);
 }
 

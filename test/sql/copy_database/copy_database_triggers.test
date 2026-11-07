@@ -1,0 +1,715 @@
+# name: test/sql/copy_database/copy_database_triggers.test
+# description: COPY FROM DATABASE copies the triggers, creating them after the data so that the copy fires none
+# group: [copy_database]
+
+require noforcestorage
+
+statement ok
+ATTACH ':memory:' AS src;
+
+statement ok
+USE src;
+
+statement ok
+CREATE TABLE audit(msg VARCHAR);
+
+statement ok
+CREATE TABLE counters(n INTEGER);
+
+statement ok
+INSERT INTO counters VALUES (0);
+
+statement ok
+CREATE TABLE t(id INTEGER, v VARCHAR);
+
+statement ok
+CREATE TRIGGER t_before_insert BEFORE INSERT ON t FOR EACH STATEMENT INSERT INTO audit VALUES ('before insert t');
+
+statement ok
+CREATE TRIGGER t_after_insert AFTER INSERT ON t INSERT INTO audit VALUES ('after insert t');
+
+statement ok
+CREATE TRIGGER t_update_of AFTER UPDATE OF v ON t FOR EACH STATEMENT UPDATE counters SET n = n + 1;
+
+statement ok
+CREATE TRIGGER t_before_delete BEFORE DELETE ON t FOR EACH STATEMENT DELETE FROM audit WHERE msg = 'gone';
+
+statement ok
+CREATE TABLE r(id INTEGER);
+
+statement ok
+CREATE TRIGGER r_row_insert AFTER INSERT ON r FOR EACH ROW INSERT INTO audit VALUES ('row insert ' || NEW.id);
+
+statement ok
+CREATE TRIGGER r_row_delete AFTER DELETE ON r FOR EACH ROW INSERT INTO audit VALUES ('row delete ' || OLD.id);
+
+statement ok
+CREATE TABLE x(id INTEGER);
+
+statement ok
+CREATE TRIGGER x_new_rows AFTER INSERT ON x REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT INSERT INTO audit SELECT 'new ' || id FROM new_rows;
+
+statement ok
+CREATE TRIGGER x_old_rows AFTER DELETE ON x REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT INSERT INTO audit SELECT 'old ' || id FROM old_rows;
+
+statement ok
+CREATE TABLE upserted(k INTEGER PRIMARY KEY, hits INTEGER);
+
+statement ok
+CREATE TABLE u(id INTEGER);
+
+statement ok
+CREATE TRIGGER u_upsert AFTER INSERT ON u FOR EACH STATEMENT INSERT INTO upserted VALUES (1, 1) ON CONFLICT (k) DO UPDATE SET hits = upserted.hits + 1;
+
+statement ok
+CREATE TABLE uu(id INTEGER);
+
+statement ok
+CREATE TRIGGER uu_both AFTER UPDATE ON uu REFERENCING OLD TABLE AS o NEW TABLE AS n FOR EACH STATEMENT INSERT INTO audit SELECT 'update ' || o.id || ' to ' || n.id FROM o, n;
+
+statement ok
+CREATE TABLE "Mixed Case"("Odd Col" INTEGER, "select" INTEGER);
+
+statement ok
+CREATE TRIGGER "Trigger ""Quoted""" AFTER UPDATE OF "Odd Col", "select" ON "Mixed Case" FOR EACH STATEMENT INSERT INTO audit VALUES ('it''s quoted');
+
+# bodies that call a macro and read a view of the copied database
+statement ok
+CREATE MACRO tag(x) AS 'macro ' || x;
+
+statement ok
+CREATE VIEW audit_count AS SELECT count(*) AS n FROM audit;
+
+statement ok
+CREATE TABLE m(id INTEGER);
+
+statement ok
+CREATE TRIGGER m_macro AFTER INSERT ON m FOR EACH ROW INSERT INTO audit VALUES (tag(NEW.id));
+
+statement ok
+CREATE TRIGGER m_view AFTER DELETE ON m FOR EACH STATEMENT INSERT INTO audit SELECT 'count ' || n FROM audit_count;
+
+statement ok
+CREATE TABLE w(id INTEGER);
+
+statement ok
+CREATE TRIGGER w_merge AFTER INSERT ON w FOR EACH STATEMENT MERGE INTO audit USING (SELECT 'merged' AS msg) mrg ON audit.msg = mrg.msg WHEN NOT MATCHED THEN INSERT VALUES (mrg.msg);
+
+statement ok
+CREATE TRIGGER w_with AFTER DELETE ON w FOR EACH STATEMENT WITH cte AS (SELECT 'with ' || count(*) AS msg FROM w) INSERT INTO audit SELECT msg FROM cte;
+
+# a trigger on a table in another schema created through the search path, beside a table of the same name in main
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE s.t(id INTEGER);
+
+statement ok
+SET search_path = 'src.s';
+
+statement ok
+CREATE TRIGGER s_insert AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO main.audit VALUES ('insert s.t');
+
+statement ok
+USE src;
+
+# a trigger in a nested schema whose body names a table of that schema
+statement ok
+CREATE SCHEMA s.inner;
+
+statement ok
+CREATE TABLE s.inner.n(id INTEGER);
+
+statement ok
+CREATE TABLE s.inner.nlog(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER n_insert AFTER INSERT ON s.inner.n FOR EACH ROW INSERT INTO s.inner.nlog VALUES ('insert s.inner.n ' || NEW.id);
+
+# data loaded through the triggers
+statement ok
+INSERT INTO t VALUES (1, 'a'), (2, 'b');
+
+statement ok
+INSERT INTO r VALUES (10), (11);
+
+statement ok
+INSERT INTO x VALUES (20);
+
+statement ok
+INSERT INTO u VALUES (30);
+
+statement ok
+INSERT INTO m VALUES (40);
+
+statement ok
+INSERT INTO uu VALUES (70);
+
+statement ok
+INSERT INTO w VALUES (80);
+
+statement ok
+INSERT INTO s.t VALUES (50);
+
+statement ok
+INSERT INTO s.inner.n VALUES (60);
+
+query T rowsort
+SELECT msg FROM audit;
+----
+after insert t
+before insert t
+insert s.t
+macro 40
+merged
+new 20
+row insert 10
+row insert 11
+
+query T
+SELECT msg FROM s.inner.nlog;
+----
+insert s.inner.n 60
+
+query II
+SELECT * FROM upserted;
+----
+1	1
+
+# the copy runs from a session whose default database is neither source nor target
+statement ok
+USE memory;
+
+statement ok
+ATTACH ':memory:' AS dst;
+
+statement ok
+COPY FROM DATABASE src TO dst;
+
+# the copy fires no trigger: the logs hold the source rows once
+query T rowsort
+SELECT msg FROM dst.audit;
+----
+after insert t
+before insert t
+insert s.t
+macro 40
+merged
+new 20
+row insert 10
+row insert 11
+
+query T
+SELECT msg FROM dst.s.inner.nlog;
+----
+insert s.inner.n 60
+
+query II
+SELECT * FROM dst.upserted;
+----
+1	1
+
+query I
+SELECT n FROM dst.counters;
+----
+0
+
+query TTTTTTT
+SELECT schema_name, table_name, trigger_name, action_timing, event_manipulation, columns, for_each FROM duckdb_triggers() WHERE database_name = 'dst' ORDER BY ALL;
+----
+inner	n	n_insert	AFTER	INSERT	[]	ROW
+main	Mixed Case	Trigger "Quoted"	AFTER	UPDATE	[Odd Col, select]	STATEMENT
+main	m	m_macro	AFTER	INSERT	[]	ROW
+main	m	m_view	AFTER	DELETE	[]	STATEMENT
+main	r	r_row_delete	AFTER	DELETE	[]	ROW
+main	r	r_row_insert	AFTER	INSERT	[]	ROW
+main	t	t_after_insert	AFTER	INSERT	[]	STATEMENT
+main	t	t_before_delete	BEFORE	DELETE	[]	STATEMENT
+main	t	t_before_insert	BEFORE	INSERT	[]	STATEMENT
+main	t	t_update_of	AFTER	UPDATE	[v]	STATEMENT
+main	u	u_upsert	AFTER	INSERT	[]	STATEMENT
+main	uu	uu_both	AFTER	UPDATE	[]	STATEMENT
+main	w	w_merge	AFTER	INSERT	[]	STATEMENT
+main	w	w_with	AFTER	DELETE	[]	STATEMENT
+main	x	x_new_rows	AFTER	INSERT	[]	STATEMENT
+main	x	x_old_rows	AFTER	DELETE	[]	STATEMENT
+s	t	s_insert	AFTER	INSERT	[]	STATEMENT
+
+# the triggers are created in the source's creation order
+query T nosort
+SELECT trigger_name FROM duckdb_triggers() WHERE database_name = 'dst' ORDER BY trigger_oid;
+----
+t_before_insert
+t_after_insert
+t_update_of
+t_before_delete
+r_row_insert
+r_row_delete
+x_new_rows
+x_old_rows
+u_upsert
+uu_both
+Trigger "Quoted"
+m_macro
+m_view
+w_merge
+w_with
+s_insert
+n_insert
+
+# the source keeps its triggers
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE database_name = 'src';
+----
+17
+
+# every copied trigger fires on the target's tables; a body names its tables through the session's search path
+statement ok
+USE dst;
+
+statement ok
+DELETE FROM audit;
+
+statement ok
+INSERT INTO t VALUES (3, 'c');
+
+statement ok
+UPDATE t SET v = 'z' WHERE id = 3;
+
+statement ok
+UPDATE t SET id = 4 WHERE id = 3;
+
+query I
+SELECT n FROM counters;
+----
+1
+
+statement ok
+INSERT INTO audit VALUES ('gone');
+
+statement ok
+DELETE FROM t WHERE id = 4;
+
+statement ok
+INSERT INTO r VALUES (12);
+
+statement ok
+DELETE FROM r WHERE id = 10;
+
+statement ok
+INSERT INTO x VALUES (21), (22);
+
+statement ok
+DELETE FROM x WHERE id = 20;
+
+statement ok
+INSERT INTO u VALUES (31);
+
+statement ok
+UPDATE uu SET id = 71;
+
+query II
+SELECT * FROM upserted;
+----
+1	2
+
+statement ok
+UPDATE "Mixed Case" SET "Odd Col" = 1;
+
+statement ok
+INSERT INTO m VALUES (41);
+
+statement ok
+DELETE FROM m WHERE id = 40;
+
+statement ok
+INSERT INTO w VALUES (81);
+
+statement ok
+DELETE FROM w WHERE id = 80;
+
+statement ok
+INSERT INTO s.t VALUES (51);
+
+statement ok
+INSERT INTO s.inner.n VALUES (61);
+
+query T rowsort
+SELECT msg FROM audit;
+----
+after insert t
+before insert t
+count 10
+insert s.t
+it's quoted
+macro 41
+merged
+new 21
+new 22
+old 20
+row delete 10
+row insert 12
+update 70 to 71
+with 1
+
+query T rowsort
+SELECT msg FROM s.inner.nlog;
+----
+insert s.inner.n 60
+insert s.inner.n 61
+
+# the source tables are untouched by the target's triggers
+query I
+SELECT count(*) FROM src.audit;
+----
+8
+
+# the schema step alone copies no trigger; the data step creates them after the data, and still fires a trigger
+# made in the target by hand
+statement ok
+USE memory;
+
+statement ok
+ATTACH ':memory:' AS split;
+
+statement ok
+COPY FROM DATABASE src TO split (SCHEMA);
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE database_name = 'split';
+----
+0
+
+statement ok
+CREATE TRIGGER by_hand AFTER INSERT ON split.r FOR EACH ROW INSERT INTO split.audit VALUES ('by hand ' || NEW.id);
+
+statement ok
+COPY FROM DATABASE src TO split (DATA);
+
+query T rowsort
+SELECT msg FROM split.audit WHERE msg LIKE 'by hand%';
+----
+by hand 10
+by hand 11
+
+query I
+SELECT count(*) FROM split.audit;
+----
+10
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE database_name = 'split';
+----
+18
+
+# the data step returns one count per table whether or not it creates triggers
+statement ok
+ATTACH ':memory:' AS res;
+
+statement ok
+USE res;
+
+statement ok
+CREATE TABLE a AS SELECT range AS i FROM range(3);
+
+statement ok
+CREATE TABLE b AS SELECT 1 AS j;
+
+statement ok
+CREATE TRIGGER a_insert AFTER INSERT ON a FOR EACH STATEMENT INSERT INTO b VALUES (2);
+
+statement ok
+USE memory;
+
+statement ok
+ATTACH ':memory:' AS res_dst;
+
+statement ok
+COPY FROM DATABASE res TO res_dst (SCHEMA);
+
+query II
+EXPLAIN COPY FROM DATABASE res TO res_dst (DATA);
+----
+physical_plan	<REGEX>:.*Copy Database.*Union.*
+
+query I rowsort
+COPY FROM DATABASE res TO res_dst (DATA);
+----
+1
+3
+
+statement ok
+DROP TRIGGER a_insert ON res.a;
+
+statement ok
+ATTACH ':memory:' AS res_plain;
+
+statement ok
+COPY FROM DATABASE res TO res_plain (SCHEMA);
+
+# without a trigger the data step plans as before
+query II
+EXPLAIN COPY FROM DATABASE res TO res_plain (DATA);
+----
+physical_plan	<!REGEX>:.*Copy Database.*
+
+query I rowsort
+COPY FROM DATABASE res TO res_plain (DATA);
+----
+1
+3
+
+query I
+SELECT j FROM res_dst.b;
+----
+1
+
+# the stored ON clause names the table within the target, without the catalog
+query T
+SELECT sql FROM duckdb_triggers() WHERE database_name = 'split' AND trigger_name IN ('t_after_insert', 'n_insert', 's_insert') ORDER BY trigger_name;
+----
+CREATE TRIGGER n_insert AFTER INSERT ON s."inner".n FOR EACH ROW INSERT INTO s."inner".nlog (VALUES (('insert s.inner.n ' || "NEW".id)));
+CREATE TRIGGER s_insert AFTER INSERT ON s.t FOR EACH STATEMENT INSERT INTO main.audit (VALUES ('insert s.t'));
+CREATE TRIGGER t_after_insert AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO audit (VALUES ('after insert t'));
+
+# a body binds in the target's main schema, as in a session on the target: a trigger in another schema reaches a
+# main table without qualification, and a table of the same name in the trigger's schema does not capture it
+statement ok
+ATTACH ':memory:' AS shadow;
+
+statement ok
+USE shadow;
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE log(msg VARCHAR);
+
+statement ok
+CREATE TABLE s.log(a INTEGER, b INTEGER);
+
+statement ok
+CREATE TABLE s.x(id INTEGER);
+
+statement ok
+CREATE TRIGGER sx AFTER INSERT ON s.x FOR EACH STATEMENT INSERT INTO log VALUES ('x');
+
+statement ok
+INSERT INTO s.x VALUES (1);
+
+statement ok
+USE memory;
+
+statement ok
+ATTACH ':memory:' AS shadow_dst;
+
+statement ok
+COPY FROM DATABASE shadow TO shadow_dst;
+
+statement error
+DROP TABLE shadow_dst.main.log;
+----
+<REGEX>:Dependency Error.*sx.*
+
+statement ok
+DROP TABLE shadow_dst.s.log;
+
+statement ok
+USE shadow_dst;
+
+statement ok
+INSERT INTO s.x VALUES (2);
+
+query T
+SELECT msg FROM log;
+----
+x
+x
+
+statement ok
+USE memory;
+
+# creation order: a row trigger writing into a table must exist before that table's row trigger, and a trigger
+# created before the trigger its body reaches has no dependency on that trigger's tables
+statement ok
+ATTACH ':memory:' AS ord;
+
+statement ok
+USE ord;
+
+statement ok
+CREATE TABLE a(id INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER);
+
+statement ok
+CREATE TABLE z(id INTEGER);
+
+statement ok
+CREATE TABLE log(msg VARCHAR);
+
+statement ok
+CREATE TABLE log2(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER tb AFTER INSERT ON b FOR EACH ROW INSERT INTO a VALUES (NEW.id);
+
+statement ok
+CREATE TRIGGER ta AFTER INSERT ON a FOR EACH ROW INSERT INTO log VALUES ('a ' || NEW.id);
+
+statement ok
+CREATE TRIGGER parent AFTER DELETE ON z FOR EACH STATEMENT DELETE FROM a;
+
+statement ok
+CREATE TRIGGER child AFTER DELETE ON a FOR EACH STATEMENT INSERT INTO log2 VALUES ('a deleted');
+
+statement ok
+INSERT INTO a VALUES (1);
+
+statement ok
+INSERT INTO z VALUES (2);
+
+statement ok
+USE memory;
+
+statement ok
+ATTACH ':memory:' AS ord_dst;
+
+statement ok
+COPY FROM DATABASE ord TO ord_dst;
+
+query T nosort
+SELECT trigger_name FROM duckdb_triggers() WHERE database_name = 'ord_dst' ORDER BY trigger_oid;
+----
+tb
+ta
+parent
+child
+
+query T
+SELECT msg FROM ord_dst.log;
+----
+a 1
+
+statement ok
+USE ord_dst;
+
+# firing the cascade fails as it does in the source
+statement error
+INSERT INTO b VALUES (1);
+----
+FOR EACH ROW trigger "tb" on table "b" writes to a table that has its own FOR EACH ROW trigger
+
+statement ok
+DELETE FROM z;
+
+query T rowsort
+SELECT msg FROM log UNION ALL SELECT msg FROM log2;
+----
+a 1
+a deleted
+
+statement ok
+DROP TRIGGER child ON a;
+
+statement ok
+DROP TABLE log2;
+
+# a body naming the source database cannot exist in the target: the copy fails and leaves the target empty
+statement ok
+USE memory;
+
+statement ok
+ATTACH ':memory:' AS qualified;
+
+statement ok
+CREATE TABLE qualified.t(id INTEGER);
+
+statement ok
+CREATE TABLE qualified.log(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER q AFTER INSERT ON qualified.t FOR EACH STATEMENT INSERT INTO qualified.log VALUES ('q');
+
+statement ok
+INSERT INTO qualified.t VALUES (1);
+
+statement ok
+ATTACH ':memory:' AS qualified_dst;
+
+statement error
+COPY FROM DATABASE qualified TO qualified_dst;
+----
+<REGEX>:Binder Error.*Trigger "q" cannot reference "log" from a different catalog \("qualified"\).*
+
+query II
+SELECT (SELECT count(*) FROM duckdb_tables() WHERE database_name = 'qualified_dst'), (SELECT count(*) FROM duckdb_triggers() WHERE database_name = 'qualified_dst');
+----
+0	0
+
+# the split form keeps the committed schema step and rolls back the data step
+statement ok
+COPY FROM DATABASE qualified TO qualified_dst (SCHEMA);
+
+statement error
+COPY FROM DATABASE qualified TO qualified_dst (DATA);
+----
+<REGEX>:Binder Error.*Trigger "q" cannot reference "log" from a different catalog \("qualified"\).*
+
+query III
+SELECT (SELECT count(*) FROM duckdb_tables() WHERE database_name = 'qualified_dst'), (SELECT count(*) FROM qualified_dst.t), (SELECT count(*) FROM duckdb_triggers() WHERE database_name = 'qualified_dst');
+----
+2	0	0
+
+# a target whose storage version has no triggers rejects the copy
+statement ok
+ATTACH '{TEST_DIR}/copy_database_triggers_old.db' AS old_storage (STORAGE_VERSION 'v1.0.0');
+
+statement error
+COPY FROM DATABASE ord TO old_storage;
+----
+CREATE TRIGGER is only supported for storage versions v2.0.0 and higher
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'old_storage';
+----
+0
+
+# the copied triggers persist in creation order in a file target
+statement ok
+ATTACH '{TEST_DIR}/copy_database_triggers.db' AS persisted (STORAGE_VERSION 'v2.0.0');
+
+statement ok
+COPY FROM DATABASE ord TO persisted;
+
+statement ok
+CHECKPOINT persisted;
+
+statement ok
+DETACH persisted;
+
+statement ok
+ATTACH '{TEST_DIR}/copy_database_triggers.db' AS persisted;
+
+query T nosort
+SELECT trigger_name FROM duckdb_triggers() WHERE database_name = 'persisted' ORDER BY trigger_oid;
+----
+tb
+ta
+parent
+child
+
+statement ok
+USE persisted;
+
+statement ok
+INSERT INTO a VALUES (3);
+
+query T rowsort
+SELECT msg FROM log;
+----
+a 1
+a 3
