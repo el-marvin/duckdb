@@ -1,5 +1,6 @@
 #include "duckdb/parser/query_node/recursive_cte_node.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/parser/expression_util.hpp"
 
 namespace duckdb {
 
@@ -27,8 +28,13 @@ bool RecursiveCTENode::Equals(const QueryNode *other_p) const {
 	if (other.union_all != union_all) {
 		return false;
 	}
-
-	if (!ParsedExpression::ListEquals(key_targets, other.key_targets)) {
+	if (ctename != other.ctename) {
+		return false;
+	}
+	if (aliases != other.aliases) {
+		return false;
+	}
+	if (!ExpressionUtil::ListEqualsWithAliases(key_targets, other.key_targets)) {
 		return false;
 	}
 
