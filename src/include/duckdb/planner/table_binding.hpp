@@ -186,6 +186,8 @@ struct CTEBindState {
 	const vector<Identifier> &aliases;
 	idx_t active_binder_count;
 	bool is_trigger_body = false;
+	Identifier trigger_catalog;
+	vector<Identifier> trigger_schema_path;
 	shared_ptr<Binder> query_binder;
 	BoundStatement query;
 	vector<Identifier> names;
