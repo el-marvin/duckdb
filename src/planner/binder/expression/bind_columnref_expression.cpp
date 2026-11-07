@@ -69,7 +69,7 @@ void ExpressionBinder::QualifyColumnNames(ExpressionBinder &expression_binder, u
 BindResult ExpressionBinder::BindExpression(LambdaRefExpression &lambda_ref, idx_t depth) {
 	D_ASSERT(lambda_bindings && lambda_ref.LambdaIndex() < lambda_bindings->size());
 	if (lambda_ref.LambdaIndex() < inaccessible_lambda_binding_count) {
-		throw BinderException(lambda_ref, "aggregate functions cannot reference lambda parameters");
+		throw BinderException(lambda_ref, "%s cannot reference lambda parameters", inaccessible_lambda_binding_owner);
 	}
 	return (*lambda_bindings)[lambda_ref.LambdaIndex()].Bind(lambda_ref, depth);
 }

@@ -1,0 +1,206 @@
+# name: test/sql/function/list/lambdas/lambda_window_reference.test
+# description: Window functions inside lambda bodies that reference the lambda parameters
+# group: [lambdas]
+
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES (1, 10), (2, 20), (3, 30)) v(i, s);
+
+statement error
+SELECT list_transform([1], lambda x: first(x) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1, 2], lambda x: sum(x) OVER (ORDER BY i)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: lead(x) OVER (ORDER BY i)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: lead(s, 1, x) OVER (ORDER BY i)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+# the parameter only in a clause of the window, not in its argument
+statement error
+SELECT list_transform([1], lambda x: count(*) OVER (PARTITION BY x)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: row_number() OVER (ORDER BY x)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: count(*) FILTER (WHERE x > 0) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: sum(s) OVER (ORDER BY i ROWS BETWEEN x PRECEDING AND CURRENT ROW)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: first(s ORDER BY x) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: sum(s) OVER (ORDER BY i RANGE BETWEEN x PRECEDING AND CURRENT ROW)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+# the parameter reached through a struct field and through a subquery in the argument
+statement error
+SELECT list_transform([{'a': 1}], lambda x: first(x.a) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: first((SELECT x)) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: first(x) OVER w) FROM t WINDOW w AS (ORDER BY i);
+----
+window functions cannot reference lambda parameters
+
+# the other lambda functions and the comprehension form
+statement error
+SELECT [first(x) OVER () FOR x IN [1, 2]] FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT [x FOR x IN [1, 2] IF first(x) OVER () > 0] FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_filter([1, 2], lambda x: first(x) OVER () > 0) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_reduce([1, 2], lambda a, b: a + first(b) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+# nested lambdas: a parameter of the inner and of the outer lambda
+statement error
+SELECT list_transform([[1]], lambda x: list_transform(x, lambda y: first(y) OVER ())) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([[1]], lambda x: list_transform(x, lambda y: y + first(len(x)) OVER ())) FROM t;
+----
+window functions cannot reference lambda parameters
+
+# the window in another clause of the query
+statement error
+SELECT list_transform([1], lambda x: first(x) OVER ()) FROM t GROUP BY i;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT i FROM t QUALIFY list_transform([1], lambda x: first(x) OVER ())[1] = 1;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT i FROM t ORDER BY list_transform([1], lambda x: first(x) OVER ())[1];
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform(NULL::INTEGER[], lambda x: first(x) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+# a window that a macro expands to, and a macro body that holds one
+statement ok
+CREATE MACRO window_max(a) AS max(a) OVER ();
+
+statement error
+SELECT list_transform([1], lambda x: window_max(x)) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+CREATE MACRO window_over_parameter(l) AS list_transform(l, lambda x: first(x) OVER ());
+----
+window functions cannot reference lambda parameters
+
+# MATCH_RECOGNIZE computes the aggregates of its measures as window functions over the match
+statement error
+SELECT * FROM range(3) r(x) MATCH_RECOGNIZE (ORDER BY x MEASURES list_transform([1], lambda v: sum(v)) AS n PATTERN (A+) DEFINE A AS true);
+----
+window functions cannot reference lambda parameters
+
+# an aggregate inside the window names itself, as outside a window
+statement error
+SELECT list_transform([1], lambda x: first(sum(x)) OVER ()) FROM t;
+----
+aggregate functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: sum(x)) FROM t;
+----
+aggregate functions cannot reference lambda parameters
+
+# windows that do not reference the lambda parameters are computed over the rows of the query
+query II
+SELECT i, list_transform([1, NULL], lambda x: x + sum(s) OVER ()) FROM t ORDER BY i;
+----
+1	[61, NULL]
+2	[61, NULL]
+3	[61, NULL]
+
+query II
+SELECT i, list_transform([1, 2], lambda x: x * row_number() OVER (ORDER BY s DESC)) FROM t ORDER BY i;
+----
+1	[3, 6]
+2	[2, 4]
+3	[1, 2]
+
+query II
+SELECT i, [x + lag(s, 1, 0) OVER (ORDER BY i) FOR x IN [1, NULL, 5] IF count(*) OVER () > x] FROM t ORDER BY i;
+----
+1	[1]
+2	[11]
+3	[21]
+
+query II
+SELECT i, list_transform([1], lambda x: x + sum(sum(s)) OVER ()) FROM t GROUP BY i ORDER BY i;
+----
+1	[61]
+2	[61]
+3	[61]
+
+query II
+SELECT i, list_transform([1], lambda x: x + window_max(s)) FROM t ORDER BY i;
+----
+1	[31]
+2	[31]
+3	[31]
+
+query I
+SELECT * FROM range(3) r(x) MATCH_RECOGNIZE (ORDER BY x MEASURES list_transform([1], lambda v: v + sum(x)) AS n PATTERN (A+) DEFINE A AS true);
+----
+[4]
+
+# a window over a lambda outside any lambda body is unaffected
+query II
+SELECT i, first(list_transform([s], lambda y: y + 1)) OVER (ORDER BY i) FROM t ORDER BY i;
+----
+1	[11]
+2	[11]
+3	[11]
