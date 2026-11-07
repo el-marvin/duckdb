@@ -1,0 +1,298 @@
+# name: test/optimizer/unused_columns/nested_materialized_cte_unused_columns.test
+# description: A materialized CTE below an operator that reads none or some of its columns drops the unread ones
+# group: [unused_columns]
+
+statement ok
+CREATE TABLE t(b INTEGER, a VARCHAR);
+
+statement ok
+INSERT INTO t VALUES (1, 'x'), (NULL, 'y'), (3, 'z'), (1, 'x');
+
+# every row of a fails the cast to INTEGER, so a query that evaluates cast_col raises
+statement error
+SELECT a::INTEGER FROM t;
+----
+Conversion Error
+
+statement ok
+CREATE VIEW nested_view AS WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t) SELECT * FROM c;
+
+query I
+SELECT count(*) FROM (WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t) SELECT * FROM c) s;
+----
+4
+
+query I
+SELECT count(*) FROM nested_view;
+----
+4
+
+query I
+SELECT count(*) FROM t, LATERAL (SELECT t.b AS k, t.a::INTEGER AS cast_col UNION ALL SELECT t.b, (t.a || '!')::INTEGER) l;
+----
+8
+
+query I
+SELECT count(*) FROM (
+	WITH c1 AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t),
+	     c2 AS MATERIALIZED (SELECT * FROM c1)
+	SELECT * FROM c2
+) s;
+----
+4
+
+query I
+SELECT EXISTS (WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t) SELECT * FROM c);
+----
+true
+
+query I
+SELECT count(*) FROM (SELECT * FROM nested_view LIMIT 2);
+----
+2
+
+query I
+SELECT count(*) FROM nested_view WHERE b > 1;
+----
+1
+
+query I
+SELECT count(*) FROM nested_view WHERE b IS NULL;
+----
+1
+
+query II
+SELECT sum(b), count(b) FROM nested_view;
+----
+5	3
+
+query I
+SELECT b FROM nested_view ORDER BY b NULLS LAST;
+----
+1
+1
+3
+NULL
+
+query I
+SELECT count(*) FROM (SELECT DISTINCT b FROM nested_view);
+----
+3
+
+query I
+SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY b) FROM nested_view);
+----
+4
+
+query I
+SELECT sum(rn) FROM (SELECT row_number() OVER (ORDER BY b) AS rn FROM nested_view);
+----
+10
+
+query I
+SELECT count(*) FROM (SELECT b FROM (WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t) SELECT * FROM c) s GROUP BY b);
+----
+3
+
+# the parent reads columns, but none of the nested CTE
+query I
+SELECT sum(t.b) FROM t, (WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t) SELECT * FROM c) q;
+----
+20
+
+# an unread volatile column is not evaluated either, as for a projection
+statement ok
+CREATE SEQUENCE seq;
+
+query I
+SELECT count(*) FROM (WITH c AS MATERIALIZED (SELECT b, nextval('seq') AS v FROM t) SELECT * FROM c) s;
+----
+4
+
+query I
+SELECT last_value FROM duckdb_sequences() WHERE sequence_name = 'seq';
+----
+NULL
+
+# a column some operator reads is still evaluated
+statement error
+SELECT count(cast_col) FROM nested_view;
+----
+Conversion Error
+
+statement error
+SELECT count(*) FROM nested_view WHERE cast_col > 0;
+----
+Conversion Error
+
+statement error
+SELECT count(*) FROM (SELECT DISTINCT * FROM nested_view);
+----
+Conversion Error
+
+statement error
+SELECT count(rn) FROM (SELECT row_number() OVER (ORDER BY cast_col) AS rn FROM nested_view);
+----
+Conversion Error
+
+statement error
+SELECT count(*) FROM t, LATERAL (SELECT t.b AS k, t.a::INTEGER AS cast_col UNION ALL SELECT t.b, 2) l WHERE cast_col > 0;
+----
+Conversion Error
+
+# UNION, EXCEPT and INTERSECT compare every column
+statement error
+SELECT count(*) FROM (SELECT * FROM nested_view UNION SELECT * FROM nested_view);
+----
+Conversion Error
+
+statement error
+SELECT count(*) FROM (SELECT * FROM nested_view EXCEPT SELECT * FROM nested_view);
+----
+Conversion Error
+
+statement error
+SELECT count(*) FROM (SELECT * FROM nested_view INTERSECT SELECT * FROM nested_view);
+----
+Conversion Error
+
+# two references read different columns: the column only the second one reads stays
+statement error
+SELECT count(*) FROM (
+	WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t)
+	SELECT c1.b FROM c c1, (SELECT cast_col FROM c WHERE cast_col > 0) c2
+) s;
+----
+Conversion Error
+
+query I
+SELECT count(*) FROM (
+	WITH c AS MATERIALIZED (SELECT b, a, a::INTEGER AS cast_col FROM t)
+	SELECT c1.b FROM c c1 JOIN (SELECT a FROM c WHERE a > 'x') c2 ON c1.b > 0
+) s;
+----
+6
+
+# recursive CTEs nested under count(*), one with a materialized CTE in its recursive step
+query I
+SELECT count(*) FROM (WITH RECURSIVE r(i, p) AS (SELECT 1, 'a' UNION ALL SELECT i + 1, (p || 'x')::INTEGER::VARCHAR FROM r WHERE i < 5) SELECT * FROM r) s;
+----
+5
+
+query I
+SELECT count(*) FROM (
+	WITH RECURSIVE r(i, p) AS (
+		SELECT 1, 'a'
+		UNION ALL
+		(WITH c AS MATERIALIZED (SELECT i, p::INTEGER::VARCHAR AS p FROM r) SELECT i + 1, p FROM c WHERE i < 5)
+	)
+	SELECT * FROM r
+) s;
+----
+5
+
+# the recursive CTE's liveness analysis sees that the nested CTE under count(*) reads no column of r
+query I
+SELECT count(*) FROM (
+	WITH RECURSIVE r(i, q, w) AS (
+		SELECT 1, 'a', 'w'
+		UNION ALL
+		SELECT r.i + 1, r.w, r.q
+		FROM r, (SELECT count(*) AS n FROM (WITH c AS MATERIALIZED (SELECT i AS ii, q::INTEGER AS qi FROM r) SELECT * FROM c) z) k
+		WHERE r.i < 5 AND k.n > 0
+	)
+	SELECT * FROM r
+) s;
+----
+5
+
+query II
+WITH RECURSIVE r(i, p) AS (
+	SELECT 1, 'a'
+	UNION ALL
+	(WITH c AS MATERIALIZED (SELECT i, p || 'b' AS p FROM r) SELECT i + 1, p FROM c WHERE i < 3)
+)
+SELECT * FROM (SELECT * FROM r) s ORDER BY i;
+----
+1	a
+2	ab
+3	abb
+
+# a column written by INSERT stays
+statement ok
+CREATE TABLE dst(b INTEGER, len BIGINT);
+
+statement ok
+INSERT INTO dst SELECT * FROM (WITH c AS MATERIALIZED (SELECT b, length(a) AS len FROM t) SELECT * FROM c) s;
+
+query II
+SELECT count(*), sum(len) FROM dst;
+----
+4	4
+
+# the plans: no expression of an unread column is left
+statement ok
+CREATE TABLE p AS SELECT range AS x, 'v' || range AS s FROM range(10);
+
+statement ok
+SET explain_output = 'OPTIMIZED_ONLY';
+
+query II
+EXPLAIN SELECT count(*) FROM (WITH c AS MATERIALIZED (SELECT x, md5(s) AS unused_payload FROM p) SELECT * FROM c) s;
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+statement ok
+CREATE VIEW payload_view AS WITH c AS MATERIALIZED (SELECT x, md5(s) AS unused_payload FROM p) SELECT * FROM c;
+
+query II
+EXPLAIN SELECT count(*) FROM payload_view;
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+query II
+EXPLAIN SELECT count(*) FROM p, LATERAL (SELECT p.x + 1 AS y, md5(p.s) AS unused_payload UNION ALL SELECT p.x + 2, md5(p.s || 'a')) l;
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+query II
+EXPLAIN SELECT count(*) FROM p, LATERAL (SELECT p.x + 1 AS y, md5(p.s) AS unused_payload UNION ALL SELECT p.x + 2, md5(p.s || 'a')) l;
+----
+logical_opt	<REGEX>:.*__duckdb_delim.*
+
+query II
+EXPLAIN SELECT sum(x) FROM payload_view;
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+query II
+EXPLAIN SELECT count(*) FROM (SELECT DISTINCT x FROM payload_view);
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+query II
+EXPLAIN SELECT count(*) FROM (SELECT row_number() OVER (ORDER BY x) FROM payload_view);
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+query II
+EXPLAIN SELECT EXISTS (SELECT * FROM payload_view);
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+# the second reference reads kept_payload, the first reads x, neither reads unused_payload
+query II
+EXPLAIN SELECT count(*) FROM (
+	WITH c AS MATERIALIZED (SELECT x, md5(s) AS unused_payload, s || 'k' AS kept_payload FROM p)
+	SELECT c1.x FROM (SELECT x FROM c WHERE x > 2) c1, (SELECT kept_payload FROM c WHERE kept_payload > 'v3') c2
+) s;
+----
+logical_opt	<!REGEX>:.*(unused_payload|md5).*
+
+query I
+SELECT count(*) FROM (
+	WITH c AS MATERIALIZED (SELECT x, md5(s) AS unused_payload, s || 'k' AS kept_payload FROM p)
+	SELECT c1.x FROM (SELECT x FROM c WHERE x > 2) c1, (SELECT kept_payload FROM c WHERE kept_payload > 'v3') c2
+) s;
+----
+49

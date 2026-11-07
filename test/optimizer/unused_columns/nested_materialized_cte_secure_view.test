@@ -1,0 +1,32 @@
+# name: test/optimizer/unused_columns/nested_materialized_cte_secure_view.test
+# description: A secure view over a materialized CTE drops the CTE columns no operator reads
+# group: [unused_columns]
+
+statement ok
+CREATE TABLE t(b INTEGER, a VARCHAR);
+
+statement ok
+INSERT INTO t VALUES (1, 'x'), (NULL, 'y'), (3, 'z'), (1, 'x');
+
+statement ok
+CREATE SECURE VIEW sv AS WITH c AS MATERIALIZED (SELECT b, a::INTEGER AS cast_col FROM t) SELECT * FROM c;
+
+query I
+SELECT count(*) FROM sv;
+----
+4
+
+query I
+SELECT count(*) FROM (SELECT * FROM sv LIMIT 2);
+----
+2
+
+query I
+SELECT count(*) FROM sv WHERE b > 1;
+----
+1
+
+statement error
+SELECT count(*) FROM sv WHERE cast_col > 0;
+----
+Conversion Error
