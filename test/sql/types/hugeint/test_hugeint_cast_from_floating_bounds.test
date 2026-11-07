@@ -183,7 +183,7 @@ SELECT CAST(d AS HUGEINT) FROM doubles
 ----
 out of range for the destination type INT128
 
-# fill() converts its interpolated DOUBLE back to HUGEINT, which can land on the minimum
+# fill() between HUGEINT values reaches the minimum exactly, without a DOUBLE in between
 query II
 SELECT i, fill(x) OVER (ORDER BY i)
 FROM (VALUES (1, 0::HUGEINT), (2, '-85070591730234615865843651857942052864'::HUGEINT), (3, NULL)) t(i, x)
@@ -203,11 +203,11 @@ FROM (VALUES
 ORDER BY i
 ----
 0	-170141183460469231731687303715884105728
-1	-170141183460469231731687303715884105728
+1	-170141183460469231657900327421045899264
 4611686018427387904	170141183460469231731687303715884105727
 
-# between two negative endpoints the offset rounds to -2**127 in DOUBLE, which no longer wraps to the maximum
-statement error
+# between two negative endpoints the interpolated value stays inside them
+query II
 SELECT i, fill(x) OVER (ORDER BY i)
 FROM (VALUES
     (0::BIGINT, -1::HUGEINT),
@@ -216,4 +216,6 @@ FROM (VALUES
 ) t(i, x)
 ORDER BY i
 ----
-Overflow in HUGEINT addition
+0	-1
+18014398509481983	-170141183460469222286954337976593678336
+18014398509481984	-170141183460469231731687303715884105728
