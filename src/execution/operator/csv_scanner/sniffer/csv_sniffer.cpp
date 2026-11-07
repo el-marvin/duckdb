@@ -114,6 +114,7 @@ AdaptiveSnifferResult CSVSniffer::MinimalSniff() {
 	}
 
 	// Gather Types
+	SetUserDefinedDateTimeFormat(*state_machine);
 	for (idx_t i = 0; i < state_machine->dialect_options.num_cols; i++) {
 		best_sql_types_candidates_per_column_idx[i] = state_machine->options.auto_type_candidates;
 	}

@@ -217,24 +217,26 @@ SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_iso_ts.csv');
 ----
 TIMESTAMP	0024-01-31 10:11:12
 
-# a column mixing two and four digit years reads no year 24; the outcome depends on the order of the values, because
-# the sniffer narrows its candidates one value at a time and never checks an earlier value again
+# a column mixing two and four digit years reads no year 24: no format reads both widths, so the column is VARCHAR in
+# any order
 
 statement ok
 COPY (SELECT * FROM (VALUES ('01-02-24'), ('13-02-2024')) t(d)) TO '{TEST_DIR}/year_digits_mixed.csv' (HEADER);
 
-statement error
-SELECT d FROM read_csv('{TEST_DIR}/year_digits_mixed.csv');
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_mixed.csv');
 ----
-Could not convert string "01-02-24" to 'DATE'
+VARCHAR	01-02-24
+VARCHAR	13-02-2024
 
 statement ok
 COPY (SELECT * FROM (VALUES ('01-02-2024'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_mixed_four_first.csv' (HEADER);
 
-statement error
-SELECT d FROM read_csv('{TEST_DIR}/year_digits_mixed_four_first.csv');
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_mixed_four_first.csv');
 ----
-Could not convert string "01-02-2024" to 'DATE'
+VARCHAR	01-02-2024
+VARCHAR	01-02-24
 
 statement ok
 COPY (SELECT * FROM (VALUES ('12-31-2024'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_mixed_varchar.csv' (HEADER);
