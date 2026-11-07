@@ -1,0 +1,50 @@
+# name: test/sql/types/timestamp/timestamp_cast_whitespace_json.test
+# description: The JSON reader reads a TIMESTAMP with the whitespace around a date or a time that a DATE accepts
+# group: [timestamp]
+
+require json
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01 '), ('2024-01-02' || chr(9)), ('2024-01-03 12:00:00' || chr(10))) t(d)) TO '{TEST_DIR}/ts_ws.json'
+
+query II
+SELECT d, typeof(d) FROM read_json('{TEST_DIR}/ts_ws.json', columns={'d': 'TIMESTAMP'}) ORDER BY d
+----
+2024-01-01 00:00:00	TIMESTAMP
+2024-01-02 00:00:00	TIMESTAMP
+2024-01-03 12:00:00	TIMESTAMP
+
+query I
+SELECT d FROM read_json('{TEST_DIR}/ts_ws.json', columns={'d': 'DATE'}) ORDER BY d
+----
+2024-01-01
+2024-01-02
+2024-01-03
+
+query II
+SELECT json_transform('{"d": "2024-01-01 "}', '{"d": "TIMESTAMP"}'), json_transform_strict('{"d": "2024-01-01 "}', '{"d": "TIMESTAMP"}')
+----
+{'d': '2024-01-01 00:00:00'}	{'d': '2024-01-01 00:00:00'}
+
+statement error
+SELECT json_transform_strict('{"d": "2024-01-01 xyz"}', '{"d": "TIMESTAMP"}')
+----
+invalid timestamp field format
+
+# schema inference (strict parsing) types a column the same with and without the whitespace
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01 ', '2024-01-01', '2024-01-01 12:00:00' || chr(9), '2024-01-01 12:00:00'),
+	('2024-01-02 ', '2024-01-02', '2024-01-02 12:00:00', '2024-01-02 12:00:00')) t(a, b, c, d)) TO '{TEST_DIR}/ts_ws_inference.json'
+
+query IIII
+SELECT DISTINCT typeof(a), typeof(b), typeof(c), typeof(d) FROM read_json('{TEST_DIR}/ts_ws_inference.json')
+----
+DATE	DATE	TIMESTAMP	TIMESTAMP
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01 ', '2024-01-01'), ('2024-01-02 12:00:00', '2024-01-02 12:00:00')) t(a, b)) TO '{TEST_DIR}/ts_ws_mixed.json'
+
+query II
+SELECT DISTINCT typeof(a), typeof(b) FROM read_json('{TEST_DIR}/ts_ws_mixed.json')
+----
+VARCHAR	VARCHAR

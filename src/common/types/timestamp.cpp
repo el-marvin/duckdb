@@ -33,6 +33,13 @@ static idx_t TimestampTimeLength(const char *str, idx_t len) {
 	return suffix_pos;
 }
 
+static bool OnlySpaceFollows(const char *str, idx_t len, idx_t pos) {
+	while (pos < len && StringUtil::CharacterIsSpace(str[pos])) {
+		pos++;
+	}
+	return pos == len;
+}
+
 // timestamp/datetime uses 64 bits, high 32 bits for date and low 32 bits for time
 // string format is YYYY-MM-DDThh:mm:ssZ
 // T may be a space
@@ -53,7 +60,7 @@ TimestampCastResult Timestamp::TryConvertTimestampTZ(const char *str, idx_t len,
 	default:
 		break;
 	}
-	if (pos == len) {
+	if (OnlySpaceFollows(str, len, pos)) {
 		// no time: only a date or special
 		if (date == date_t::infinity()) {
 			result = timestamp_t::infinity();
@@ -84,7 +91,7 @@ TimestampCastResult Timestamp::TryConvertTimestampTZ(const char *str, idx_t len,
 	if (!Timestamp::TryFromDatetime(date, time, result)) {
 		return TimestampCastResult::ERROR_RANGE;
 	}
-	if (pos < len) {
+	if (!OnlySpaceFollows(str, len, pos)) {
 		// skip a "Z" at the end (as per the ISO8601 specs)
 		int hh, mm, ss;
 		if (str[pos] == 'Z') {
@@ -114,11 +121,7 @@ TimestampCastResult Timestamp::TryConvertTimestampTZ(const char *str, idx_t len,
 			// Note that the caller must reinterpret the instant we return to the given time zone
 		}
 
-		// skip any spaces at the end
-		while (pos < len && StringUtil::CharacterIsSpace(str[pos])) {
-			pos++;
-		}
-		if (pos < len) {
+		if (!OnlySpaceFollows(str, len, pos)) {
 			return TimestampCastResult::ERROR_INCORRECT_FORMAT;
 		}
 	}

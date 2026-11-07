@@ -1,0 +1,234 @@
+# name: test/sql/types/timestamp/timestamp_cast_whitespace.test
+# description: The TIMESTAMP casts accept the whitespace around a date or a time that the DATE and TIME casts accept
+# group: [timestamp]
+
+query II
+SELECT CAST('2024-01-01 ' AS DATE), CAST('2024-01-01 ' AS TIMESTAMP)
+----
+2024-01-01	2024-01-01 00:00:00
+
+query I
+SELECT TIMESTAMP '2024-01-01 '
+----
+2024-01-01 00:00:00
+
+statement ok
+CREATE TABLE ts(t TIMESTAMP)
+
+statement ok
+INSERT INTO ts VALUES ('2024-01-01 '), ('2024-01-02' || chr(9)), ('2024-01-03 12:00:00' || chr(10)), (NULL)
+
+query I
+SELECT t FROM ts ORDER BY t NULLS LAST
+----
+2024-01-01 00:00:00
+2024-01-02 00:00:00
+2024-01-03 12:00:00
+NULL
+
+statement ok
+CREATE TABLE forms(name VARCHAR, s VARCHAR)
+
+statement ok
+INSERT INTO forms VALUES
+	('date space', '2024-01-01 '),
+	('date two spaces', '2024-01-01  '),
+	('space date space', ' 2024-01-01 '),
+	('date tab', '2024-01-01' || chr(9)),
+	('date newline', '2024-01-01' || chr(10)),
+	('date cr', '2024-01-01' || chr(13)),
+	('date crlf', '2024-01-01' || chr(13) || chr(10)),
+	('date vt', '2024-01-01' || chr(11)),
+	('date ff', '2024-01-01' || chr(12)),
+	('date space tab', '2024-01-01 ' || chr(9)),
+	('date bc space', '2024-01-01 (BC) '),
+	('time space', '2024-01-01 12:00:00 '),
+	('time tab', '2024-01-01 12:00:00' || chr(9)),
+	('time newline', '2024-01-01 12:00:00' || chr(10)),
+	('t time tab', '2024-01-01T12:00:00' || chr(9)),
+	('short time tab', '2024-01-01 12:00' || chr(9)),
+	('fraction tab', '2024-01-01 12:00:00.123456789' || chr(9)),
+	('z tab', '2024-01-01 12:00:00Z' || chr(9)),
+	('offset tab', '2024-01-01 12:00:00+05' || chr(9)),
+	('zone tab', '2024-01-01 12:00:00 UTC' || chr(9))
+
+query IIIIIIII
+SELECT name, TRY_CAST(s AS DATE), TRY_CAST(s AS TIMESTAMP), TRY_CAST(s AS TIMESTAMPTZ), TRY_CAST(s AS TIMESTAMP_NS),
+	TRY_CAST(s AS TIMESTAMP_S), TRY_CAST(s AS TIMESTAMP_MS), TRY_CAST(s AS TIME)
+FROM forms ORDER BY rowid
+----
+date space	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date two spaces	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+space date space	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date tab	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date newline	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date cr	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date crlf	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date vt	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date ff	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date space tab	2024-01-01	2024-01-01 00:00:00	2024-01-01 00:00:00+00	2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00	00:00:00
+date bc space	2024-01-01 (BC)	2024-01-01 (BC) 00:00:00	2024-01-01 (BC) 00:00:00+00	NULL	2024-01-01 (BC) 00:00:00	2024-01-01 (BC) 00:00:00	00:00:00
+time space	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+time tab	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+time newline	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+t time tab	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+short time tab	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+fraction tab	2024-01-01	2024-01-01 12:00:00.123456	2024-01-01 12:00:00.123456+00	2024-01-01 12:00:00.123456789	2024-01-01 12:00:00	2024-01-01 12:00:00.123	12:00:00.123456
+z tab	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+offset tab	2024-01-01	2024-01-01 12:00:00	2024-01-01 07:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+zone tab	2024-01-01	2024-01-01 12:00:00	2024-01-01 12:00:00+00	2024-01-01 12:00:00	2024-01-01 12:00:00	2024-01-01 12:00:00	12:00:00
+
+# every accepted text means the same value with whitespace around it, in every type
+statement ok
+CREATE TABLE bases AS SELECT * FROM (VALUES
+	('2024-01-01'), ('2024/01/01'), ('2024-1-1'), ('2024-01-01 (BC)'), ('infinity'), ('-infinity'), ('epoch'),
+	('2024-01-01 12:00:00'), ('2024-01-01T12:00:00'), ('2024-01-01 12:00'), ('2024-01-01 12:00:00.123456789'),
+	('2024-01-01 12:00:00Z'), ('2024-01-01 12:00:00+05:30'), ('2024-01-01 12:00:00-05'), ('2024-01-01 12:00:00 UTC'),
+	('2024-01-01 12:00Z')
+) t(b)
+
+statement ok
+CREATE TABLE spaces AS SELECT * FROM (VALUES
+	(' '), ('  '), (chr(9)), (chr(10)), (chr(11)), (chr(12)), (chr(13)), (chr(13) || chr(10)), (' ' || chr(9) || ' ')
+) t(w)
+
+query I
+SELECT count(*) FROM bases WHERE TRY_CAST(b AS DATE) IS NULL OR TRY_CAST(b AS TIMESTAMP) IS NULL
+----
+0
+
+query II
+SELECT b, replace(replace(w, chr(9), 't'), chr(10), 'n') FROM bases, spaces, (VALUES ('suffix'), ('prefix'), ('both')) p(place),
+	LATERAL (SELECT CASE place WHEN 'suffix' THEN b || w WHEN 'prefix' THEN w || b ELSE w || b || w END AS s)
+WHERE TRY_CAST(s AS DATE) IS DISTINCT FROM TRY_CAST(b AS DATE)
+	OR TRY_CAST(s AS TIMESTAMP) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMP)
+	OR TRY_CAST(s AS TIMESTAMPTZ) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMPTZ)
+	OR TRY_CAST(s AS TIMESTAMP_NS) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMP_NS)
+	OR TRY_CAST(s AS TIMESTAMP_S) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMP_S)
+	OR TRY_CAST(s AS TIMESTAMP_MS) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMP_MS)
+	OR TRY_CAST(s AS TIME) IS DISTINCT FROM TRY_CAST(b AS TIME)
+	OR TRY_CAST(TRY_CAST(s AS TIMESTAMP) AS DATE) IS DISTINCT FROM TRY_CAST(s AS DATE)
+----
+
+# a time of 24:00:00 rolls over to the next day in TIMESTAMP, with and without whitespace
+query II
+SELECT w, count(*) FROM spaces, (VALUES ('2024-01-01 24:00:00')) t(b)
+WHERE TRY_CAST(b || w AS DATE) IS DISTINCT FROM TRY_CAST(b AS DATE)
+	OR TRY_CAST(b || w AS TIMESTAMP) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMP)
+	OR TRY_CAST(b || w AS TIMESTAMP_NS) IS DISTINCT FROM TRY_CAST(b AS TIMESTAMP_NS)
+	OR TRY_CAST(b || w AS TIME) IS DISTINCT FROM TRY_CAST(b AS TIME)
+GROUP BY w
+----
+
+query II
+SELECT TRY_CAST('2024-01-01 24:00:00' || chr(9) AS TIMESTAMP), TRY_CAST('2024-01-01 24:00:00' || chr(9) AS TIME)
+----
+2024-01-02 00:00:00	00:00:00
+
+# text other than whitespace after the value stays rejected, by DATE and TIMESTAMP alike
+statement ok
+CREATE TABLE rejected AS SELECT * FROM (VALUES
+	('2024-01-01 xyz'), ('2024-01-01xyz'), ('2024-01-01T'), ('2024-01-01T '), ('2024-01-01 T'), ('2024-01-01 T12:00:00'),
+	('2024-01-01 Z'), ('2024-01-01Z'), ('2024-01-01 +05'), ('2024-01-01 UTC'), ('2024-01-01 1'),
+	('2024-01-01' || chr(160)), ('2024-01-01 12:00:00 x y'), ('2024-01-01 12:00:00' || chr(9) || 'UTC'),
+	('2024-01-01 12:00:00' || chr(10) || '+05'), ('2024-01-01 12:00:00 ' || chr(160)), (' '), (chr(9)), ('')
+) t(s)
+
+query IIIIII
+SELECT count(TRY_CAST(s AS DATE)), count(TRY_CAST(s AS TIMESTAMP)), count(TRY_CAST(s AS TIMESTAMPTZ)),
+	count(TRY_CAST(s AS TIMESTAMP_NS)), count(TRY_CAST(s AS TIMESTAMP_S)), count(TRY_CAST(s AS TIMESTAMP_MS))
+FROM rejected
+----
+0	0	0	0	0	0
+
+statement error
+SELECT CAST('2024-01-01 xyz' AS TIMESTAMP)
+----
+invalid timestamp field format: "2024-01-01 xyz"
+
+statement error
+SELECT CAST('2024-01-01 T' AS TIMESTAMP)
+----
+invalid timestamp field format: "2024-01-01 T"
+
+statement error
+SELECT CAST('2024-01-01 12:00:00' || chr(9) || 'UTC' AS TIMESTAMPTZ)
+----
+<REGEX>:Conversion Error: .*"2024-01-01 12:00:00.UTC".*
+
+# a date beyond the TIMESTAMP range gives the same error and the same DATE with and without the whitespace
+statement error
+SELECT CAST('294247-01-11 ' AS TIMESTAMP)
+----
+timestamp field value out of range: "294247-01-11 "
+
+statement error
+SELECT CAST('294247-01-11' AS TIMESTAMP)
+----
+timestamp field value out of range: "294247-01-11"
+
+query II
+SELECT CAST('300000-01-01 12:00:00' || chr(9) AS DATE), CAST('300000-01-01 12:00:00' AS DATE)
+----
+300000-01-01	300000-01-01
+
+# a zone name follows a single space only
+query II
+SELECT TRY_CAST('2024-01-01 12:00:00 UTC' AS TIMESTAMP), TRY_CAST('2024-01-01 12:00:00' || chr(9) || 'UTC' AS TIMESTAMP)
+----
+2024-01-01 12:00:00	NULL
+
+# the CSV reader: sniffing (strict parsing) and declared columns
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01 '), ('2024-01-02 ')) t(d)) TO '{TEST_DIR}/ts_ws_dates.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01 '), ('2024-01-02 12:00:00')) t(d)) TO '{TEST_DIR}/ts_ws_mixed.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01 12:00:00' || chr(9)), ('2024-01-02 12:00:00' || chr(9))) t(d)) TO '{TEST_DIR}/ts_ws_tabs.csv' (HEADER, DELIMITER ',')
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/ts_ws_dates.csv') ORDER BY d
+----
+DATE	2024-01-01
+DATE	2024-01-02
+
+statement ok
+COPY (SELECT * FROM (VALUES ('2024-01-01'), ('2024-01-02 12:00:00')) t(d)) TO '{TEST_DIR}/ts_ws_mixed_bare.csv' (HEADER)
+
+# the sniffer does not widen dates into a TIMESTAMP column, with or without the space
+query II
+SELECT typeof(a.d), typeof(b.d) FROM read_csv('{TEST_DIR}/ts_ws_mixed.csv') a
+	POSITIONAL JOIN read_csv('{TEST_DIR}/ts_ws_mixed_bare.csv') b
+----
+VARCHAR	VARCHAR
+VARCHAR	VARCHAR
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/ts_ws_tabs.csv', delim=',') ORDER BY d
+----
+TIMESTAMP	2024-01-01 12:00:00
+TIMESTAMP	2024-01-02 12:00:00
+
+query III
+SELECT a, b, c FROM read_csv('{TEST_DIR}/ts_ws_dates.csv', columns={'a': 'TIMESTAMP'}, header=true) t1
+	POSITIONAL JOIN read_csv('{TEST_DIR}/ts_ws_dates.csv', columns={'b': 'TIMESTAMP_NS'}, header=true) t2
+	POSITIONAL JOIN read_csv('{TEST_DIR}/ts_ws_dates.csv', columns={'c': 'TIMESTAMPTZ'}, header=true) t3
+ORDER BY a
+----
+2024-01-01 00:00:00	2024-01-01 00:00:00	2024-01-01 00:00:00+00
+2024-01-02 00:00:00	2024-01-02 00:00:00	2024-01-02 00:00:00+00
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/ts_ws_mixed.csv', columns={'d': 'TIMESTAMP'}, header=true) ORDER BY d
+----
+2024-01-01 00:00:00
+2024-01-02 12:00:00
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/ts_ws_mixed.csv', columns={'d': 'DATE'}, header=true) ORDER BY d
+----
+2024-01-01
+2024-01-02
+
