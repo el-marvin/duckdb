@@ -1168,3 +1168,19 @@ TEST_CASE("Test create table with empty name", "[relation_api]") {
 	auto values = con.Values("(42)");
 	REQUIRE_THROWS_AS(values->Create(""), ParserException);
 }
+
+TEST_CASE("An error inside a view body bound through a relation reports no position", "[relation_api]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	REQUIRE_NO_FAIL(con.Query("SET errors_as_json = true"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE src(a INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT a FROM src"));
+	auto relation = con.View("v");
+	REQUIRE_NO_FAIL(con.Query("DROP TABLE src"));
+
+	auto result = relation->Execute();
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "src does not exist"));
+	REQUIRE(!StringUtil::Contains(result->GetError(), "\"position\""));
+}

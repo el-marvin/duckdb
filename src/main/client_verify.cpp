@@ -240,6 +240,7 @@ void ClientContext::StatementVerification(ClientContextLock &lock, unique_ptr<SQ
 		auto execute = make_uniq<ExecuteStatement>();
 		execute->name = Identifier(name);
 		execute->named_values = std::move(prep_verifier.values);
+		execute->reported_against_prepared_query = true;
 
 		ReplaceStatement(statement, std::move(execute));
 	} else if (verification == DebugStatementVerification::EXPLAIN_STATEMENT ||

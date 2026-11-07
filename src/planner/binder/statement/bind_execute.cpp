@@ -1,4 +1,5 @@
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 #include "duckdb/parser/statement/execute_statement.hpp"
 #include "duckdb/planner/planner.hpp"
@@ -84,7 +85,19 @@ BoundStatement Binder::Bind(ExecuteStatement &stmt) {
 		// catalog was modified or statement does not have clear types: rebind the statement before running the execute
 		Planner prepared_planner(context);
 		prepared_planner.parameter_data = bind_values;
-		prepared = prepared_planner.PrepareSQLStatement(entry->second->unbound_statement->Copy());
+		try {
+			prepared = prepared_planner.PrepareSQLStatement(entry->second->unbound_statement->Copy());
+		} catch (std::exception &ex) {
+			if (stmt.reported_against_prepared_query) {
+				throw;
+			}
+			// locations inside the prepared body are offsets into the PREPARE text, not into this statement
+			ErrorData error(ex);
+			if (!error.ReplaceQueryLocation(QueryLocation())) {
+				throw;
+			}
+			error.Throw();
+		}
 		rebound_plan = std::move(prepared_planner.plan);
 		D_ASSERT(prepared->properties.bound_all_parameters);
 		global_binder_state->bound_tables = prepared_planner.binder->global_binder_state->bound_tables;

@@ -125,6 +125,7 @@ unique_ptr<SQLStatement> PreparedStatement::CreateStatement(identifier_map_t<Bou
 	// report the query that was prepared - not the generated EXECUTE - in errors and profiling output
 	execute->query = query;
 	execute->stmt_location = QueryLocation(0, query.size());
+	execute->reported_against_prepared_query = true;
 	// the values are already typed - pass them in pre-bound instead of as SQL literals
 	execute->bound_values = named_values;
 	return std::move(execute);

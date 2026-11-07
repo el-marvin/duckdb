@@ -628,3 +628,29 @@ TEST_CASE("Test prepared statements with extension that can request a rebind", "
 	// SetVariableStatement
 	REQUIRE_NO_FAIL(con.Prepare("SET VARIABLE test_var = ?")->Execute(42));
 }
+
+TEST_CASE("A rebind error of a directly executed prepared statement keeps its place in the prepared text", "[api]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE prepared_src(a INTEGER)"));
+	auto prepared = con.Prepare("SELECT 1 AS first_column, a FROM prepared_src");
+	REQUIRE(!prepared->HasError());
+	REQUIRE_NO_FAIL(con.Query("DROP TABLE prepared_src"));
+
+	auto result = prepared->Execute();
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "LINE 1: SELECT 1 AS first_column, a FROM prepared_src\n"
+	                                                 "                                         ^^^^^^^^^^^^"));
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE view_src(a INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT a FROM view_src"));
+	auto over_view = con.Prepare("SELECT 1 AS first_column, a FROM v");
+	REQUIRE(!over_view->HasError());
+	REQUIRE_NO_FAIL(con.Query("DROP TABLE view_src"));
+
+	result = over_view->Execute();
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "LINE 1: SELECT 1 AS first_column, a FROM v\n"
+	                                                 "                                         ^"));
+}
