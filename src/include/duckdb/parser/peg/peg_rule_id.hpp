@@ -417,6 +417,7 @@ enum class PEGRuleId : uint32_t {
 	ForEachRow,
 	ForEachStatement,
 	CreateTypeStmt,
+	CreateTypeName,
 	CreateType,
 	CreateTypeFromType,
 	EnumSelectType,
