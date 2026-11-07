@@ -981,7 +981,9 @@ bool StrpTimeFormat::Parse(const char *data, size_t size, ParseResult &result, b
 				}
 				// year without century..
 				// Python uses 69 as a crossover point (i.e. >= 69 is 19.., < 69 is 20..)
-				if (pos - start_pos < 2 && strict) {
+				if (pos - start_pos < 2 && (strict || specifiers[i] == StrTimeSpecifier::YEAR_WITHOUT_CENTURY_PADDED)) {
+					error_message = "Year without century must have two digits";
+					error_position = start_pos;
 					return false;
 				}
 				if (number >= 100) {
@@ -1008,7 +1010,9 @@ bool StrpTimeFormat::Parse(const char *data, size_t size, ParseResult &result, b
 				default:
 					break;
 				}
-				if (pos - start_pos < 2 && strict) {
+				if (pos - start_pos < 4) {
+					error_message = "Year must have four digits";
+					error_position = start_pos;
 					return false;
 				}
 				// year as full number
@@ -1041,6 +1045,11 @@ bool StrpTimeFormat::Parse(const char *data, size_t size, ParseResult &result, b
 					break;
 				default:
 					error_message = "Incompatible ISO year offset specified";
+					error_position = start_pos;
+					return false;
+				}
+				if (pos - start_pos < 4) {
+					error_message = "ISO Year must have four digits";
 					error_position = start_pos;
 					return false;
 				}

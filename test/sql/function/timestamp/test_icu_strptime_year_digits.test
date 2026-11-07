@@ -1,0 +1,25 @@
+# name: test/sql/function/timestamp/test_icu_strptime_year_digits.test
+# description: the ICU strptime reads %Y as exactly four digits and %y as exactly two
+# group: [timestamp]
+
+require icu
+
+statement ok
+SET TimeZone = 'UTC';
+
+statement error
+SELECT strptime('24-01-31 Europe/Amsterdam', '%Y-%m-%d %Z');
+----
+Year must have four digits
+
+query III
+SELECT try_strptime('24-01-31 Europe/Amsterdam', '%Y-%m-%d %Z'),
+	strptime('2024-01-31 Europe/Amsterdam', '%Y-%m-%d %Z'),
+	strptime('24-01-31 Europe/Amsterdam', '%y-%m-%d %Z');
+----
+NULL	2024-01-30 23:00:00+00	2024-01-30 23:00:00+00
+
+query II
+SELECT strptime('01-02-24 +0100', ['%d-%m-%Y %z', '%d-%m-%y %z']), try_strptime('01-02-24 +0100', ['%d-%m-%Y %z']);
+----
+2024-01-31 23:00:00+00	NULL
