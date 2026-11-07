@@ -11,6 +11,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/expression/conjunction_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/expression/window_expression.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
@@ -223,6 +224,10 @@ public:
 			    macro_binding.HasMatchingBinding(path[0]) && IsDotCall(function)) {
 				CaptureMacroParameter(path[0]);
 			}
+			if (body_is_qualified && path.size() >= 3 && IsLambdaParameter(path[0]) && IsDotCall(function)) {
+				auto &qualified_name = function.GetQualifiedName();
+				CaptureByCallerScope(ColumnRefExpression(qualified_name.Schema(), qualified_name.Catalog()));
+			}
 			if (!function.IsLambdaFunction()) {
 				break;
 			}
@@ -274,9 +279,67 @@ private:
 		return false;
 	}
 
+	optional_ptr<LambdaScope> DeclaringScope(const Identifier &name) {
+		for (idx_t i = scopes.size(); i > 0; i--) {
+			for (auto &parameter : scopes[i - 1].parameters) {
+				if (parameter.get().GetColumnName() == name) {
+					return scopes[i - 1];
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	// The top level of a scalar macro body binds in the caller's scope, which resolves a dotted name against its
+	// own tables before the lambda parameters, as it must for a lambda written there, so a caller table named like
+	// a body parameter would read the parameter's fields.
+	void CaptureByCallerScope(const ColumnRefExpression &column_ref) {
+		if (!column_ref.IsQualified()) {
+			return;
+		}
+		auto &parameter = column_ref.ColumnNames()[0];
+		auto scope = DeclaringScope(parameter);
+		if (!scope || scope->captured.find(parameter) != scope->captured.end()) {
+			return;
+		}
+		if (CallerScopeBindsElsewhere(column_ref)) {
+			// a single arrow may be the JSON operator, whose left side names the parameter of an enclosing lambda
+			Capture(identifier_set_t {parameter});
+		}
+	}
+
+	bool CallerScopeBindsElsewhere(const ColumnRefExpression &column_ref) {
+		auto &parameter = column_ref.ColumnNames()[0];
+		vector<DummyBinding> parameter_binding;
+		parameter_binding.emplace_back(vector<LogicalType> {LogicalType::ANY}, vector<Identifier> {parameter},
+		                               parameter.GetIdentifierName());
+		ColumnQualifier qualifier(binder, &parameter_binding);
+		ColumnRefExpression probe(column_ref.ColumnNames());
+		unique_ptr<ParsedExpression> qualified;
+		try {
+			ErrorData error;
+			qualified = qualifier.QualifyColumnName(probe, error);
+		} catch (std::exception &ex) {
+			if (ErrorData(ex).Type() != ExceptionType::BINDER) {
+				throw;
+			}
+			// an ambiguous name in the caller's scope is no reading of the parameter either
+			return true;
+		}
+		D_ASSERT(qualified);
+		reference<ParsedExpression> base = *qualified;
+		while (base.get().GetExpressionType() == ExpressionType::STRUCT_EXTRACT) {
+			base = *base.get().Cast<OperatorExpression>().GetChildren()[0];
+		}
+		return base.get().GetExpressionClass() != ExpressionClass::LAMBDA_REF;
+	}
+
 	// A rename can end ReplaceMacroParameters' last name test, so a qualified form counts whatever its last name.
 	void CaptureColumnReference(ColumnRefExpression &column_ref) {
 		auto &names = column_ref.ColumnNames();
+		if (body_is_qualified) {
+			CaptureByCallerScope(column_ref);
+		}
 		if (!column_ref.IsQualified()) {
 			if (!IsLambdaParameter(names[0])) {
 				CaptureMacroParameter(names[0]);

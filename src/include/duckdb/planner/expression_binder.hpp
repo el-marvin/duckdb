@@ -239,6 +239,8 @@ public:
 	//! Exposed to be used from sub-binders that aren't subclasses of ExpressionBinder.
 	virtual BindResult BindExpression(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth,
 	                                  bool root_expression = false);
+	//! A select list item is written outside every lambda, so its copy at an alias reference sees no lambda parameter
+	BindResult BindAliasDefinition(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth, bool root_expression);
 
 	//! FIXME: Generalise this for extensibility.
 	//! Recursively replaces macro parameters with the provided input parameters.

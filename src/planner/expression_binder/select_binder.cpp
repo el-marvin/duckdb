@@ -36,7 +36,7 @@ bool SelectBinder::TryResolveAliasReference(ColumnRefExpression &colref, idx_t d
 		                      alias_name);
 	}
 	auto copied_unbound = node.bind_state.BindAlias(alias_index);
-	result = BindExpression(copied_unbound, depth, false);
+	result = BindAliasDefinition(copied_unbound, depth, false);
 	return true;
 }
 

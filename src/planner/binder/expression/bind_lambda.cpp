@@ -163,6 +163,27 @@ BindResult ExpressionBinder::BindExpression(LambdaExpression &expr, idx_t depth,
 	return BindResult(std::move(bound_lambda));
 }
 
+BindResult ExpressionBinder::BindAliasDefinition(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth,
+                                                 bool root_expression) {
+	struct HiddenLambdaScopes {
+		explicit HiddenLambdaScopes(ExpressionBinder &expression_binder_p)
+		    : expression_binder(expression_binder_p), lambda_bindings(expression_binder.lambda_bindings),
+		      inaccessible_count(expression_binder.inaccessible_lambda_binding_count) {
+			expression_binder.lambda_bindings = nullptr;
+			expression_binder.inaccessible_lambda_binding_count = 0;
+		}
+		~HiddenLambdaScopes() {
+			expression_binder.lambda_bindings = lambda_bindings;
+			expression_binder.inaccessible_lambda_binding_count = inaccessible_count;
+		}
+		ExpressionBinder &expression_binder;
+		optional_ptr<vector<DummyBinding>> lambda_bindings;
+		idx_t inaccessible_count;
+	};
+	HiddenLambdaScopes hidden(*this);
+	return BindExpression(expr_ptr, depth, root_expression);
+}
+
 void ExpressionBinder::TransformCapturedLambdaColumn(unique_ptr<Expression> &original,
                                                      unique_ptr<Expression> &replacement,
                                                      BoundLambdaExpression &bound_lambda_expr,

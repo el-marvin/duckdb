@@ -1,0 +1,229 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_select_alias.test
+# description: A select list alias used inside a lambda keeps the meaning of its definition, which no lambda parameter of the reference's scope can capture
+# group: [lambdas]
+
+statement ok
+CREATE TABLE t AS SELECT 99 AS s;
+
+# the alias definition names a lambda parameter of the lambda that references the alias
+
+query III
+SELECT 99 AS y, y AS x, list_transform([1], lambda y: x);
+----
+99	99	[99]
+
+query III
+SELECT 99 AS y, y + 1 AS x, list_transform([1], lambda y: x);
+----
+99	100	[100]
+
+query III
+SELECT 99 AS Y, Y AS x, list_transform([1], lambda y: x);
+----
+99	99	[99]
+
+query III
+SELECT NULL::INTEGER AS y, y AS x, list_transform([1], lambda y: x);
+----
+NULL	NULL	[NULL]
+
+query III
+SELECT {'d': 99} AS y, y AS x, list_transform([{'d': 1}], lambda y: x['d']);
+----
+{'d': 99}	{'d': 99}	[99]
+
+# the parameter and the alias in one body, and the alias outside the lambda
+
+query IIII
+SELECT 99 AS y, y AS x, x + 1, list_transform([1], lambda y: x + y);
+----
+99	99	100	[100]
+
+# two lambdas with the same parameter name
+
+query IIII
+SELECT 99 AS y, y AS x, list_transform([1], lambda y: x), list_transform([2], lambda y: x * y);
+----
+99	99	[99]	[198]
+
+# nested lambdas, the capturing parameter at either level
+
+query III
+SELECT 99 AS y, y AS x, list_transform([1], lambda q: list_transform([2], lambda y: x + q));
+----
+99	99	[[100]]
+
+query III
+SELECT 99 AS y, y AS x, list_transform([1], lambda y: list_transform([2], lambda z: x + y + z));
+----
+99	99	[[102]]
+
+# the alias definition holds a lambda
+
+query III
+SELECT [1, 2] AS y, list_transform(y, lambda q: q * 10) AS x, list_transform([5], lambda y: x);
+----
+[1, 2]	[10, 20]	[[10, 20]]
+
+query III
+SELECT 10 AS y, list_transform([1, 2], lambda q: q + y) AS x, list_transform([7], lambda y: x);
+----
+10	[11, 12]	[[11, 12]]
+
+query III
+SELECT 10 AS y, list_transform([1, 2], lambda q: q + y) AS x, list_transform([7], lambda y: list_transform(x, lambda q: q + y));
+----
+10	[11, 12]	[[18, 19]]
+
+# the definition's own lambda declares the name, so it was never captured
+query III
+SELECT 3 AS k, list_transform([1, 2], lambda y: y + k) AS x, list_transform([7], lambda y: x);
+----
+3	[4, 5]	[[4, 5]]
+
+# list_reduce with two parameters, and the comprehension syntax
+
+query III
+SELECT 10 AS acc, acc AS x, list_reduce([1, 2], lambda acc, e: acc + e + x);
+----
+10	10	13
+
+query III
+SELECT 99 AS y, y AS x, [x FOR y IN [1]];
+----
+99	99	[99]
+
+query III
+SELECT 99 AS y, y AS x, [x + y FOR y IN [1] IF x > y];
+----
+99	99	[100]
+
+# an aggregate of the alias inside a lambda
+
+query III
+SELECT 5 AS y, y AS x, list_transform([1], lambda y: sum(x) + y) FROM (VALUES (2), (3)) v(k);
+----
+5	5	[11]
+
+# the definition names a correlated column
+
+query III
+SELECT * FROM (SELECT 7 AS o) t, LATERAL (SELECT o AS x, list_transform([1], lambda o: x) AS r);
+----
+7	7	[7]
+
+# a table column in the definition is qualified before the alias is expanded
+
+query II
+SELECT s AS x, list_transform([1], lambda s: x) FROM t;
+----
+99	[99]
+
+# WHERE, HAVING, QUALIFY and ORDER BY expand the alias too
+
+query II
+SELECT 5 AS y, y AS x FROM t WHERE list_transform([1], lambda y: x) = [5];
+----
+5	5
+
+query III
+SELECT k AS y, y AS x, count(*) FROM (SELECT 99 AS k) t GROUP BY k HAVING list_transform([1], lambda y: x) = [99];
+----
+99	99	1
+
+query III
+SELECT 5 AS y, y AS x, row_number() OVER () AS rn FROM t QUALIFY list_transform([1], lambda y: x) = [5];
+----
+5	5	1
+
+query II
+SELECT k AS y, y AS x FROM (VALUES (1), (3), (2)) v(k) ORDER BY list_transform([0], lambda y: x)[1] DESC, k;
+----
+3	3
+2	2
+1	1
+
+# GROUP BY the column the alias names, and GROUP BY the alias the definition names
+
+query III
+SELECT k AS y, y AS x, list_transform([1], lambda y: x) FROM (SELECT 99 AS k) t GROUP BY k;
+----
+99	99	[99]
+
+query III
+SELECT k AS y, y AS x, list_transform([1], lambda y: x) FROM (SELECT 99 AS k) t GROUP BY y;
+----
+99	99	[99]
+
+# the alias passed to a macro whose body lambda declares the name the definition uses
+
+statement ok
+CREATE MACRO m(a) AS list_transform([1], lambda x: a);
+
+query III
+SELECT s AS x, x + 1 AS z, m(z) FROM t;
+----
+99	100	[100]
+
+query III
+SELECT 99 AS x, x + 1 AS z, m(z);
+----
+99	100	[100]
+
+
+# the alias passed to a macro whose body lambda declares the name of the definition, not of the alias
+
+statement ok
+CREATE MACRO my(a) AS list_transform([1], lambda y: a);
+
+query III
+SELECT 99 AS y, y AS x, my(x);
+----
+99	99	[99]
+
+# other lambda functions, a view and a prepared statement
+
+query III
+SELECT 1 AS y, y AS x, list_filter([1, 2, 3], lambda y: y > x);
+----
+1	1	[2, 3]
+
+statement ok
+CREATE VIEW v AS SELECT 99 AS y, y AS x, list_transform([1], lambda y: x) AS r;
+
+query III
+SELECT * FROM v;
+----
+99	99	[99]
+
+statement ok
+PREPARE p AS SELECT ?::INTEGER AS y, y AS x, list_transform([1], lambda y: x + y);
+
+query III
+EXECUTE p(5);
+----
+5	5	[6]
+
+query II
+SELECT DISTINCT ON (list_transform([1], lambda y: x)) k AS y, y AS x FROM (VALUES (1), (1), (2)) v(k) ORDER BY ALL;
+----
+1	1
+2	2
+
+# a definition holding a lambda read by a lambda nested two levels deep
+query III
+SELECT 10 AS y, list_transform([1, 2], lambda q: q + y) AS x, list_transform([1], lambda y: list_reduce(x, lambda a, b: a + b + y));
+----
+10	[11, 12]	[24]
+
+# a definition the lambda cannot hold is refused, where the capture used to hide it
+
+statement error
+SELECT unnest([1, 2]) AS y, y AS x, list_transform([1], lambda y: x);
+----
+UNNEST in lambda expressions is not supported
+
+statement error
+SELECT random() AS y, y AS x, list_transform([1], lambda y: x);
+----
+referenced - but the expression has side effects

@@ -51,7 +51,7 @@ bool ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, unique_ptr
 	expr_ptr = std::move(original_expr);
 	visited_select_indexes.insert(alias_entry->second);
 
-	result = enclosing_binder.BindExpression(expr_ptr, depth, root_expression);
+	result = enclosing_binder.BindAliasDefinition(expr_ptr, depth, root_expression);
 	visited_select_indexes.erase(alias_entry->second);
 	return true;
 }

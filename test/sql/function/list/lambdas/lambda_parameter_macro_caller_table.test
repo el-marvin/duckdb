@@ -1,0 +1,286 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_macro_caller_table.test
+# description: A dotted reference to a lambda parameter of a macro body is not captured by a table of the caller named like the parameter
+# group: [lambdas]
+
+statement ok
+CREATE TABLE x AS SELECT 50 AS d, 7 AS z;
+
+statement ok
+CREATE MACRO fp(a) AS list_transform([{'d': 1}], lambda x: x.d + a);
+
+statement ok
+CREATE MACRO fd() AS list_transform([{'d': 1}], lambda x: x.d);
+
+query I
+SELECT fp(7) FROM x;
+----
+[8]
+
+query I
+SELECT fd() FROM x;
+----
+[1]
+
+query I
+SELECT fd() FROM x AS X;
+----
+[1]
+
+query I
+SELECT fd() FROM (SELECT 1 AS e) q, x;
+----
+[1]
+
+# written next to the table, the table wins over the parameter: the query's own tables come first
+
+query I
+SELECT list_transform([{'d': 1}], lambda x: x.d + 7) FROM x;
+----
+[57]
+
+# no capture without a table named like the parameter, or without the column
+
+query I
+SELECT fp(7) FROM x AS q;
+----
+[8]
+
+query I
+SELECT fp(7) FROM (SELECT 50 AS e) x;
+----
+[8]
+
+query I
+SELECT fp(7) FROM (SELECT {'d': 50} AS x) t;
+----
+[8]
+
+# the caller's table in an argument keeps its meaning
+
+query I
+SELECT fp(x.d) FROM x;
+----
+[51]
+
+query I
+SELECT fp(z) FROM x;
+----
+[8]
+
+query II
+SELECT d, fp(d) FROM x;
+----
+50	[51]
+
+query I
+SELECT fd() FROM x WHERE fp(z) = [8];
+----
+[1]
+
+query II
+SELECT z, fp(z) FROM x GROUP BY z;
+----
+7	[8]
+
+query I
+SELECT fd() FROM x ORDER BY fp(z);
+----
+[1]
+
+query I
+SELECT fp(z) FROM x GROUP BY fp(z);
+----
+[8]
+
+# NULL elements
+
+statement ok
+CREATE MACRO fn() AS list_transform([NULL, {'d': 1}], lambda x: x.d);
+
+query I
+SELECT fn() FROM x;
+----
+[NULL, 1]
+
+# nested lambdas in the body, a shadowing inner parameter, and a reference from the inner lambda to the outer one
+
+statement ok
+CREATE MACRO nested() AS list_transform([{'d': 1}], lambda x: list_transform([{'d': 2}], lambda y: y.d * 10 + x.d));
+
+query I
+SELECT nested() FROM x;
+----
+[[21]]
+
+statement ok
+CREATE MACRO shadowed() AS list_transform([{'d': 1}], lambda x: list_transform([{'d': 2}], lambda x: x.d));
+
+query I
+SELECT shadowed() FROM x;
+----
+[[2]]
+
+statement ok
+CREATE MACRO inner_only() AS list_transform([[{'d': 3}]], lambda q: list_transform(q, lambda x: x.d));
+
+query I
+SELECT inner_only() FROM x;
+----
+[[3]]
+
+# list_reduce with two parameters and the comprehension syntax
+
+statement ok
+CREATE MACRO reduced() AS list_reduce([{'d': 1}, {'d': 2}], lambda x, y: {'d': x.d + y.d}).d;
+
+query I
+SELECT reduced() FROM x;
+----
+3
+
+statement ok
+CREATE MACRO comprehension() AS [x.d FOR x IN [{'d': 1}]];
+
+query I
+SELECT comprehension() FROM x;
+----
+[1]
+
+# a field of a field, and a table qualified by its schema
+
+statement ok
+CREATE TABLE p AS SELECT {'e': 50} AS d;
+
+statement ok
+CREATE MACRO deep() AS list_transform([{'d': {'e': 1}}], lambda p: p.d.e);
+
+query I
+SELECT deep() FROM p;
+----
+[1]
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE s.d AS SELECT 50 AS e;
+
+statement ok
+CREATE MACRO schema_named() AS list_transform([{'d': {'e': 1}}], lambda s: s.d.e);
+
+query I
+SELECT schema_named() FROM s.d;
+----
+[1]
+
+query I
+SELECT list_transform([{'d': {'e': 1}}], lambda s: s.d.e) FROM s.d;
+----
+[50]
+
+# a dot call on a field of the parameter
+
+statement ok
+CREATE TABLE xs AS SELECT 'zz' AS d;
+
+statement ok
+CREATE MACRO dot_call() AS list_transform([{'d': 'ab'}], lambda xs: xs.d.upper());
+
+query I
+SELECT dot_call() FROM xs;
+----
+[AB]
+
+# a USING column named like the parameter
+
+query I
+SELECT fd() FROM (SELECT {'d': 40} AS x) a JOIN (SELECT {'d': 40} AS x) b USING (x);
+----
+[1]
+
+# an ambiguous caller table named like the parameter
+
+statement ok
+CREATE SCHEMA s1;
+
+statement ok
+CREATE SCHEMA s2;
+
+statement ok
+CREATE TABLE s1.x AS SELECT 50 AS d;
+
+statement ok
+CREATE TABLE s2.x AS SELECT 60 AS d;
+
+query I
+SELECT fd() FROM s1.x, s2.x;
+----
+[1]
+
+statement error
+SELECT list_transform([{'d': 1}], lambda x: x.d) FROM s1.x, s2.x;
+----
+Ambiguous reference to table
+
+# the macro called inside a lambda of the caller, in a subquery, and from another macro
+
+query I
+SELECT list_transform([1], lambda q: fp(q)) FROM x;
+----
+[[2]]
+
+query I
+SELECT (SELECT fd()) FROM x;
+----
+[1]
+
+query I
+SELECT (SELECT fd() FROM x) FROM (SELECT 1);
+----
+[1]
+
+statement ok
+CREATE MACRO outer_macro(a) AS fp(a) || fd();
+
+query I
+SELECT outer_macro(7) FROM x;
+----
+[8, 1]
+
+# the window form of a macro
+
+statement ok
+CREATE MACRO wm(a) AS sum(a) + list_sum(list_transform([{'d': 1}], lambda x: x.d));
+
+query I
+SELECT wm(z) OVER () FROM x;
+----
+8
+
+# a table of the body's own subquery wins, as for any query
+
+statement ok
+CREATE MACRO body_table() AS (SELECT list_transform([{'d': 1}], lambda x: x.d) FROM (SELECT 60 AS d) x);
+
+query I
+SELECT body_table() FROM x;
+----
+[60]
+
+statement ok
+CREATE MACRO body_subquery() AS (SELECT list_transform([{'d': 1}], lambda x: x.d));
+
+query I
+SELECT body_subquery() FROM x;
+----
+[1]
+
+# a table macro body binds in its own scope
+
+statement ok
+CREATE MACRO tm() AS TABLE SELECT list_transform([{'d': 1}], lambda x: x.d) AS r;
+
+query III
+SELECT * FROM x, tm();
+----
+50	7	[1]
