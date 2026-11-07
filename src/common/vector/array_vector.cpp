@@ -2,6 +2,7 @@
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/vector_iterator.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
 namespace duckdb {
@@ -67,6 +68,24 @@ idx_t VectorArrayBuffer::GetAllocationSize() const {
 
 void VectorArrayBuffer::VerifyInternal(const LogicalType &type, const SelectionVector &sel, idx_t count) const {
 	D_ASSERT(type.InternalType() == PhysicalType::ARRAY);
+	// for any NULL entry in the array, every child entry of it should be NULL as well
+	if (validity.CanHaveNull() &&
+	    (child->GetVectorType() == VectorType::FLAT_VECTOR || child->GetVectorType() == VectorType::CONSTANT_VECTOR)) {
+		auto child_validity = child->Validity();
+		auto row_count = vector_type == VectorType::CONSTANT_VECTOR ? 1 : Size();
+		for (idx_t r = 0; r < row_count; r++) {
+			if (validity.RowIsValid(r)) {
+				continue;
+			}
+			for (idx_t c = r * array_size; c < (r + 1) * array_size; c++) {
+				if (child_validity.IsValid(c)) {
+					throw InternalException("Array NULL mismatch - a child of a NULL array must always be NULL\nArray "
+					                        "type: %s\nRow: %llu, Child row: %llu",
+					                        type.ToString(), (uint64_t)r, (uint64_t)c);
+				}
+			}
+		}
+	}
 	if (!sel.IsSet() && count == Size()) {
 		child->Verify();
 		return;
@@ -90,7 +109,6 @@ void VectorArrayBuffer::VerifyInternal(const LogicalType &type, const SelectionV
 		}
 	}
 	child->Verify(child_sel, child_count);
-	// FIXME: verify NULL-ness in child
 }
 
 buffer_ptr<VectorBuffer> VectorArrayBuffer::Flatten(const LogicalType &type) const {
