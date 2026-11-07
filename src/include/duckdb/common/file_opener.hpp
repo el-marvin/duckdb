@@ -71,7 +71,7 @@ public:
 			lookup_result = TryGetCurrentSetting(opener, key, output);
 		}
 
-		if (lookup_result) {
+		if (lookup_result && !output.IsNull()) {
 			result = output.GetValue<TYPE>();
 		}
 		return lookup_result;

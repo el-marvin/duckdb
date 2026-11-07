@@ -20,12 +20,14 @@ SELECT current_setting('TimeZone')
 ----
 Europe/Amsterdam
 
-# the reset value depends on the machine, so capture what the plain RESET produces
+# a session reset returns to the global time zone
 statement ok
 RESET TimeZone
 
-statement ok
-CREATE TABLE default_tz AS SELECT current_setting('TimeZone') AS tz
+query I
+SELECT current_setting('TimeZone')
+----
+UTC
 
 statement ok
 SET SESSION TIME ZONE 'Asia/Tokyo'
@@ -34,9 +36,9 @@ statement ok
 RESET SESSION TIME ZONE
 
 query I
-SELECT current_setting('TimeZone') = (SELECT tz FROM default_tz)
+SELECT current_setting('TimeZone')
 ----
-true
+UTC
 
 statement ok
 SET SESSION TIME ZONE 'Asia/Tokyo'
@@ -45,9 +47,9 @@ statement ok
 RESET TIME ZONE
 
 query I
-SELECT current_setting('TimeZone') = (SELECT tz FROM default_tz)
+SELECT current_setting('TimeZone')
 ----
-true
+UTC
 
 statement ok
 SET SESSION TIME ZONE DEFAULT

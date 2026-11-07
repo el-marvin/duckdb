@@ -76,8 +76,8 @@ public:
 		auto &context = input.context;
 
 		Value host, port;
-		if (!context.TryGetCurrentSetting("waggle_location_host", host) ||
-		    !context.TryGetCurrentSetting("waggle_location_port", port)) {
+		if (!context.TryGetCurrentSetting("waggle_location_host", host) || host.IsNull() ||
+		    !context.TryGetCurrentSetting("waggle_location_port", port) || port.IsNull()) {
 			throw InvalidInputException("Need the parameters damnit");
 		}
 

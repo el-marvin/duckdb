@@ -356,7 +356,7 @@ bool GeoParquetFileMetadata::IsGeometryColumn(const string &column_name) const {
 }
 
 bool GeoParquetFileMetadata::IsGeoParquetConversionEnabled(const Context &context) {
-	bool geoparquet_enabled = false;
+	bool geoparquet_enabled = true;
 	context.TryGetCurrentSetting("enable_geoparquet_conversion", geoparquet_enabled);
 	return geoparquet_enabled;
 }

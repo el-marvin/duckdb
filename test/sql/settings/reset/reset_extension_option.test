@@ -1,0 +1,192 @@
+# name: test/sql/settings/reset/reset_extension_option.test
+# description: RESET of an extension option drops the connection's own value, so the option reads the global value again
+# group: [reset]
+
+require parquet
+
+require json
+
+require skip_reload
+
+# a registered option whose default is NULL reads as a NULL of its type before anything sets it
+query II con1
+SELECT current_setting('parquet_prefetch_column_gap'), typeof(current_setting('parquet_prefetch_column_gap'))
+----
+NULL	UBIGINT
+
+statement ok
+COPY (SELECT 'abc'::BLOB AS b) TO '{TEST_DIR}/reset_extension_option.parquet'
+
+statement ok con1
+SET SESSION binary_as_string = false
+
+statement ok con1
+SET GLOBAL binary_as_string = true
+
+query II con1
+SELECT current_setting('binary_as_string'), typeof(b) FROM '{TEST_DIR}/reset_extension_option.parquet'
+----
+false	BLOB
+
+query II con2
+SELECT current_setting('binary_as_string'), typeof(b) FROM '{TEST_DIR}/reset_extension_option.parquet'
+----
+true	VARCHAR
+
+statement ok con1
+RESET binary_as_string
+
+query II con1
+SELECT current_setting('binary_as_string'), typeof(b) FROM '{TEST_DIR}/reset_extension_option.parquet'
+----
+true	VARCHAR
+
+query III con1
+SELECT name, value, scope FROM duckdb_settings() WHERE name = 'binary_as_string'
+----
+binary_as_string	true	GLOBAL
+
+# a RESET without a value of the connection's own leaves the global value in place
+statement ok con1
+RESET binary_as_string
+
+query I con1
+SELECT current_setting('binary_as_string')
+----
+true
+
+query I con2
+SELECT current_setting('binary_as_string')
+----
+true
+
+# RESET GLOBAL returns to the default, and a connection with its own value keeps it
+statement ok con2
+SET SESSION binary_as_string = true
+
+statement ok con1
+RESET GLOBAL binary_as_string
+
+query I con1
+SELECT current_setting('binary_as_string')
+----
+false
+
+query III con2
+SELECT name, value, scope FROM duckdb_settings() WHERE name = 'binary_as_string'
+----
+binary_as_string	true	LOCAL
+
+statement ok con2
+RESET SESSION binary_as_string
+
+query II con2
+SELECT current_setting('binary_as_string'), typeof(b) FROM '{TEST_DIR}/reset_extension_option.parquet'
+----
+false	BLOB
+
+# a NULL value reads as not set, so the scan takes its own default
+statement ok con1
+SET SESSION binary_as_string = NULL
+
+query II con1
+SELECT current_setting('binary_as_string'), typeof(b) FROM '{TEST_DIR}/reset_extension_option.parquet'
+----
+NULL	BLOB
+
+statement ok con1
+RESET binary_as_string
+
+statement ok con1
+SET SESSION enable_geoparquet_conversion = NULL
+
+query I con1
+SELECT typeof(geometry) FROM '{WORKING_DIRECTORY}/data/geoparquet/data-point-encoding_wkb.parquet' LIMIT 1
+----
+GEOMETRY('OGC:CRS84')
+
+statement ok con1
+RESET enable_geoparquet_conversion
+
+# an option whose default is NULL reads the global value after RESET, not NULL
+statement ok con1
+SET SESSION parquet_prefetch_column_gap = 5
+
+statement ok con1
+SET GLOBAL parquet_prefetch_column_gap = 7
+
+query I con1
+SELECT current_setting('parquet_prefetch_column_gap')
+----
+5
+
+statement ok con1
+RESET SESSION parquet_prefetch_column_gap
+
+query I con1
+SELECT current_setting('parquet_prefetch_column_gap')
+----
+7
+
+statement ok con1
+RESET GLOBAL parquet_prefetch_column_gap
+
+query II con1
+SELECT current_setting('parquet_prefetch_column_gap'), typeof(current_setting('parquet_prefetch_column_gap'))
+----
+NULL	UBIGINT
+
+query II con2
+SELECT value, scope FROM duckdb_settings() WHERE name = 'parquet_prefetch_column_gap'
+----
+NULL	GLOBAL
+
+# without a global value, a session RESET returns to the NULL default
+statement ok con1
+SET SESSION parquet_prefetch_column_gap = 5
+
+statement ok con1
+RESET parquet_prefetch_column_gap
+
+query II con1
+SELECT current_setting('parquet_prefetch_column_gap'), typeof(current_setting('parquet_prefetch_column_gap'))
+----
+NULL	UBIGINT
+
+query II con1
+SELECT value, scope FROM duckdb_settings() WHERE name = 'parquet_prefetch_column_gap'
+----
+NULL	GLOBAL
+
+# an option with a validating callback
+statement ok con1
+SET SESSION json_geometry_format = 'wkt'
+
+statement ok con1
+SET GLOBAL json_geometry_format = 'GeoJSON'
+
+query II con1
+SELECT current_setting('json_geometry_format'), to_json('POINT(1 2)'::GEOMETRY)
+----
+wkt	"POINT (1 2)"
+
+statement ok con1
+RESET json_geometry_format
+
+query II con1
+SELECT current_setting('json_geometry_format'), to_json('POINT(1 2)'::GEOMETRY)
+----
+GeoJSON	{"type":"Point","coordinates":[1.0,2.0]}
+
+query I con2
+SELECT current_setting('json_geometry_format')
+----
+GeoJSON
+
+statement ok con1
+RESET GLOBAL json_geometry_format
+
+query I con2
+SELECT current_setting('json_geometry_format')
+----
+wkt

@@ -280,12 +280,12 @@ public:
 
 	//! Equivalent to CURRENT_SETTING(key) SQL function.
 	DUCKDB_API SettingLookupResult TryGetCurrentSetting(const Identifier &key, Value &result) const;
-	//! Typed variant, leaves result untouched if not found
+	//! Typed variant, leaves result untouched if not found or NULL
 	template <class TYPE>
 	SettingLookupResult TryGetCurrentSetting(const Identifier &key, TYPE &result) const {
 		Value output;
 		auto lookup_result = TryGetCurrentSetting(key, output);
-		if (lookup_result) {
+		if (lookup_result && !output.IsNull()) {
 			result = output.GetValue<TYPE>();
 		}
 		return lookup_result;

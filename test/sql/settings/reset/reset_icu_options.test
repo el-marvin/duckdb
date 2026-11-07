@@ -1,0 +1,157 @@
+# name: test/sql/settings/reset/reset_icu_options.test
+# description: RESET of TimeZone or Calendar on a connection with its own value returns to the SET GLOBAL value
+# group: [reset]
+
+require icu
+
+require skip_reload
+
+# the default time zone is the host's, so capture it before any SET GLOBAL
+statement ok con1
+CREATE TABLE host_tz AS SELECT current_setting('TimeZone') AS tz
+
+statement ok con1
+SET SESSION TimeZone = 'Europe/Amsterdam'
+
+statement ok con1
+SET GLOBAL TimeZone = 'Asia/Tokyo'
+
+query III con1
+SELECT current_setting('TimeZone'), '2024-01-01 00:00:00+00'::TIMESTAMPTZ::VARCHAR, date_part('hour', '2024-01-01 00:00:00+00'::TIMESTAMPTZ)
+----
+Europe/Amsterdam	2024-01-01 01:00:00+01	1
+
+statement ok con1
+RESET TimeZone
+
+query III con1
+SELECT current_setting('TimeZone'), '2024-01-01 00:00:00+00'::TIMESTAMPTZ::VARCHAR, date_part('hour', '2024-01-01 00:00:00+00'::TIMESTAMPTZ)
+----
+Asia/Tokyo	2024-01-01 09:00:00+09	9
+
+query III con1
+SELECT name, value, scope FROM duckdb_settings() WHERE name = 'TimeZone'
+----
+TimeZone	Asia/Tokyo	GLOBAL
+
+query I con2
+SELECT '2024-01-01 00:00:00+00'::TIMESTAMPTZ::VARCHAR
+----
+2024-01-01 09:00:00+09
+
+statement ok con1
+SET SESSION TimeZone = 'Europe/Amsterdam'
+
+statement ok con1
+RESET SESSION TimeZone
+
+query I con1
+SELECT current_setting('TimeZone')
+----
+Asia/Tokyo
+
+# SET ... TO DEFAULT is a RESET
+statement ok con1
+SET SESSION TimeZone = 'Europe/Amsterdam'
+
+statement ok con1
+SET TimeZone TO DEFAULT
+
+query I con1
+SELECT current_setting('TimeZone')
+----
+Asia/Tokyo
+
+statement ok con1
+SET SESSION TimeZone = 'Europe/Amsterdam'
+
+statement ok con1
+SET SESSION TIME ZONE DEFAULT
+
+query I con1
+SELECT current_setting('TimeZone')
+----
+Asia/Tokyo
+
+# a RESET without a value of the connection's own leaves the global value in place
+statement ok con2
+RESET TimeZone
+
+query I con2
+SELECT current_setting('TimeZone')
+----
+Asia/Tokyo
+
+statement error con1
+RESET LOCAL TimeZone
+----
+RESET LOCAL is not implemented
+
+# RESET GLOBAL returns to the host default and leaves a connection with its own value alone
+statement ok con2
+SET SESSION TimeZone = 'Pacific/Chatham'
+
+statement ok con1
+SET GLOBAL TimeZone = 'Asia/Kathmandu'
+
+statement ok con1
+RESET GLOBAL TimeZone
+
+query I con1
+SELECT current_setting('TimeZone') = (SELECT tz FROM host_tz)
+----
+true
+
+query I con2
+SELECT '2024-01-01 00:00:00+00'::TIMESTAMPTZ::VARCHAR
+----
+2024-01-01 13:45:00+13:45
+
+query III con2
+SELECT name, value, scope FROM duckdb_settings() WHERE name = 'TimeZone'
+----
+TimeZone	Pacific/Chatham	LOCAL
+
+statement ok con2
+RESET TimeZone
+
+query I con2
+SELECT current_setting('TimeZone') = (SELECT tz FROM host_tz)
+----
+true
+
+# a fixed zone keeps the calendar years below independent of the host
+statement ok con1
+SET SESSION TimeZone = 'UTC'
+
+statement ok con1
+SET SESSION Calendar = 'japanese'
+
+statement ok con1
+SET GLOBAL Calendar = 'Hebrew'
+
+query II con1
+SELECT current_setting('Calendar'), date_part('year', '2024-01-01 00:00:00+00'::TIMESTAMPTZ)
+----
+japanese	6
+
+statement ok con1
+RESET Calendar
+
+query II con1
+SELECT current_setting('Calendar'), date_part('year', '2024-01-01 00:00:00+00'::TIMESTAMPTZ)
+----
+hebrew	5784
+
+query III con1
+SELECT name, value, scope FROM duckdb_settings() WHERE name = 'Calendar'
+----
+Calendar	hebrew	GLOBAL
+
+statement ok con1
+RESET GLOBAL Calendar
+
+query II con1
+SELECT current_setting('Calendar'), date_part('year', '2024-01-01 00:00:00+00'::TIMESTAMPTZ)
+----
+gregorian	2024

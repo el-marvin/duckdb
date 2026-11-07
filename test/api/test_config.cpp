@@ -3,6 +3,7 @@
 #include "duckdb/main/http/http_util.hpp"
 #include "duckdb/execution/operator/helper/physical_set.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/main/secret/secret.hpp"
 
 #include <set>
 #include <map>
@@ -309,6 +310,48 @@ TEST_CASE("Test deprecated extension options warn when set", "[api]") {
 	REQUIRE(CHECK_COLUMN(result, 0, {0}));
 	result = con.Query("SELECT count(*) FROM duckdb_settings(deprecated := true) WHERE name = 'my_deprecated_option'");
 	REQUIRE(CHECK_COLUMN(result, 0, {1}));
+}
+
+TEST_CASE("Test typed readers of an extension option with a NULL value", "[api]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto &config = DBConfig::GetConfig(*db.instance);
+	config.AddExtensionOption("my_null_default_text", "A text option without a default", LogicalType::VARCHAR);
+	config.AddExtensionOption("my_null_default_number", "A number option without a default", LogicalType::BIGINT);
+
+	auto check_unset = [&]() {
+		string text = "untouched";
+		REQUIRE(bool(con.context->TryGetCurrentSetting("my_null_default_text", text)));
+		REQUIRE(text == "untouched");
+		int64_t number = 7;
+		REQUIRE(bool(con.context->TryGetCurrentSetting("my_null_default_number", number)));
+		REQUIRE(number == 7);
+		KeyValueSecretReader reader(*con.context, "s3", "");
+		REQUIRE(reader.GetSecretKeyOrSettingOrDefault<string>("text", "my_null_default_text", "fallback") ==
+		        "fallback");
+		REQUIRE(reader.GetSecretKeyOrSettingOrDefault<int64_t>("number", "my_null_default_number", 42) == 42);
+	};
+	con.BeginTransaction();
+	check_unset();
+	con.Commit();
+
+	REQUIRE_NO_FAIL(con.Query("SET GLOBAL my_null_default_text = 'global_value'"));
+	REQUIRE_NO_FAIL(con.Query("SET GLOBAL my_null_default_number = 3"));
+	con.BeginTransaction();
+	string text;
+	REQUIRE(bool(con.context->TryGetCurrentSetting("my_null_default_text", text)));
+	REQUIRE(text == "global_value");
+	KeyValueSecretReader reader(*con.context, "s3", "");
+	REQUIRE(reader.GetSecretKeyOrSettingOrDefault<int64_t>("number", "my_null_default_number", 42) == 3);
+	con.Commit();
+
+	REQUIRE_NO_FAIL(con.Query("RESET GLOBAL my_null_default_text"));
+	REQUIRE_NO_FAIL(con.Query("SET SESSION my_null_default_number = 5"));
+	REQUIRE_NO_FAIL(con.Query("RESET GLOBAL my_null_default_number"));
+	REQUIRE_NO_FAIL(con.Query("RESET my_null_default_number"));
+	con.BeginTransaction();
+	check_unset();
+	con.Commit();
 }
 
 TEST_CASE("Test every deprecated setting warns when set", "[api]") {

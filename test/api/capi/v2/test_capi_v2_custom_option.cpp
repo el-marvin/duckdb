@@ -165,8 +165,12 @@ TEST_CASE("V2 custom option: registered options are read and written like any ot
 	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
 	duckdb_v2_connection_destroy(&other);
 
-	// A reset at the default scope, SESSION, writes the default value into the session.
+	// A reset at the default scope, SESSION, drops the session value, so the global value shows again.
 	REQUIRE(RunSql(fx.conn, "RESET my_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(ReadOption(fx.config, "my_budget", &scope) == 9);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+	// A global reset restores the default value.
+	REQUIRE(RunSql(fx.conn, "RESET GLOBAL my_budget") == DUCKDB_V2_ERROR_NONE);
 	REQUIRE(ReadOption(fx.config, "my_budget") == 5);
 
 	// The descriptor reports what was registered.
@@ -256,10 +260,13 @@ TEST_CASE("V2 custom option: the update callback validates and normalizes", "[ca
 	        DUCKDB_V2_ERROR_INPUT_INVALID);
 	duckdb_v2_value_destroy(&negative);
 
-	// A reset passes the default value.
+	// A reset passes the default value, and a session reset then reads the global value.
 	REQUIRE(RunSql(fx.conn, "RESET cpu_budget") == DUCKDB_V2_ERROR_NONE);
 	REQUIRE(log->last_reset);
 	REQUIRE(log->last_value == 10);
+	DUCKDB_V2_SETTING_SCOPE scope = DUCKDB_V2_SETTING_SCOPE_DEFAULT;
+	REQUIRE(ReadOption(fx.config, "cpu_budget", &scope) == 100);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
 }
 
 TEST_CASE("V2 custom option: registration validates the option", "[capi_v2][custom_option]") {

@@ -61,6 +61,26 @@ TEST_CASE("Test Custom Configuration Options in C API", "[capi]") {
 	REQUIRE(result->Fetch<string>(2, 0) == "VARCHAR");
 	REQUIRE(result->Fetch<string>(3, 0) == "LOCAL");
 
+	// A session reset drops the session value, so the global value shows again
+	REQUIRE_NO_FAIL(tester.Query("SET GLOBAL test_string_option = 'global_value'"));
+	REQUIRE_NO_FAIL(tester.Query("RESET test_string_option"));
+	result = tester.Query("SELECT current_setting('test_string_option')");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->Fetch<string>(0, 0) == "global_value");
+	retrieved_str = duckdb_client_context_get_config_option(context, "test_string_option", &scope);
+	REQUIRE(retrieved_str != nullptr);
+	auto global_str = duckdb_get_varchar(retrieved_str);
+	REQUIRE(string(global_str) == "global_value");
+	duckdb_free(global_str);
+	duckdb_destroy_value(&retrieved_str);
+	REQUIRE(scope == DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL);
+
+	// A global reset restores the default value
+	REQUIRE_NO_FAIL(tester.Query("RESET GLOBAL test_string_option"));
+	result = tester.Query("SELECT current_setting('test_string_option')");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->Fetch<string>(0, 0) == "default_string");
+
 	// Test 2: Create an integer config option, with the type inferred from the default value
 	auto int_opt = duckdb_create_config_option();
 	REQUIRE(int_opt != nullptr);
@@ -98,6 +118,45 @@ TEST_CASE("Test Custom Configuration Options in C API", "[capi]") {
 
 	duckdb_destroy_config_option(&int_opt);
 	duckdb_destroy_config_option(&int_opt);
+
+	// Test 3: an option without a default value reads as a NULL of its type until it is set
+	auto null_opt = duckdb_create_config_option();
+	REQUIRE(null_opt != nullptr);
+	duckdb_config_option_set_name(null_opt, "test_null_default_option");
+	duckdb_config_option_set_type(null_opt, str_type);
+	REQUIRE(duckdb_register_config_option(tester.connection, null_opt) == DuckDBSuccess);
+	duckdb_destroy_config_option(&null_opt);
+
+	// expected_value empty means NULL
+	auto check_null_default = [&](const string &expected_value, duckdb_config_option_scope expected_scope) {
+		auto expect_null = expected_value.empty();
+		result = tester.Query("SELECT current_setting('test_null_default_option') IS NULL, "
+		                      "typeof(current_setting('test_null_default_option')), "
+		                      "coalesce(current_setting('test_null_default_option'), '')");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<bool>(0, 0) == expect_null);
+		REQUIRE(result->Fetch<string>(1, 0) == "VARCHAR");
+		REQUIRE(result->Fetch<string>(2, 0) == expected_value);
+		auto value = duckdb_client_context_get_config_option(context, "test_null_default_option", &scope);
+		REQUIRE(value != nullptr);
+		REQUIRE(duckdb_is_null_value(value) == expect_null);
+		if (!expect_null) {
+			auto text = duckdb_get_varchar(value);
+			REQUIRE(string(text) == expected_value);
+			duckdb_free(text);
+		}
+		duckdb_destroy_value(&value);
+		REQUIRE(scope == expected_scope);
+	};
+	check_null_default("", DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL);
+	REQUIRE_NO_FAIL(tester.Query("SET test_null_default_option = 'session_value'"));
+	check_null_default("session_value", DUCKDB_CONFIG_OPTION_SCOPE_SESSION);
+	REQUIRE_NO_FAIL(tester.Query("RESET test_null_default_option"));
+	check_null_default("", DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL);
+	REQUIRE_NO_FAIL(tester.Query("SET GLOBAL test_null_default_option = 'global_value'"));
+	check_null_default("global_value", DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL);
+	REQUIRE_NO_FAIL(tester.Query("RESET GLOBAL test_null_default_option"));
+	check_null_default("", DUCKDB_CONFIG_OPTION_SCOPE_GLOBAL);
 
 	// Cleanup
 	duckdb_destroy_client_context(&context);

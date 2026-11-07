@@ -305,7 +305,7 @@ public:
 	SettingLookupResult TryGetSecretKey(const Identifier &secret_key, TYPE &value_out) {
 		Value result;
 		auto lookup_result = TryGetSecretKey(secret_key, result);
-		if (lookup_result) {
+		if (lookup_result && !result.IsNull()) {
 			value_out = result.GetValue<TYPE>();
 		}
 		return lookup_result;
@@ -329,11 +329,9 @@ public:
 	template <class TYPE>
 	TYPE GetSecretKeyOrSettingOrDefault(const Identifier &secret_key, const Identifier &setting_name,
 	                                    TYPE default_value) {
-		TYPE result;
-		if (TryGetSecretKeyOrSetting(secret_key, setting_name, result)) {
-			return result;
-		}
-		return default_value;
+		TYPE result = default_value;
+		TryGetSecretKeyOrSetting(secret_key, setting_name, result);
+		return result;
 	}
 
 protected:

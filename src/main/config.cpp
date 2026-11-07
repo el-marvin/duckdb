@@ -476,15 +476,7 @@ void DBConfig::SetOption(const Identifier &name, Value value) {
 }
 
 void DBConfig::ResetOption(const ExtensionOption &extension_option) {
-	auto &default_value = extension_option.default_value;
-	auto setting_index = extension_option.setting_index.GetIndex();
-	if (!default_value.IsNull()) {
-		// Default is not NULL, override the setting
-		user_settings.SetUserSetting(setting_index, default_value);
-	} else {
-		// Otherwise just remove it from the 'set_variables' map
-		user_settings.ClearSetting(setting_index);
-	}
+	user_settings.SetUserSetting(extension_option.setting_index.GetIndex(), extension_option.default_value);
 }
 
 void DBConfig::ResetGenericOption(idx_t setting_index) {
@@ -620,6 +612,9 @@ void DBConfig::AddExtensionOption(const Identifier &name, string description, Lo
 }
 
 void DBConfig::AddExtensionOption(const Identifier &name, ExtensionOption extension_option) {
+	if (extension_option.default_value.IsNull()) {
+		extension_option.default_value = Value(extension_option.type);
+	}
 	auto default_value = extension_option.default_value;
 	auto setting_index = user_settings.AddExtensionOption(name, std::move(extension_option));
 	// copy over unrecognized options, if they match the new extension option
@@ -628,8 +623,8 @@ void DBConfig::AddExtensionOption(const Identifier &name, ExtensionOption extens
 		user_settings.SetUserSetting(setting_index, iter->second);
 		options.unrecognized_options.erase(iter);
 	}
-	if (!default_value.IsNull() && !user_settings.IsSet(setting_index)) {
-		// Default value is set, insert it into the 'set_variables' list
+	// Every registered option holds a global value, also a NULL default, so a lookup never finds it unset.
+	if (!user_settings.IsSet(setting_index)) {
 		user_settings.SetUserSetting(setting_index, default_value);
 	}
 }
