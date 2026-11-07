@@ -339,11 +339,10 @@ static void ArrowToDuckDBArray(Vector &vector, ArrowArray &array, idx_t chunk_of
 		if (!array_mask.CanHaveNull()) {
 			return;
 		}
-		auto &child_validity_mask = FlatVector::ValidityMutable(child_vector);
 		for (idx_t i = 0; i < size; i++) {
 			if (!array_mask.RowIsValid(i)) {
 				for (idx_t j = 0; j < array_size; j++) {
-					child_validity_mask.SetInvalid(i * array_size + j);
+					FlatVector::SetNull(child_vector, i * array_size + j, true);
 				}
 			}
 		}
@@ -628,138 +627,39 @@ static idx_t FindRunIndex(const VectorIterator<RUN_END_TYPE> &run_ends, idx_t co
 	return begin;
 }
 
-template <class RUN_END_TYPE, class VALUE_TYPE>
-static void FlattenRunEnds(Vector &result, ArrowRunEndEncodingState &run_end_encoding, idx_t compressed_size,
-                           idx_t scan_offset, idx_t count) {
-	auto &runs = *run_end_encoding.run_ends;
-	auto &values = *run_end_encoding.values;
-
-	auto run_ends_data = runs.Values<RUN_END_TYPE>();
-	auto values_data = values.Values<VALUE_TYPE>();
-	auto result_data = FlatVector::ScatterWriter<VALUE_TYPE>(result);
-	auto &validity = FlatVector::ValidityMutable(result);
-
-	// According to the arrow spec, the 'run_ends' array is always valid
-	// so we will assume this is true and not check the validity map
-
-	// Now construct the result vector from the run_ends and the values
-
-	auto run = FindRunIndex(run_ends_data, compressed_size, scan_offset);
-	idx_t logical_index = scan_offset;
-	idx_t index = 0;
-	if (!values_data.CanHaveNull()) {
-		// None of the compressed values are NULL
-		for (; run < compressed_size; ++run) {
-			auto run_end_entry = run_ends_data[run];
-			auto value_entry = values_data[run];
-			auto &value = value_entry.GetValue();
-			auto run_end = static_cast<idx_t>(run_end_entry.GetValueUnsafe());
-
-			D_ASSERT(run_end > (logical_index + index));
-			auto to_scan = run_end - (logical_index + index);
-			// Cap the amount to scan so we don't go over size
-			to_scan = MinValue<idx_t>(to_scan, (count - index));
-
-			for (idx_t i = 0; i < to_scan; i++) {
-				result_data[index + i] = value;
-			}
-			index += to_scan;
-			if (index >= count) {
-				if (logical_index + index >= run_end) {
-					// The last run was completed, forward the run index
-					++run;
-				}
-				break;
-			}
-		}
-	} else {
-		for (; run < compressed_size; ++run) {
-			auto run_end_entry = run_ends_data[run];
-			auto value_entry = values_data[run];
-			auto run_end = static_cast<idx_t>(run_end_entry.GetValueUnsafe());
-
-			D_ASSERT(run_end > (logical_index + index));
-			auto to_scan = run_end - (logical_index + index);
-			// Cap the amount to scan so we don't go over size
-			to_scan = MinValue<idx_t>(to_scan, (count - index));
-
-			if (value_entry.IsValid()) {
-				auto &value = value_entry.GetValue();
-				for (idx_t i = 0; i < to_scan; i++) {
-					result_data[index + i] = value;
-					validity.SetValid(index + i);
-				}
-			} else {
-				for (idx_t i = 0; i < to_scan; i++) {
-					validity.SetInvalid(index + i);
-				}
-			}
-			index += to_scan;
-			if (index >= count) {
-				if (logical_index + index >= run_end) {
-					// The last run was completed, forward the run index
-					++run;
-				}
-				break;
-			}
-		}
-	}
-}
-
 template <class RUN_END_TYPE>
-static void FlattenRunEndsSwitch(Vector &result, ArrowRunEndEncodingState &run_end_encoding, idx_t compressed_size,
-                                 idx_t scan_offset, idx_t size) {
-	auto &values = *run_end_encoding.values;
-	auto physical_type = values.GetType().InternalType();
+static void FlattenRunEnds(Vector &result, ArrowArrayScanState &array_state, idx_t compressed_size, idx_t scan_offset,
+                           idx_t count, const ValidityMask *parent_mask) {
+	auto &run_end_encoding = array_state.RunEndEncoding();
+	auto run_ends_data = run_end_encoding.run_ends->Values<RUN_END_TYPE>();
 
-	switch (physical_type) {
-	case PhysicalType::INT8:
-		FlattenRunEnds<RUN_END_TYPE, int8_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::INT16:
-		FlattenRunEnds<RUN_END_TYPE, int16_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::INT32:
-		FlattenRunEnds<RUN_END_TYPE, int32_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::INT64:
-		FlattenRunEnds<RUN_END_TYPE, int64_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::INT128:
-		FlattenRunEnds<RUN_END_TYPE, hugeint_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::UINT8:
-		FlattenRunEnds<RUN_END_TYPE, uint8_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::UINT16:
-		FlattenRunEnds<RUN_END_TYPE, uint16_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::UINT32:
-		FlattenRunEnds<RUN_END_TYPE, uint32_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::UINT64:
-		FlattenRunEnds<RUN_END_TYPE, uint64_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::BOOL:
-		FlattenRunEnds<RUN_END_TYPE, bool>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::FLOAT:
-		FlattenRunEnds<RUN_END_TYPE, float>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::DOUBLE:
-		FlattenRunEnds<RUN_END_TYPE, double>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::INTERVAL:
-		FlattenRunEnds<RUN_END_TYPE, interval_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
-	case PhysicalType::VARCHAR: {
-		// Share the string heap, we don't need to allocate new strings, we just reference the existing ones
-		StringVector::AddHeapReference(result, values);
-		FlattenRunEnds<RUN_END_TYPE, string_t>(result, run_end_encoding, compressed_size, scan_offset, size);
-		break;
+	// the run ends array is always valid according to the Arrow spec
+	SelectionVector sel(count);
+	idx_t row = 0;
+	for (auto run = FindRunIndex(run_ends_data, compressed_size, scan_offset); run < compressed_size && row < count;
+	     run++) {
+		auto run_end = static_cast<idx_t>(run_ends_data[run].GetValueUnsafe());
+		D_ASSERT(run_end > scan_offset + row);
+		auto run_rows = MinValue<idx_t>(run_end - (scan_offset + row), count - row);
+		for (idx_t i = 0; i < run_rows; i++) {
+			sel.set_index(row + i, run);
+		}
+		row += run_rows;
 	}
-	default:
-		throw NotImplementedException("RunEndEncoded value type '%s' not supported yet", TypeIdToString(physical_type));
+	if (row < count) {
+		// a parent whose offsets reach past the run end encoded child would leave rows without a run
+		throw InvalidInputException("Arrow run-end encoded array is read past the end of its runs");
+	}
+	result.Reference(*run_end_encoding.values);
+	result.Flatten(sel, count);
+	result.BufferMutable().AddAuxiliaryData(make_uniq<ArrowAuxiliaryData>(array_state.owned_data));
+	// the rows take the validity of their values, so the NULL rows of a parent go in again, into nested fields too
+	if (parent_mask && parent_mask->CanHaveNull()) {
+		for (idx_t i = 0; i < count; i++) {
+			if (!parent_mask->RowIsValid(i)) {
+				FlatVector::SetNull(result, i, true);
+			}
+		}
 	}
 }
 
@@ -778,10 +678,6 @@ void ArrowToDuckDBConversion::ColumnArrowToDuckDBRunEndEncoded(Vector &vector, c
 	auto &values_type = struct_info.GetChild(1);
 	D_ASSERT(vector.GetType() == values_type.GetDuckType(true));
 
-	if (vector.GetBufferRef()) {
-		vector.BufferMutable().AddAuxiliaryData(make_uniq<ArrowAuxiliaryData>(array_state.owned_data));
-	}
-
 	D_ASSERT(run_ends_array.length == values_array.length);
 	auto compressed_size = NumericCast<idx_t>(run_ends_array.length);
 	// Create a vector for the run ends and the values
@@ -795,6 +691,12 @@ void ArrowToDuckDBConversion::ColumnArrowToDuckDBRunEndEncoded(Vector &vector, c
 		// the run ends and values are scanned in full - the offsets of the scan apply to the logical (decoded) rows
 		ArrowToDuckDBConversion::ColumnArrowToDuckDB(*run_end_encoding.run_ends, run_ends_array, 0,
 		                                             array_state.GetChild(0), compressed_size, run_ends_type);
+		auto covered_end =
+		    compressed_size == 0 ? 0 : run_end_encoding.run_ends->GetValue(compressed_size - 1).GetValue<int64_t>();
+		if (covered_end < array.offset + array.length) {
+			throw InvalidInputException("Arrow run-end encoded array covers %d rows but has length %d",
+			                            MaxValue<int64_t>(covered_end - array.offset, 0), array.length);
+		}
 		auto &values = *run_end_encoding.values;
 		auto &values_state = array_state.GetChild(1);
 		ArrowToDuckDBConversion::SetValidityMask(values, values_array, 0, compressed_size, 0, -1);
@@ -811,19 +713,22 @@ void ArrowToDuckDBConversion::ColumnArrowToDuckDBRunEndEncoded(Vector &vector, c
 		default:
 			throw NotImplementedException("ArrowArrayPhysicalType not recognized");
 		}
+		// a nested part that is not flat (the elements of a list can be a dictionary) would otherwise be flattened in
+		// full again by every scan of the runs
+		values.Flatten();
 	}
 
 	idx_t scan_offset = GetEffectiveOffset(array, NumericCast<int64_t>(parent_offset), chunk_offset, nested_offset);
 	auto physical_type = run_ends_type.GetDuckType().InternalType();
 	switch (physical_type) {
 	case PhysicalType::INT16:
-		FlattenRunEndsSwitch<int16_t>(vector, run_end_encoding, compressed_size, scan_offset, size);
+		FlattenRunEnds<int16_t>(vector, array_state, compressed_size, scan_offset, size, parent_mask);
 		break;
 	case PhysicalType::INT32:
-		FlattenRunEndsSwitch<int32_t>(vector, run_end_encoding, compressed_size, scan_offset, size);
+		FlattenRunEnds<int32_t>(vector, array_state, compressed_size, scan_offset, size, parent_mask);
 		break;
 	case PhysicalType::INT64:
-		FlattenRunEndsSwitch<int64_t>(vector, run_end_encoding, compressed_size, scan_offset, size);
+		FlattenRunEnds<int64_t>(vector, array_state, compressed_size, scan_offset, size, parent_mask);
 		break;
 	default:
 		throw NotImplementedException("Type '%s' not implemented for RunEndEncoding", TypeIdToString(physical_type));

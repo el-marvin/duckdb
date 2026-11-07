@@ -1218,3 +1218,321 @@ TEST_CASE("Arrow scan of run-end encoded dictionary values under a filter", "[ar
 	REQUIRE(
 	    StreamReadsRows(stream.stream, "SELECT * FROM (VALUES ('y'), ('y')) t(d)", /*verify_vectors=*/true, "d = 'y'"));
 }
+
+namespace {
+
+// INTEGER elements {1, NULL, 3, 4, 5, 6, 7, 8}.
+const int32_t ELEMENT_VALUES[] = {1, 0, 3, 4, 5, 6, 7, 8};
+const uint8_t ELEMENT_VALIDITY[] = {0xFD};
+
+// INTEGER[2] values [1, NULL], [3, 4], NULL, [7, 8].
+ArrowNodes::Node &FixedSizeListValues(ArrowNodes &nodes) {
+	auto &elements = nodes.Add("i", "item", 8, {ELEMENT_VALIDITY, ELEMENT_VALUES}, {}, 1);
+	static const uint8_t validity[] = {0x0B};
+	return nodes.Add("+w:2", "values", 4, {validity}, {elements}, 1);
+}
+
+// INTEGER[] values [1, NULL], [], NULL, [3, 4, 5], with offsets that do not start at 0.
+ArrowNodes::Node &ListValues(ArrowNodes &nodes) {
+	static const int32_t elements_data[] = {9, 1, 0, 3, 4, 5};
+	static const uint8_t elements_validity[] = {0x3B};
+	auto &elements = nodes.Add("i", "item", 6, {elements_validity, elements_data}, {}, 1);
+	static const int32_t offsets[] = {1, 3, 3, 3, 6};
+	static const uint8_t validity[] = {0x0B};
+	return nodes.Add("+l", "values", 4, {validity, offsets}, {elements}, 1);
+}
+
+const char *const LIST_ROWS[] = {"[1, NULL]", "[]", "NULL", "[3, 4, 5]"};
+
+// STRUCT(i INTEGER, s VARCHAR) values {1, 'a long string past the inline limit'}, {NULL, NULL}, NULL.
+ArrowNodes::Node &StructWithNullsValues(ArrowNodes &nodes) {
+	static const int32_t i_data[] = {1, 0, 7};
+	static const uint8_t field_validity[] = {0x05};
+	auto &i = nodes.Add("i", "i", 3, {field_validity, i_data}, {}, 1);
+	static const int32_t s_offsets[] = {0, 35, 35, 36};
+	auto &s = nodes.Add("u", "s", 3, {field_validity, s_offsets, "a long string past the inline limitz"}, {}, 1);
+	static const uint8_t validity[] = {0x03};
+	return nodes.Add("+s", "values", 3, {validity}, {i, s}, 1);
+}
+
+const char *const STRUCT_WITH_NULLS_ROWS[] = {"{'i': 1, 's': 'a long string past the inline limit'}",
+                                              "{'i': NULL, 's': NULL}", "NULL"};
+
+// Unlike ScanBindError, the stream is bound and handed to the scan, which releases it.
+string ScanError(ArrowSchema &col_schema, ArrowArray &col_array) {
+	DuckDB db(nullptr);
+	Connection con(db);
+	ColumnStream stream(col_schema, col_array);
+	auto result =
+	    con.TableFunction("arrow_scan", {}, {}, ArrowTestHelper::ConstructArrowScan(stream.stream))->Execute();
+	REQUIRE(result->HasError());
+	return result->GetError();
+}
+
+string RowsQuery(const vector<string> &rows, const string &type) {
+	string values;
+	for (auto &row : rows) {
+		values += (values.empty() ? "((" : ", ((") + row + ")::" + type + ")";
+	}
+	return "SELECT * FROM (VALUES " + values + ") t(d)";
+}
+
+// The rows of values repeated up to each run end, in order, as a query over range.
+string RunRowsQuery(const vector<int64_t> &run_ends, const char *const *rows, const string &type) {
+	string cases;
+	for (idx_t run = 0; run < run_ends.size(); run++) {
+		cases += " WHEN r < " + to_string(run_ends[run]) + " THEN " + rows[run] + "::" + type;
+	}
+	return "SELECT CASE" + cases + " END AS d FROM range(" + to_string(run_ends.back()) + ") t(r) ORDER BY r";
+}
+
+} // namespace
+
+TEST_CASE("Arrow scan of run-end encoded fixed-size ARRAY values", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t run_ends[] = {2, 3, 5, 6};
+	auto &column = RunEnds(nodes, "d", 6, run_ends, FixedSizeListValues(nodes));
+	REQUIRE(ScanReadsRows(column.schema, column.array,
+	                      RowsQuery({"[1, NULL]", "[1, NULL]", "[3, 4]", "NULL", "NULL", "[7, 8]"}, "INTEGER[2]"),
+	                      /*verify_vectors=*/true));
+}
+
+TEST_CASE("Arrow scan of run-end encoded LIST values", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t run_ends[] = {1, 3, 4, 6};
+	SECTION("from the first row") {
+		auto &column = RunEnds(nodes, "d", 6, run_ends, ListValues(nodes));
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RowsQuery({"[1, NULL]", "[]", "[]", "NULL", "[3, 4, 5]", "[3, 4, 5]"}, "INTEGER[]"),
+		                      /*verify_vectors=*/true));
+	}
+	SECTION("from an offset") {
+		auto &column = RunEnds(nodes, "d", 4, run_ends, ListValues(nodes), /*offset=*/2);
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RowsQuery({"[]", "NULL", "[3, 4, 5]", "[3, 4, 5]"}, "INTEGER[]"),
+		                      /*verify_vectors=*/true));
+	}
+}
+
+TEST_CASE("Arrow scan of run-end encoded STRUCT values with NULL rows and NULL fields", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t run_ends[] = {2, 3, 5};
+	auto &column = RunEnds(nodes, "d", 5, run_ends, StructWithNullsValues(nodes));
+	auto &first = STRUCT_WITH_NULLS_ROWS[0];
+	REQUIRE(ScanReadsRows(
+	    column.schema, column.array,
+	    RowsQuery({first, first, STRUCT_WITH_NULLS_ROWS[1], "NULL", "NULL"}, "STRUCT(i INTEGER, s VARCHAR)"),
+	    /*verify_vectors=*/true));
+}
+
+TEST_CASE("Arrow scan of run-end encoded MAP values", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t key_offsets[] = {0, 1, 2, 3};
+	auto &keys = nodes.Add("u", "key", 3, {nullptr, key_offsets, "klm"});
+	keys.schema.flags = 0;
+	const int32_t map_data[] = {1, 0, 3};
+	const uint8_t map_validity[] = {0x05};
+	auto &map_values = nodes.Add("i", "value", 3, {map_validity, map_data}, {}, 1);
+	auto &entries = nodes.Add("+s", "entries", 3, {nullptr}, {keys, map_values});
+	entries.schema.flags = 0;
+	const int32_t offsets[] = {0, 1, 1, 3};
+	const uint8_t validity[] = {0x05};
+	auto &values = nodes.Add("+m", "values", 3, {validity, offsets}, {entries}, 1);
+	const int32_t run_ends[] = {1, 2, 4};
+	auto &column = RunEnds(nodes, "d", 4, run_ends, values);
+	REQUIRE(ScanReadsRows(column.schema, column.array,
+	                      RowsQuery({"MAP {'k': 1}", "NULL", "MAP {'l': NULL, 'm': 3}", "MAP {'l': NULL, 'm': 3}"},
+	                                "MAP(VARCHAR, INTEGER)"),
+	                      /*verify_vectors=*/true));
+}
+
+TEST_CASE("Arrow scan of run-end encoded sparse UNION values", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t n_data[] = {0, 2, 0};
+	auto &n = nodes.Add("i", "n", 3, {nullptr, n_data});
+	const int32_t s_offsets[] = {0, 0, 0, 1};
+	const uint8_t s_validity[] = {0x04};
+	auto &s = nodes.Add("u", "s", 3, {s_validity, s_offsets, "r"}, {}, 2);
+	const int8_t type_ids[] = {1, 0, 1};
+	auto &values = nodes.Add("+us:0,1", "values", 3, {type_ids}, {n, s});
+	const int32_t run_ends[] = {2, 3, 5};
+	auto &column = RunEnds(nodes, "d", 5, run_ends, values);
+	REQUIRE(ScanReadsRows(
+	    column.schema, column.array,
+	    RowsQuery({"NULL", "NULL", "union_value(n := 2)", "union_value(s := 'r')", "union_value(s := 'r')"},
+	              "UNION(n INTEGER, s VARCHAR)"),
+	    /*verify_vectors=*/true));
+}
+
+TEST_CASE("Arrow scan of run-end encoded values with run-end encoded parts", "[arrow]") {
+	ArrowNodes nodes;
+	SECTION("a LIST of run-end encoded elements") {
+		const int32_t element_data[] = {1, 0, 2};
+		const uint8_t element_validity[] = {0x05};
+		const int32_t element_run_ends[] = {1, 3, 5};
+		auto &elements = RunEnds(nodes, "item", 5, element_run_ends,
+		                         nodes.Add("i", "values", 3, {element_validity, element_data}, {}, 1));
+		const int32_t offsets[] = {0, 2, 5};
+		auto &lists = nodes.Add("+l", "values", 2, {nullptr, offsets}, {elements});
+		const int32_t run_ends[] = {2, 4};
+		auto &column = RunEnds(nodes, "d", 4, run_ends, lists);
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RowsQuery({"[1, NULL]", "[1, NULL]", "[NULL, 2, 2]", "[NULL, 2, 2]"}, "INTEGER[]"),
+		                      /*verify_vectors=*/true));
+	}
+	SECTION("run-end encoded LIST values from an offset") {
+		// the inner array decodes to [1, NULL], [], [], NULL, [3, 4, 5] and is read from row 1
+		const int32_t inner_run_ends[] = {1, 3, 4, 5};
+		auto &inner = RunEnds(nodes, "values", 4, inner_run_ends, ListValues(nodes), /*offset=*/1);
+		const int32_t run_ends[] = {1, 2, 4, 5};
+		auto &column = RunEnds(nodes, "d", 5, run_ends, inner);
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RowsQuery({"[]", "[]", "NULL", "NULL", "[3, 4, 5]"}, "INTEGER[]"),
+		                      /*verify_vectors=*/true));
+	}
+	SECTION("a fixed-size ARRAY of run-end encoded STRUCT elements with a NULL array") {
+		auto &struct_values = StructValues(nodes);
+		struct_values.schema.name = "values";
+		const int32_t element_run_ends[] = {1, 2, 4};
+		auto &elements = RunEnds(nodes, "item", 4, element_run_ends, struct_values);
+		const uint8_t validity[] = {0x02};
+		auto &column = nodes.Add("+w:2", "d", 2, {validity}, {elements}, 1);
+		REQUIRE(ScanReadsRows(
+		    column.schema, column.array,
+		    RowsQuery({"NULL", "[{'i': 3, 's': 'c'}, {'i': 3, 's': 'c'}]"}, "STRUCT(i INTEGER, s VARCHAR)[2]"),
+		    /*verify_vectors=*/true));
+	}
+	SECTION("a fixed-size ARRAY of run-end encoded LIST elements with a NULL array") {
+		const int32_t element_run_ends[] = {1, 2, 3, 4};
+		auto &elements = RunEnds(nodes, "item", 4, element_run_ends, ListValues(nodes));
+		const uint8_t validity[] = {0x01};
+		auto &column = nodes.Add("+w:2", "d", 2, {validity}, {elements}, 1);
+		REQUIRE(ScanReadsRows(column.schema, column.array, RowsQuery({"[[1, NULL], []]", "NULL"}, "INTEGER[][2]"),
+		                      /*verify_vectors=*/true));
+	}
+}
+
+TEST_CASE("Arrow scan of a STRUCT with a NULL row over run-end encoded fields", "[arrow]") {
+	ArrowNodes nodes;
+	const uint8_t validity[] = {0x05};
+	SECTION("INTEGER values without NULLs") {
+		const int32_t values[] = {7, 8};
+		const int32_t run_ends[] = {2, 3};
+		auto &field = RunEnds(nodes, "r", 3, run_ends, nodes.Add("i", "values", 2, {nullptr, values}));
+		auto &column = nodes.Add("+s", "d", 3, {validity}, {field}, 1);
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RowsQuery({"{'r': 7}", "NULL", "{'r': 8}"}, "STRUCT(r INTEGER)"),
+		                      /*verify_vectors=*/true));
+	}
+	SECTION("STRUCT values") {
+		auto &struct_values = StructValues(nodes);
+		struct_values.schema.name = "values";
+		const int32_t run_ends[] = {1, 2, 3};
+		auto &field = RunEnds(nodes, "r", 3, run_ends, struct_values);
+		auto &column = nodes.Add("+s", "d", 3, {validity}, {field}, 1);
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RowsQuery({"{'r': {'i': 1, 's': 'a'}}", "NULL", "{'r': {'i': 3, 's': 'c'}}"},
+		                                "STRUCT(r STRUCT(i INTEGER, s VARCHAR))"),
+		                      /*verify_vectors=*/true));
+	}
+}
+
+TEST_CASE("Arrow scan of a dictionary over run-end encoded STRUCT values", "[arrow]") {
+	ArrowNodes nodes;
+	auto &struct_values = StructValues(nodes);
+	struct_values.schema.name = "values";
+	const int32_t run_ends[] = {1, 2, 4};
+	auto &values = RunEnds(nodes, nullptr, 4, run_ends, struct_values);
+	const int8_t indices[] = {3, 0, 0};
+	const uint8_t validity[] = {0x05};
+	auto &column = nodes.Dictionary("d", values, 3, validity, indices, 1);
+	REQUIRE(
+	    ScanReadsRows(column.schema, column.array,
+	                  RowsQuery({"{'i': 3, 's': 'c'}", "NULL", "{'i': 1, 's': 'a'}"}, "STRUCT(i INTEGER, s VARCHAR)"),
+	                  /*verify_vectors=*/true));
+}
+
+TEST_CASE("Arrow scan of run-end encoded LIST values with 16 and 64 bit run ends", "[arrow]") {
+	ArrowNodes nodes;
+	const int16_t short_run_ends[] = {1, 3, 4, 6};
+	const int64_t long_run_ends[] = {1, 3, 4, 6};
+	auto scan_reads_rows = [&](ArrowNodes::Node &ends) {
+		ends.schema.flags = 0;
+		auto &column = nodes.Add("+r", "d", 6, {}, {ends, ListValues(nodes)});
+		column.schema.flags = 0;
+		return ScanReadsRows(column.schema, column.array,
+		                     RowsQuery({"[1, NULL]", "[]", "[]", "NULL", "[3, 4, 5]", "[3, 4, 5]"}, "INTEGER[]"),
+		                     /*verify_vectors=*/true);
+	};
+	SECTION("16 bit") {
+		REQUIRE(scan_reads_rows(nodes.Add("s", "run_ends", 4, {nullptr, short_run_ends})));
+	}
+	SECTION("64 bit") {
+		REQUIRE(scan_reads_rows(nodes.Add("l", "run_ends", 4, {nullptr, long_run_ends})));
+	}
+}
+
+TEST_CASE("Arrow scan of run-end encoded nested values over more rows than a vector", "[arrow]") {
+	ArrowNodes nodes;
+	SECTION("LIST") {
+		const int32_t run_ends[] = {2000, 4100, 4101, 6161};
+		auto &column = RunEnds(nodes, "d", 6161, run_ends, ListValues(nodes));
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RunRowsQuery({2000, 4100, 4101, 6161}, LIST_ROWS, "INTEGER[]"),
+		                      /*verify_vectors=*/true));
+	}
+	SECTION("STRUCT") {
+		const int32_t run_ends[] = {1, 2049, 6161};
+		auto &column = RunEnds(nodes, "d", 6161, run_ends, StructWithNullsValues(nodes));
+		REQUIRE(ScanReadsRows(column.schema, column.array,
+		                      RunRowsQuery({1, 2049, 6161}, STRUCT_WITH_NULLS_ROWS, "STRUCT(i INTEGER, s VARCHAR)"),
+		                      /*verify_vectors=*/true));
+	}
+	SECTION("fixed-size ARRAY") {
+		const int32_t run_ends[] = {2047, 2050, 4096, 6000};
+		auto &column = RunEnds(nodes, "d", 6000, run_ends, FixedSizeListValues(nodes));
+		const char *const rows[] = {"[1, NULL]", "[3, 4]", "NULL", "[7, 8]"};
+		REQUIRE(ScanReadsRows(column.schema, column.array, RunRowsQuery({2047, 2050, 4096, 6000}, rows, "INTEGER[2]"),
+		                      /*verify_vectors=*/true));
+	}
+}
+
+TEST_CASE("Arrow scan of run-end encoded LIST values under a filter", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t run_ends[] = {1, 3, 4, 6};
+	auto &column = RunEnds(nodes, "d", 6, run_ends, ListValues(nodes));
+	ColumnStream stream(column.schema, column.array);
+	REQUIRE(StreamReadsRows(stream.stream, RowsQuery({"[1, NULL]", "[3, 4, 5]", "[3, 4, 5]"}, "INTEGER[]"),
+	                        /*verify_vectors=*/true, "len(d) > 0"));
+}
+
+// Arrow requires the last run end to cover the array's offset plus its length.
+TEST_CASE("Arrow scan rejects run-end encoded arrays whose runs end before their length", "[arrow]") {
+	ArrowNodes nodes;
+	const int32_t run_ends[] = {2, 3};
+	SECTION("from the first row") {
+		auto &column = RunEnds(nodes, "d", 5, run_ends, nodes.Add("i", "values", 2, {nullptr, INT_VALUES + 1}));
+		REQUIRE_THAT(ScanError(column.schema, column.array),
+		             Catch::Matchers::Contains("Arrow run-end encoded array covers 3 rows but has length 5"));
+	}
+	SECTION("from an offset") {
+		auto &column = RunEnds(nodes, "d", 3, run_ends, nodes.Add("i", "values", 2, {nullptr, INT_VALUES + 1}),
+		                       /*offset=*/1);
+		REQUIRE_THAT(ScanError(column.schema, column.array),
+		             Catch::Matchers::Contains("Arrow run-end encoded array covers 2 rows but has length 3"));
+	}
+	SECTION("as the values of run-end encoded values") {
+		auto &inner = RunEnds(nodes, "values", 4, run_ends, nodes.Add("i", "values", 2, {nullptr, INT_VALUES + 1}));
+		const int32_t outer_run_ends[] = {1, 2, 3, 4};
+		auto &column = RunEnds(nodes, "d", 4, outer_run_ends, inner);
+		REQUIRE_THAT(ScanError(column.schema, column.array),
+		             Catch::Matchers::Contains("Arrow run-end encoded array covers 3 rows but has length 4"));
+	}
+	SECTION("read past its length by its parent") {
+		auto &elements = RunEnds(nodes, "item", 3, run_ends, nodes.Add("i", "values", 2, {nullptr, INT_VALUES + 1}));
+		const int32_t offsets[] = {0, 4};
+		auto &column = nodes.Add("+l", "d", 1, {nullptr, offsets}, {elements});
+		REQUIRE_THAT(ScanError(column.schema, column.array),
+		             Catch::Matchers::Contains("Arrow run-end encoded array is read past the end of its runs"));
+	}
+}
