@@ -1,0 +1,197 @@
+# name: test/sql/function/timestamp/test_icu_strptime_offset_per_row.test
+# description: A UTC offset parsed in one row does not apply to a later row or format without one
+# group: [timestamp]
+
+require icu
+
+statement ok
+SET Calendar = 'gregorian';
+
+statement ok
+SET TimeZone = 'UTC';
+
+# A row without an offset after a row with one
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 +0100'), (2, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 +0100	2022-12-31 23:00:00+00
+2023-01-01	2023-01-01 00:00:00+00
+
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01'), (2, '2023-01-01 +0100'), (3, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01	2023-01-01 00:00:00+00
+2023-01-01 +0100	2022-12-31 23:00:00+00
+2023-01-01	2023-01-01 00:00:00+00
+
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %H:%M %z', '%Y-%m-%d %H:%M']) FROM (VALUES (1, '2023-01-01 12:00 +0100'), (2, '2023-01-01 12:00 -0530'), (3, '2023-01-01 12:00'), (4, '2023-01-01 12:00 +0000'), (5, '2023-01-01 12:00')) t(i, s) ORDER BY i
+----
+2023-01-01 12:00 +0100	2023-01-01 11:00:00+00
+2023-01-01 12:00 -0530	2023-01-01 17:30:00+00
+2023-01-01 12:00	2023-01-01 12:00:00+00
+2023-01-01 12:00 +0000	2023-01-01 12:00:00+00
+2023-01-01 12:00	2023-01-01 12:00:00+00
+
+# The same row alone
+query I
+SELECT strptime('2023-01-01 +0100', ['%Y-%m-%d %z', '%Y-%m-%d'])
+----
+2022-12-31 23:00:00+00
+
+query I
+SELECT strptime('2023-01-01', ['%Y-%m-%d %z', '%Y-%m-%d'])
+----
+2023-01-01 00:00:00+00
+
+# Rows in more than one vector
+query I
+SELECT count(*) FILTER (strptime(CASE WHEN i % 2 = 0 THEN '2023-01-01 +0100' ELSE '2023-01-01' END, ['%Y-%m-%d %z', '%Y-%m-%d'])
+    <> CASE WHEN i % 2 = 0 THEN TIMESTAMPTZ '2022-12-31 23:00:00+00' ELSE TIMESTAMPTZ '2023-01-01 00:00:00+00' END)
+FROM range(5000) t(i)
+----
+0
+
+# A zone named by %Z keeps its calendar across vectors
+query I
+SELECT count(*) FILTER (strptime(CASE WHEN i < 2048 THEN '2023-01-01 +0500 America/New_York' ELSE '2023-01-01 America/New_York' END, ['%Y-%m-%d %z %Z', '%Y-%m-%d %Z'])
+    <> CASE WHEN i < 2048 THEN TIMESTAMPTZ '2022-12-31 19:00:00+00' ELSE TIMESTAMPTZ '2023-01-01 05:00:00+00' END)
+FROM range(4096) t(i)
+----
+0
+
+# Other calendar systems
+statement ok
+SET Calendar = 'japanese';
+
+query II
+SELECT s, epoch(strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d'])) FROM (VALUES (1, '2023-01-01 +0100'), (2, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 +0100	1672527600.0
+2023-01-01	1672531200.0
+
+statement ok
+SET Calendar = 'chinese';
+
+query II
+SELECT s, epoch(strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d'])) FROM (VALUES (1, '2023-01-01 +0100'), (2, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 +0100	1674342000.0
+2023-01-01	1674345600.0
+
+statement ok
+SET Calendar = 'gregorian';
+
+# try_strptime, with a NULL and a row that matches no format in between
+query II
+SELECT s, try_strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 +0100'), (2, NULL), (3, 'garbage'), (4, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 +0100	2022-12-31 23:00:00+00
+NULL	NULL
+garbage	NULL
+2023-01-01	2023-01-01 00:00:00+00
+
+query II
+SELECT s, try_strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01'), (2, '2023-01-01 +0100'), (3, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01	2023-01-01 00:00:00+00
+2023-01-01 +0100	2022-12-31 23:00:00+00
+2023-01-01	2023-01-01 00:00:00+00
+
+# Nanosecond formats
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %H:%M:%S.%n %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 00:00:00.000000001 +0100'), (2, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 00:00:00.000000001 +0100	2022-12-31 23:00:00.000000001+00
+2023-01-01	2023-01-01 00:00:00+00
+
+query II
+SELECT s, try_strptime(s, ['%Y-%m-%d %H:%M:%S.%n %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 00:00:00.000000001 +0100'), (2, 'garbage'), (3, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 00:00:00.000000001 +0100	2022-12-31 23:00:00.000000001+00
+garbage	NULL
+2023-01-01	2023-01-01 00:00:00+00
+
+# An offset parsed with a zone name overrides that zone, and only in its own row
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %z %Z', '%Y-%m-%d %Z']) FROM (VALUES (1, '2023-01-01 +0500 America/New_York'), (2, '2023-01-01 America/New_York')) t(i, s) ORDER BY i
+----
+2023-01-01 +0500 America/New_York	2022-12-31 19:00:00+00
+2023-01-01 America/New_York	2023-01-01 05:00:00+00
+
+query II
+SELECT s, try_strptime(s, ['%Y-%m-%d %z %Z', '%Y-%m-%d %Z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 +0500 America/New_York'), (2, '2023-01-01'), (3, '2023-01-01 America/New_York'), (4, '2023-01-01 +0100 UTC'), (5, '2023-01-01 UTC')) t(i, s) ORDER BY i
+----
+2023-01-01 +0500 America/New_York	2022-12-31 19:00:00+00
+2023-01-01	2023-01-01 00:00:00+00
+2023-01-01 America/New_York	2023-01-01 05:00:00+00
+2023-01-01 +0100 UTC	2022-12-31 23:00:00+00
+2023-01-01 UTC	2023-01-01 00:00:00+00
+
+# The single format form
+query II
+SELECT s, strptime(s, '%Y-%m-%d %z %Z') FROM (VALUES (1, '2023-01-01 +0100 UTC'), (2, '2023-01-01 -0200 UTC'), (3, '2023-01-01 +0000 UTC')) t(i, s) ORDER BY i
+----
+2023-01-01 +0100 UTC	2022-12-31 23:00:00+00
+2023-01-01 -0200 UTC	2023-01-01 02:00:00+00
+2023-01-01 +0000 UTC	2023-01-01 00:00:00+00
+
+query II
+SELECT s, strptime(s, '%Y-%m-%d %Z') FROM (VALUES (1, '2023-01-01 America/New_York'), (2, '2023-01-01 UTC'), (3, '2023-07-01 America/New_York')) t(i, s) ORDER BY i
+----
+2023-01-01 America/New_York	2023-01-01 05:00:00+00
+2023-01-01 UTC	2023-01-01 00:00:00+00
+2023-07-01 America/New_York	2023-07-01 04:00:00+00
+
+# A session time zone with daylight saving time
+statement ok
+SET TimeZone = 'America/New_York';
+
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 +0100'), (2, '2023-07-01'), (3, '2023-01-01')) t(i, s) ORDER BY i
+----
+2023-01-01 +0100	2022-12-31 18:00:00-05
+2023-07-01	2023-07-01 00:00:00-04
+2023-01-01	2023-01-01 00:00:00-05
+
+query II
+SELECT s, strptime(s, ['%Y-%m-%d %H:%M:%S.%n %z', '%Y-%m-%d']) FROM (VALUES (1, '2023-01-01 00:00:00.000000001 +0100'), (2, '2023-07-01')) t(i, s) ORDER BY i
+----
+2023-01-01 00:00:00.000000001 +0100	2022-12-31 18:00:00.000000001-05
+2023-07-01	2023-07-01 00:00:00-04
+
+query I
+SELECT strptime('2023-07-01', ['%Y-%m-%d %z', '%Y-%m-%d'])
+----
+2023-07-01 00:00:00-04
+
+# A parsed offset is the whole offset of the row, whatever daylight saving time the zone of the calendar
+# has at the time the query runs; one of the two zones has it in effect on any day of the year
+statement ok
+SET TimeZone = 'Australia/Sydney';
+
+query II
+SELECT strptime('2023-07-01 +0100', ['%Y-%m-%d %z', '%Y-%m-%d']), strptime('2023-01-01 +0100', ['%Y-%m-%d %z', '%Y-%m-%d'])
+----
+2023-07-01 09:00:00+10	2023-01-01 10:00:00+11
+
+statement ok
+SET TimeZone = 'Europe/Amsterdam';
+
+query II
+SELECT strptime('2023-07-01 +0100', ['%Y-%m-%d %z', '%Y-%m-%d']), strptime('2023-01-01 +0100', ['%Y-%m-%d %z', '%Y-%m-%d'])
+----
+2023-07-01 01:00:00+02	2023-01-01 00:00:00+01
+
+statement ok
+SET TimeZone = 'UTC';
+
+query II
+SELECT strptime('2023-07-01 +0100 Australia/Sydney', '%Y-%m-%d %z %Z'), strptime('2023-07-01 +0100 Europe/Amsterdam', '%Y-%m-%d %z %Z')
+----
+2023-06-30 23:00:00+00	2023-06-30 23:00:00+00
+
+query II
+SELECT strptime('2023-07-01 00:00:00.000000001 +0100 Australia/Sydney', '%Y-%m-%d %H:%M:%S.%n %z %Z'), try_strptime('2023-07-01 00:00:00.000000001 +0100 Europe/Amsterdam', '%Y-%m-%d %H:%M:%S.%n %z %Z')
+----
+2023-06-30 23:00:00.000000001+00	2023-06-30 23:00:00.000000001+00

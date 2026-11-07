@@ -86,6 +86,8 @@ public:
 
 	//! Sets the calendar to an instant, discarding all field values
 	virtual void SetTime(int64_t millis) = 0;
+	//! Unsets all fields and drops any failure, so that the time is computed from the fields set afterwards alone
+	virtual void Clear() = 0;
 	//! The instant that the calendar is set to, computing it from the fields if needed
 	virtual int64_t GetTime() = 0;
 	//! The value of a field, computing the fields from the time if needed
@@ -96,7 +98,7 @@ public:
 	virtual void Set(CalendarField field, int32_t value) = 0;
 	//! Adds an amount to a field, keeping the wall clock time invariant for date fields.
 	//! Several adds make up one operation, so a failure in any of them is kept until the
-	//! next call to SetTime rather than being cleared by the add that follows it.
+	//! next call to SetTime or Clear rather than being cleared by the add that follows it.
 	virtual void Add(CalendarField field, int32_t amount) = 0;
 	//! The number of times the field has to be incremented to reach the target instant
 	virtual int32_t FieldDifference(int64_t target, CalendarField field) = 0;
@@ -132,6 +134,7 @@ public:
 	bool Equals(const Calendar &other) const override;
 
 	void SetTime(int64_t millis) override;
+	void Clear() override;
 	int64_t GetTime() override;
 	int32_t Get(CalendarField field) override;
 	bool HasFailed() const override {

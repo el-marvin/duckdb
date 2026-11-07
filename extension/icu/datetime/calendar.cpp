@@ -184,6 +184,18 @@ void FieldCalendar::SetTimeChecked(int64_t millis) {
 	}
 }
 
+void FieldCalendar::Clear() {
+	failed = false;
+	time_set = false;
+	fields_set = false;
+	all_fields_set = false;
+	fields_virtually_set = false;
+	for (idx_t i = 0; i < CAL_FIELD_COUNT; i++) {
+		fields[i] = 0;
+		stamp[i] = STAMP_UNSET;
+	}
+}
+
 int64_t FieldCalendar::GetTime() {
 	// the time is what an operation is read back out of, so a failure along the way is still
 	// the answer to this call rather than something that happened before it
