@@ -1,0 +1,702 @@
+# name: test/sql/trigger/trigger_dependency_creation_order.test
+# description: A trigger depends on what its own body references, whichever triggers exist on the tables it writes
+# group: [trigger]
+
+require noforcestorage
+
+statement ok
+CREATE MACRO trigger_deps(trg) AS TABLE
+SELECT e.name, d.deptype
+FROM duckdb_dependencies() d
+JOIN duckdb_triggers() t ON t.trigger_oid = d.refobjid
+JOIN (
+	SELECT table_oid AS oid, table_name AS name FROM duckdb_tables()
+	UNION ALL
+	SELECT view_oid, view_name FROM duckdb_views() WHERE NOT internal
+	UNION ALL
+	SELECT sequence_oid, sequence_name FROM duckdb_sequences()
+	UNION ALL
+	SELECT type_oid, type_name FROM duckdb_types() WHERE NOT internal
+	UNION ALL
+	SELECT function_oid, function_name FROM duckdb_functions() WHERE NOT internal
+) e ON e.oid = d.objid
+WHERE t.trigger_name = trg
+ORDER BY ALL;
+
+# A row trigger writing into a table with a statement trigger, the statement trigger created first
+statement ok
+CREATE TABLE a1(id INTEGER);
+
+statement ok
+CREATE TABLE b1(id INTEGER);
+
+statement ok
+CREATE TABLE log1(id INTEGER);
+
+statement ok
+CREATE TRIGGER sa1 AFTER INSERT ON a1 FOR EACH STATEMENT INSERT INTO log1 VALUES (0);
+
+statement ok
+CREATE TRIGGER tb1 AFTER INSERT ON b1 FOR EACH ROW INSERT INTO a1 VALUES (NEW.id);
+
+query II
+FROM trigger_deps('tb1');
+----
+a1	n
+b1	a
+
+query II
+FROM trigger_deps('sa1');
+----
+a1	a
+log1	n
+
+# The statement trigger guards its own target
+statement error
+DROP TABLE log1;
+----
+trigger "sa1" on table "a1" depends on table "log1"
+
+# Both triggers still fire
+statement ok
+INSERT INTO b1 VALUES (1), (2);
+
+query I
+SELECT id FROM a1 ORDER BY id;
+----
+1
+2
+
+query I
+SELECT id FROM log1;
+----
+0
+
+statement error
+ALTER TABLE log1 RENAME COLUMN id TO log_id;
+----
+Cannot alter entry "log1" because there are entries that depend on it
+
+statement ok
+DROP TRIGGER sa1 ON a1;
+
+statement ok
+ALTER TABLE log1 RENAME COLUMN id TO log_id;
+
+statement ok
+DROP TABLE log1;
+
+# The same pair created in the other order records the same dependencies
+statement ok
+CREATE TABLE a2(id INTEGER);
+
+statement ok
+CREATE TABLE b2(id INTEGER);
+
+statement ok
+CREATE TABLE log2(id INTEGER);
+
+statement ok
+CREATE TRIGGER tb2 AFTER INSERT ON b2 FOR EACH ROW INSERT INTO a2 VALUES (NEW.id);
+
+statement ok
+CREATE TRIGGER sa2 AFTER INSERT ON a2 FOR EACH STATEMENT INSERT INTO log2 VALUES (0);
+
+query II
+FROM trigger_deps('tb2');
+----
+a2	n
+b2	a
+
+statement ok
+DROP TRIGGER sa2 ON a2;
+
+statement ok
+DROP TABLE log2;
+
+statement ok
+INSERT INTO b2 VALUES (2);
+
+query I
+SELECT id FROM a2;
+----
+2
+
+# Two statement triggers in a chain, in both orders
+statement ok
+CREATE TABLE a3(id INTEGER);
+
+statement ok
+CREATE TABLE b3(id INTEGER);
+
+statement ok
+CREATE TABLE log3(id INTEGER);
+
+statement ok
+CREATE TRIGGER sb3 AFTER INSERT ON b3 FOR EACH STATEMENT INSERT INTO log3 VALUES (3);
+
+statement ok
+CREATE TRIGGER sa3 AFTER INSERT ON a3 FOR EACH STATEMENT INSERT INTO b3 VALUES (30);
+
+query II
+FROM trigger_deps('sa3');
+----
+a3	a
+b3	n
+
+statement ok
+INSERT INTO a3 VALUES (1);
+
+query I
+SELECT id FROM log3;
+----
+3
+
+statement ok
+DROP TRIGGER sb3 ON b3;
+
+statement ok
+DROP TABLE log3;
+
+statement ok
+CREATE TABLE a4(id INTEGER);
+
+statement ok
+CREATE TABLE b4(id INTEGER);
+
+statement ok
+CREATE TABLE log4(id INTEGER);
+
+statement ok
+CREATE TRIGGER sa4 AFTER INSERT ON a4 FOR EACH STATEMENT INSERT INTO b4 VALUES (40);
+
+statement ok
+CREATE TRIGGER sb4 AFTER INSERT ON b4 FOR EACH STATEMENT INSERT INTO log4 VALUES (4);
+
+query II
+FROM trigger_deps('sa4');
+----
+a4	a
+b4	n
+
+statement ok
+DROP TRIGGER sb4 ON b4;
+
+statement ok
+DROP TABLE log4;
+
+# Everything the body itself references stays a dependency when the table it writes has a trigger
+statement ok
+CREATE TABLE a5(id INTEGER);
+
+statement ok
+CREATE TABLE b5(id INTEGER);
+
+statement ok
+CREATE TABLE src5(id INTEGER, label VARCHAR);
+
+statement ok
+CREATE TABLE log5(id INTEGER);
+
+statement ok
+CREATE MACRO plus_one5(x) AS x + 1;
+
+statement ok
+INSERT INTO src5 VALUES (1, 'one'), (2, 'two');
+
+statement ok
+CREATE TRIGGER sa5 AFTER INSERT ON a5 FOR EACH STATEMENT INSERT INTO log5 SELECT count(*) FROM src5;
+
+statement ok
+CREATE TRIGGER tb5 AFTER INSERT ON b5 FOR EACH ROW
+	INSERT INTO a5 SELECT plus_one5(s.id) FROM src5 s WHERE s.id = NEW.id;
+
+query II
+FROM trigger_deps('tb5');
+----
+a5	n
+b5	a
+plus_one5	n
+src5	n
+
+statement ok
+INSERT INTO b5 VALUES (1), (2), (3);
+
+query I
+SELECT id FROM a5 ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM log5;
+----
+2
+
+statement error
+DROP TABLE a5;
+----
+trigger "tb5" on table "b5" depends on table "a5"
+
+statement error
+DROP MACRO plus_one5;
+----
+trigger "tb5" on table "b5" depends on macro function "plus_one5"
+
+statement error
+ALTER TABLE src5 RENAME COLUMN label TO name;
+----
+Cannot alter entry "src5" because there are entries that depend on it
+
+statement ok
+DROP TRIGGER sa5 ON a5;
+
+statement error
+DROP TABLE src5;
+----
+trigger "tb5" on table "b5" depends on table "src5"
+
+statement error
+ALTER TABLE src5 RENAME COLUMN label TO name;
+----
+Cannot alter entry "src5" because there are entries that depend on it
+
+statement ok
+DROP TABLE log5;
+
+# CREATE OR REPLACE of the trigger the body reaches leaves the writer's dependencies alone
+statement ok
+CREATE TABLE a6(id INTEGER);
+
+statement ok
+CREATE TABLE b6(id INTEGER);
+
+statement ok
+CREATE TABLE log6(id INTEGER);
+
+statement ok
+CREATE TABLE other6(id INTEGER);
+
+statement ok
+CREATE TRIGGER sa6 AFTER INSERT ON a6 FOR EACH STATEMENT INSERT INTO log6 VALUES (0);
+
+statement ok
+CREATE TRIGGER tb6 AFTER INSERT ON b6 FOR EACH ROW INSERT INTO a6 VALUES (NEW.id);
+
+statement ok
+CREATE OR REPLACE TRIGGER sa6 AFTER INSERT ON a6 FOR EACH STATEMENT INSERT INTO other6 VALUES (0);
+
+query II
+FROM trigger_deps('sa6');
+----
+a6	a
+other6	n
+
+query II
+FROM trigger_deps('tb6');
+----
+a6	n
+b6	a
+
+statement ok
+DROP TABLE log6;
+
+statement ok
+INSERT INTO b6 VALUES (6);
+
+query I
+SELECT id FROM other6;
+----
+0
+
+# CREATE OR REPLACE of the writer itself records the dependencies of its new body
+statement ok
+CREATE TABLE c6(id INTEGER);
+
+statement ok
+CREATE OR REPLACE TRIGGER tb6 AFTER INSERT ON b6 FOR EACH ROW INSERT INTO c6 VALUES (NEW.id);
+
+query II
+FROM trigger_deps('tb6');
+----
+b6	a
+c6	n
+
+statement ok
+DROP TABLE a6;
+
+# A statement trigger reaching a row trigger, then the row trigger dropped
+statement ok
+CREATE TABLE a7(id INTEGER);
+
+statement ok
+CREATE TABLE c7(id INTEGER);
+
+statement ok
+CREATE TABLE log7(id INTEGER);
+
+statement ok
+CREATE TRIGGER tc7 AFTER INSERT ON c7 FOR EACH ROW INSERT INTO log7 VALUES (NEW.id);
+
+statement ok
+CREATE TRIGGER sa7 AFTER INSERT ON a7 FOR EACH STATEMENT INSERT INTO c7 VALUES (7);
+
+query II
+FROM trigger_deps('sa7');
+----
+a7	a
+c7	n
+
+statement ok
+DROP TRIGGER tc7 ON c7;
+
+statement ok
+DROP TABLE log7;
+
+# Upsert bodies into a table with a statement trigger, in both creation orders
+statement ok
+CREATE TABLE a8(id INTEGER PRIMARY KEY, n INTEGER);
+
+statement ok
+CREATE TABLE b8(id INTEGER);
+
+statement ok
+CREATE TABLE log8(id INTEGER);
+
+statement ok
+CREATE TRIGGER sa8 AFTER INSERT ON a8 FOR EACH STATEMENT INSERT INTO log8 VALUES (8);
+
+statement ok
+CREATE TRIGGER sb8 AFTER INSERT ON b8 FOR EACH STATEMENT INSERT INTO a8 SELECT id, 0 FROM b8 ON CONFLICT DO NOTHING;
+
+statement ok
+CREATE TRIGGER sb8_replace AFTER INSERT ON b8 FOR EACH STATEMENT INSERT OR REPLACE INTO a8 SELECT id, 1 FROM b8;
+
+statement ok
+CREATE TRIGGER sb8_update AFTER INSERT ON b8 FOR EACH STATEMENT
+	INSERT INTO a8 SELECT id, 2 FROM b8 ON CONFLICT (id) DO UPDATE SET n = a8.n + 10;
+
+query II
+FROM trigger_deps('sb8');
+----
+a8	n
+b8	a
+
+query II
+FROM trigger_deps('sb8_update');
+----
+a8	n
+b8	a
+
+statement ok
+INSERT INTO b8 VALUES (1);
+
+query II
+SELECT id, n FROM a8;
+----
+1	11
+
+statement ok
+DROP TRIGGER sa8 ON a8;
+
+statement ok
+DROP TABLE log8;
+
+statement ok
+CREATE TABLE a9(id INTEGER PRIMARY KEY);
+
+statement ok
+CREATE TABLE b9(id INTEGER);
+
+statement ok
+CREATE TABLE log9(id INTEGER);
+
+statement ok
+CREATE TRIGGER sb9 AFTER INSERT ON b9 FOR EACH STATEMENT INSERT INTO a9 SELECT id FROM b9 ON CONFLICT DO NOTHING;
+
+statement ok
+CREATE TRIGGER sa9 AFTER INSERT ON a9 FOR EACH STATEMENT INSERT INTO log9 VALUES (9);
+
+query II
+FROM trigger_deps('sb9');
+----
+a9	n
+b9	a
+
+# UPDATE and DELETE bodies into tables with statement triggers
+statement ok
+CREATE TABLE a10(id INTEGER, n INTEGER);
+
+statement ok
+CREATE TABLE b10(id INTEGER);
+
+statement ok
+CREATE TABLE src10(id INTEGER);
+
+statement ok
+CREATE TABLE log10(id INTEGER);
+
+statement ok
+CREATE TRIGGER su10 AFTER UPDATE ON a10 FOR EACH STATEMENT INSERT INTO log10 VALUES (10);
+
+statement ok
+CREATE TRIGGER sd10 AFTER DELETE ON a10 FOR EACH STATEMENT INSERT INTO log10 VALUES (-10);
+
+statement ok
+CREATE TRIGGER sb10 AFTER INSERT ON b10 FOR EACH STATEMENT UPDATE a10 SET n = n + 1 FROM src10 WHERE a10.id = src10.id;
+
+statement ok
+CREATE TRIGGER db10 AFTER DELETE ON b10 FOR EACH ROW DELETE FROM a10 WHERE id = OLD.id;
+
+query II
+FROM trigger_deps('sb10');
+----
+a10	n
+b10	a
+src10	n
+
+query II
+FROM trigger_deps('db10');
+----
+a10	n
+b10	a
+
+statement ok
+INSERT INTO a10 VALUES (1, 0), (2, 0);
+
+statement ok
+INSERT INTO src10 VALUES (1);
+
+statement ok
+INSERT INTO b10 VALUES (2);
+
+statement ok
+DELETE FROM b10;
+
+query II
+SELECT id, n FROM a10;
+----
+1	1
+
+query I
+SELECT id FROM log10 ORDER BY id;
+----
+-10
+10
+
+statement ok
+DROP TRIGGER su10 ON a10;
+
+statement ok
+DROP TRIGGER sd10 ON a10;
+
+statement ok
+DROP TABLE log10;
+
+# A view, an enum type and a sequence default the body resolves stay dependencies
+statement ok
+CREATE TYPE mood11 AS ENUM ('sad', 'happy');
+
+statement ok
+CREATE SEQUENCE seq11;
+
+statement ok
+CREATE TABLE a11(id INTEGER DEFAULT nextval('seq11'), m mood11);
+
+statement ok
+CREATE TABLE b11(id INTEGER);
+
+statement ok
+CREATE TABLE src11(label VARCHAR);
+
+statement ok
+CREATE VIEW v11 AS SELECT label FROM src11;
+
+statement ok
+CREATE TABLE log11(id INTEGER);
+
+statement ok
+CREATE TRIGGER sa11 AFTER INSERT ON a11 FOR EACH STATEMENT INSERT INTO log11 VALUES (11);
+
+statement ok
+CREATE TRIGGER sb11 AFTER INSERT ON b11 FOR EACH STATEMENT INSERT INTO a11 (m) SELECT label::mood11 FROM v11;
+
+query II
+FROM trigger_deps('sb11');
+----
+a11	n
+b11	a
+mood11	n
+seq11	n
+src11	n
+v11	n
+
+statement ok
+INSERT INTO src11 VALUES ('happy');
+
+statement ok
+INSERT INTO b11 VALUES (1);
+
+query II
+SELECT id, m FROM a11;
+----
+1	happy
+
+statement error
+DROP VIEW v11;
+----
+trigger "sb11" on table "b11" depends on view "v11"
+
+statement ok
+DROP TRIGGER sa11 ON a11;
+
+statement ok
+DROP TABLE log11;
+
+# DROP ... CASCADE of a table a reached trigger references drops that trigger alone
+statement ok
+CREATE TABLE a12(id INTEGER);
+
+statement ok
+CREATE TABLE b12(id INTEGER);
+
+statement ok
+CREATE TABLE log12(id INTEGER);
+
+statement ok
+CREATE TRIGGER sa12 AFTER INSERT ON a12 FOR EACH STATEMENT INSERT INTO log12 VALUES (12);
+
+statement ok
+CREATE TRIGGER tb12 AFTER INSERT ON b12 FOR EACH ROW INSERT INTO a12 VALUES (NEW.id);
+
+statement ok
+DROP TABLE log12 CASCADE;
+
+query I
+SELECT trigger_name FROM duckdb_triggers() WHERE trigger_name IN ('sa12', 'tb12');
+----
+tb12
+
+statement ok
+INSERT INTO b12 VALUES (12);
+
+query I
+SELECT id FROM a12;
+----
+12
+
+# Reached triggers of every kind: BEFORE, with transition tables, with an OLD capture, with RETURNING
+statement ok
+CREATE TABLE a14(id INTEGER, n INTEGER);
+
+statement ok
+CREATE TABLE b14(id INTEGER);
+
+statement ok
+CREATE TABLE log14_before(id INTEGER);
+
+statement ok
+CREATE TABLE log14_new(id INTEGER);
+
+statement ok
+CREATE TABLE log14_old(id INTEGER);
+
+statement ok
+CREATE TABLE log14_ret(id INTEGER);
+
+statement ok
+CREATE MACRO g14(x) AS x * 2;
+
+statement ok
+CREATE TRIGGER sa14_before BEFORE INSERT ON a14 FOR EACH STATEMENT INSERT INTO log14_before VALUES (1);
+
+statement ok
+CREATE TRIGGER sa14_new AFTER INSERT ON a14 REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT
+	INSERT INTO log14_new SELECT id FROM new_rows;
+
+statement ok
+CREATE TRIGGER sa14_old AFTER UPDATE ON a14 REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT
+	INSERT INTO log14_old SELECT n FROM old_rows;
+
+statement ok
+CREATE TRIGGER sa14_ret AFTER INSERT ON a14 FOR EACH STATEMENT INSERT INTO log14_ret VALUES (0) RETURNING g14(id);
+
+statement ok
+CREATE TRIGGER sb14 AFTER INSERT ON b14 FOR EACH STATEMENT INSERT INTO a14 SELECT id, 0 FROM b14;
+
+statement ok
+CREATE TRIGGER ub14 AFTER DELETE ON b14 FOR EACH STATEMENT UPDATE a14 SET n = n + 1;
+
+query II
+FROM trigger_deps('sb14');
+----
+a14	n
+b14	a
+
+query II
+FROM trigger_deps('ub14');
+----
+a14	n
+b14	a
+
+statement ok
+INSERT INTO b14 VALUES (5);
+
+statement ok
+DELETE FROM b14;
+
+query IIII
+SELECT (SELECT count(*) FROM log14_before), (SELECT list(id) FROM log14_new), (SELECT list(id) FROM log14_old), (SELECT count(*) FROM log14_ret);
+----
+1	[5]	[0]	1
+
+statement ok
+DROP TRIGGER sa14_ret ON a14;
+
+statement ok
+DROP MACRO g14;
+
+# A generated column of the written table adds nothing to the writer when the table has a trigger, in both orders
+statement ok
+CREATE MACRO f15(x) AS x + 1;
+
+statement ok
+CREATE TABLE a15(id INTEGER, g INTEGER GENERATED ALWAYS AS (f15(id)));
+
+statement ok
+CREATE TABLE b15(id INTEGER);
+
+statement ok
+CREATE TABLE log15(id INTEGER);
+
+statement ok
+CREATE TRIGGER db15_first AFTER INSERT ON b15 FOR EACH STATEMENT DELETE FROM a15 WHERE id = 1;
+
+statement ok
+CREATE TRIGGER sa15 AFTER DELETE ON a15 FOR EACH STATEMENT INSERT INTO log15 VALUES (15);
+
+statement ok
+CREATE TRIGGER db15_second AFTER INSERT ON b15 FOR EACH STATEMENT DELETE FROM a15 WHERE id = 1;
+
+query II
+FROM trigger_deps('db15_first');
+----
+a15	n
+b15	a
+
+query II
+FROM trigger_deps('db15_second');
+----
+a15	n
+b15	a
+
+statement ok
+INSERT INTO a15 VALUES (1);
+
+statement ok
+INSERT INTO b15 VALUES (1);
+
+query II
+SELECT (SELECT count(*) FROM a15), (SELECT list(id) FROM log15);
+----
+0	[15, 15]
