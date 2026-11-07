@@ -9,6 +9,7 @@
 #include "duckdb/main/relation/materialized_relation.hpp"
 
 #include <cstdlib>
+#include <fstream>
 
 using namespace duckdb;
 
@@ -985,6 +986,121 @@ TEST_CASE("Test CSV reading/writing from relations", "[relation_api]") {
 
 	REQUIRE_THROWS(con.ReadCSV(csv_file, {"i INTEGER); SELECT 42;--"}));
 	REQUIRE_THROWS(con.ReadCSV(csv_file, {"i INTEGER, j INTEGER"}));
+}
+
+static void WriteTestFile(const string &path, const string &contents) {
+	std::ofstream out(path, std::ios::binary);
+	out << contents;
+	REQUIRE(out.good());
+}
+
+static void RequireSameAsSQL(Connection &con, const duckdb::shared_ptr<Relation> &rel, const string &sql) {
+	auto rel_result = rel->Execute();
+	auto sql_result = con.Query(sql);
+	REQUIRE_NO_FAIL(*rel_result);
+	REQUIRE_NO_FAIL(*sql_result);
+	REQUIRE(rel_result->GetNames() == sql_result->GetNames());
+	REQUIRE(rel_result->GetTypes() == sql_result->GetTypes());
+	REQUIRE(rel_result->ToString() == sql_result->ToString());
+}
+
+TEST_CASE("Test CSV relation with declared columns", "[relation_api]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	auto ints_file = TestCreatePath("declared_ints.csv");
+	WriteTestFile(ints_file, "007,1\n300,2\n");
+
+	// the sniffer alone takes the first line as a header of two BIGINT columns
+	auto rel = con.ReadCSV(ints_file, duckdb::vector<string> {"v VARCHAR", "n INTEGER"});
+	auto &columns = rel->Columns();
+	REQUIRE(columns.size() == 2);
+	REQUIRE(columns[0].Name() == "v");
+	REQUIRE(columns[0].Type() == LogicalType::VARCHAR);
+	REQUIRE(columns[1].Name() == "n");
+	REQUIRE(columns[1].Type() == LogicalType::INTEGER);
+	auto result = rel->Execute();
+	REQUIRE(result->GetNames() == duckdb::vector<Identifier> {Identifier("v"), Identifier("n")});
+	REQUIRE(CHECK_COLUMN(result, 0, {"007", "300"}));
+	REQUIRE(CHECK_COLUMN(result, 1, {1, 2}));
+	RequireSameAsSQL(con, rel,
+	                 "SELECT * FROM read_csv('" + ints_file + "', columns = {'v': 'VARCHAR', 'n': 'INTEGER'})");
+
+	rel = con.ReadCSV(ints_file, duckdb::vector<string> {"v VARCHAR", "n DOUBLE"});
+	result = rel->Execute();
+	REQUIRE(result->GetTypes() == duckdb::vector<LogicalType> {LogicalType::VARCHAR, LogicalType::DOUBLE});
+	REQUIRE(CHECK_COLUMN(result, 1, {1.0, 2.0}));
+	RequireSameAsSQL(con, rel,
+	                 "SELECT * FROM read_csv('" + ints_file + "', columns = {'v': 'VARCHAR', 'n': 'DOUBLE'})");
+
+	auto mixed_file = TestCreatePath("declared_mixed.csv");
+	WriteTestFile(mixed_file, "1,2.5,\"[1, 2]\"\n3,4.25,\"[]\"\n");
+	rel = con.ReadCSV(mixed_file, duckdb::vector<string> {"\"My Col\" INTEGER", "d DECIMAL(5,2)", "l INTEGER[]"});
+	result = rel->Execute();
+	REQUIRE(result->GetNames() == duckdb::vector<Identifier> {Identifier("My Col"), Identifier("d"), Identifier("l")});
+	REQUIRE(result->GetTypes() == duckdb::vector<LogicalType> {LogicalType::INTEGER, LogicalType::DECIMAL(5, 2),
+	                                                           LogicalType::LIST(LogicalType::INTEGER)});
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 3}));
+	REQUIRE(CHECK_COLUMN(result, 1, {"2.50", "4.25"}));
+	REQUIRE(CHECK_COLUMN(result, 2, {"[1, 2]", "[]"}));
+	RequireSameAsSQL(con, rel,
+	                 "SELECT * FROM read_csv('" + mixed_file +
+	                     "', columns = {'My Col': 'INTEGER', 'd': 'DECIMAL(5,2)', 'l': 'INTEGER[]'})");
+
+	auto bad_file = TestCreatePath("declared_bad.csv");
+	WriteTestFile(bad_file, "1\n2\nzz\n");
+	result = con.ReadCSV(bad_file, duckdb::vector<string> {"v INTEGER"})->Execute();
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "Could not convert string \"zz\" to 'INTEGER'"));
+	REQUIRE_FAIL(con.Query("SELECT * FROM read_csv('" + bad_file + "', columns = {'v': 'INTEGER'})"));
+
+	// a first line that does not convert to the declared types is a header
+	auto header_file = TestCreatePath("declared_header.csv");
+	WriteTestFile(header_file, "a,b\n1,x\n2,y\n");
+	rel = con.ReadCSV(header_file, duckdb::vector<string> {"v INTEGER", "w VARCHAR"});
+	result = rel->Execute();
+	REQUIRE(result->GetNames() == duckdb::vector<Identifier> {Identifier("v"), Identifier("w")});
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2}));
+	REQUIRE(CHECK_COLUMN(result, 1, {"x", "y"}));
+	RequireSameAsSQL(con, rel,
+	                 "SELECT * FROM read_csv('" + header_file + "', columns = {'v': 'INTEGER', 'w': 'VARCHAR'})");
+
+	// with fewer declared columns than the file has the sniffer reads each line as one value, which does not convert
+	result = con.ReadCSV(header_file, duckdb::vector<string> {"v INTEGER"})->Execute();
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "Could not convert string \"1,x\" to 'INTEGER'"));
+	result = con.Query("SELECT * FROM read_csv('" + header_file + "', columns = {'v': 'INTEGER'})");
+	REQUIRE(result->HasError());
+	REQUIRE(StringUtil::Contains(result->GetError(), "Could not convert string \"1,x\" to 'INTEGER'"));
+	REQUIRE_THROWS_WITH(con.ReadCSV(header_file, duckdb::vector<string> {"v INTEGER", "w VARCHAR", "z INTEGER"}),
+	                    Catch::Matchers::Contains("It does not match the number of columns found by the sniffer"));
+	REQUIRE_FAIL(con.Query("SELECT * FROM read_csv('" + header_file +
+	                       "', columns = {'v': 'INTEGER', 'w': 'VARCHAR', 'z': 'INTEGER'})"));
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TYPE mood AS ENUM ('x', 'y')"));
+	rel = con.ReadCSV(header_file, duckdb::vector<string> {"v INTEGER", "w mood"});
+	result = rel->Execute();
+	REQUIRE(result->GetTypes()[1].id() == LogicalTypeId::ENUM);
+	REQUIRE(CHECK_COLUMN(result, 1, {"x", "y"}));
+	RequireSameAsSQL(con, rel,
+	                 "SELECT * FROM read_csv('" + header_file + "', columns = {'v': 'INTEGER', 'w': 'mood'})");
+
+	REQUIRE_THROWS_WITH(con.ReadCSV(ints_file, duckdb::vector<string> {"v NO_SUCH_TYPE", "n INTEGER"}),
+	                    Catch::Matchers::Contains("NO_SUCH_TYPE does not exist"));
+	REQUIRE_FAIL(
+	    con.Query("SELECT * FROM read_csv('" + ints_file + "', columns = {'v': 'NO_SUCH_TYPE', 'n': 'INTEGER'})"));
+	REQUIRE_THROWS_WITH(con.ReadCSV(ints_file, duckdb::vector<string> {}),
+	                    Catch::Matchers::Contains("requires at least a single column"));
+	REQUIRE_FAIL(con.Query("SELECT * FROM read_csv('" + ints_file + "', columns = {})"));
+	REQUIRE_THROWS_WITH(con.ReadCSV(ints_file, duckdb::vector<string> {"v INTEGER", "V VARCHAR"}),
+	                    Catch::Matchers::Contains("already exists"));
+	REQUIRE_FAIL(con.Query("SELECT * FROM read_csv('" + ints_file + "', columns = {'v': 'INTEGER', 'V': 'VARCHAR'})"));
+	REQUIRE_THROWS_WITH(con.ReadCSV(ints_file, duckdb::vector<string> {"v INTEGER", "n AS (v + 1)"}),
+	                    Catch::Matchers::Contains("takes only a name and a type"));
+	REQUIRE_THROWS_WITH(con.ReadCSV(ints_file, duckdb::vector<string> {"v INTEGER", "n INTEGER AS (v + 1)"}),
+	                    Catch::Matchers::Contains("takes only a name and a type"));
+	REQUIRE_THROWS_WITH(con.ReadCSV(ints_file, duckdb::vector<string> {"v VARCHAR", "n INTEGER DEFAULT 3"}),
+	                    Catch::Matchers::Contains("takes only a name and a type"));
 }
 
 TEST_CASE("Test CSV reading from weather.csv", "[relation_api]") {

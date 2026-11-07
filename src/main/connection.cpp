@@ -301,19 +301,25 @@ shared_ptr<Relation> Connection::ReadCSV(const string &csv_input, named_paramete
 }
 
 shared_ptr<Relation> Connection::ReadCSV(const string &csv_file, const vector<string> &columns) {
-	// parse columns
-	named_parameter_map_t options;
-	child_list_t<Value> column_list;
+	ColumnList declared_columns;
 	for (auto &column : columns) {
 		auto col_list = Parser(*context).ParseColumnList(column);
 		if (col_list.LogicalColumnCount() != 1) {
 			throw ParserException("Expected a single column definition");
 		}
 		auto &col_def = col_list.GetColumnMutable(LogicalIndex(0));
+		if (col_def.Generated() || col_def.HasDefaultValue()) {
+			throw ParserException("A CSV column definition takes only a name and a type, not \"%s\"", column);
+		}
+		declared_columns.AddColumn(std::move(col_def));
+	}
+	child_list_t<Value> column_list;
+	for (auto &col_def : declared_columns.Logical()) {
 		column_list.emplace_back(col_def.GetName().GetIdentifierName(), col_def.GetType().ToString());
 	}
-	vector<string> files {csv_file};
-	return make_shared_ptr<ReadCSVRelation>(context, files, std::move(options));
+	named_parameter_map_t options;
+	options["columns"] = Value::STRUCT(std::move(column_list));
+	return ReadCSV(csv_file, std::move(options));
 }
 
 shared_ptr<Relation> Connection::ReadParquet(const string &parquet_file, bool binary_as_string) {
