@@ -1,0 +1,635 @@
+# name: test/sql/export/export_triggers.test
+# description: EXPORT DATABASE writes the triggers, and IMPORT DATABASE recreates them after the data is loaded
+# group: [export]
+
+require noforcestorage
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CREATE TABLE audit(msg VARCHAR);
+
+statement ok
+CREATE TABLE counters(n INTEGER);
+
+statement ok
+INSERT INTO counters VALUES (0);
+
+statement ok
+CREATE TABLE t(id INTEGER, v VARCHAR);
+
+statement ok
+CREATE TRIGGER t_before_insert BEFORE INSERT ON t FOR EACH STATEMENT INSERT INTO audit VALUES ('before insert t');
+
+statement ok
+CREATE TRIGGER t_after_insert AFTER INSERT ON t INSERT INTO audit VALUES ('after insert t');
+
+statement ok
+CREATE TRIGGER t_update_of AFTER UPDATE OF v ON t FOR EACH STATEMENT UPDATE counters SET n = n + 1;
+
+statement ok
+CREATE TRIGGER t_before_delete BEFORE DELETE ON t FOR EACH STATEMENT DELETE FROM audit WHERE msg = 'gone';
+
+statement ok
+CREATE TABLE r(id INTEGER);
+
+statement ok
+CREATE TRIGGER r_row_insert AFTER INSERT ON r FOR EACH ROW INSERT INTO audit VALUES ('row insert ' || NEW.id);
+
+statement ok
+CREATE TRIGGER r_row_delete AFTER DELETE ON r FOR EACH ROW INSERT INTO audit VALUES ('row delete ' || OLD.id);
+
+statement ok
+CREATE TABLE x(id INTEGER);
+
+statement ok
+CREATE TRIGGER x_new_rows AFTER INSERT ON x REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT INSERT INTO audit SELECT 'new ' || id FROM new_rows;
+
+statement ok
+CREATE TRIGGER x_old_rows AFTER DELETE ON x REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT INSERT INTO audit SELECT 'old ' || id FROM old_rows;
+
+statement ok
+CREATE TABLE upserted(k INTEGER PRIMARY KEY, hits INTEGER);
+
+statement ok
+CREATE TABLE u(id INTEGER);
+
+statement ok
+CREATE TRIGGER u_upsert AFTER INSERT ON u FOR EACH STATEMENT INSERT INTO upserted VALUES (1, 1) ON CONFLICT (k) DO UPDATE SET hits = upserted.hits + 1;
+
+statement ok
+CREATE TABLE uu(id INTEGER);
+
+statement ok
+CREATE TRIGGER uu_both AFTER UPDATE ON uu REFERENCING OLD TABLE AS o NEW TABLE AS n FOR EACH STATEMENT INSERT INTO audit SELECT 'update ' || o.id || ' to ' || n.id FROM o, n;
+
+# names that need quoting, a quote in a string literal
+statement ok
+CREATE TABLE "Mixed Case"("Odd Col" INTEGER, "select" INTEGER);
+
+statement ok
+CREATE TRIGGER "Trigger ""Quoted""" AFTER UPDATE OF "Odd Col", "select" ON "Mixed Case" FOR EACH STATEMENT INSERT INTO audit VALUES ('it''s quoted');
+
+# a body that calls a macro and one that reads a view, both defined in the export
+statement ok
+CREATE MACRO tag(x) AS 'macro ' || x;
+
+statement ok
+CREATE VIEW audit_count AS SELECT count(*) AS n FROM audit;
+
+statement ok
+CREATE TABLE m(id INTEGER);
+
+statement ok
+CREATE TRIGGER m_macro AFTER INSERT ON m FOR EACH ROW INSERT INTO audit VALUES (tag(NEW.id));
+
+statement ok
+CREATE TRIGGER m_view AFTER DELETE ON m FOR EACH STATEMENT INSERT INTO audit SELECT 'count ' || n FROM audit_count;
+
+# a trigger on a table in another schema, created through the search path, beside a table of the same name in main
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE s.t(id INTEGER);
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TRIGGER s_insert AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO main.audit VALUES ('insert s.t');
+
+statement ok
+RESET search_path;
+
+statement ok
+CREATE SCHEMA s.inner;
+
+statement ok
+CREATE TABLE s.inner.n(id INTEGER);
+
+statement ok
+CREATE TRIGGER n_insert AFTER INSERT ON s.inner.n FOR EACH ROW INSERT INTO main.audit VALUES ('insert s.inner.n ' || NEW.id);
+
+# data loaded before the export, through the triggers
+statement ok
+INSERT INTO t VALUES (1, 'a'), (2, 'b');
+
+statement ok
+INSERT INTO r VALUES (10), (11);
+
+statement ok
+INSERT INTO x VALUES (20);
+
+statement ok
+INSERT INTO u VALUES (30);
+
+statement ok
+INSERT INTO m VALUES (40);
+
+statement ok
+INSERT INTO uu VALUES (70);
+
+statement ok
+INSERT INTO s.t VALUES (50);
+
+statement ok
+INSERT INTO s.inner.n VALUES (60);
+
+query T rowsort
+SELECT msg FROM audit;
+----
+after insert t
+before insert t
+insert s.inner.n 60
+insert s.t
+macro 40
+new 20
+row insert 10
+row insert 11
+
+query II
+SELECT * FROM upserted;
+----
+1	1
+
+query TTTTTTT
+SELECT schema_name, table_name, trigger_name, action_timing, event_manipulation, columns, for_each FROM duckdb_triggers() ORDER BY ALL;
+----
+inner	n	n_insert	AFTER	INSERT	[]	ROW
+main	Mixed Case	Trigger "Quoted"	AFTER	UPDATE	[Odd Col, select]	STATEMENT
+main	m	m_macro	AFTER	INSERT	[]	ROW
+main	m	m_view	AFTER	DELETE	[]	STATEMENT
+main	r	r_row_delete	AFTER	DELETE	[]	ROW
+main	r	r_row_insert	AFTER	INSERT	[]	ROW
+main	t	t_after_insert	AFTER	INSERT	[]	STATEMENT
+main	t	t_before_delete	BEFORE	DELETE	[]	STATEMENT
+main	t	t_before_insert	BEFORE	INSERT	[]	STATEMENT
+main	t	t_update_of	AFTER	UPDATE	[v]	STATEMENT
+main	u	u_upsert	AFTER	INSERT	[]	STATEMENT
+main	uu	uu_both	AFTER	UPDATE	[]	STATEMENT
+main	x	x_new_rows	AFTER	INSERT	[]	STATEMENT
+main	x	x_old_rows	AFTER	DELETE	[]	STATEMENT
+s	t	s_insert	AFTER	INSERT	[]	STATEMENT
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_triggers' (FORMAT CSV);
+
+statement ok
+ROLLBACK
+
+# the triggers come after every COPY of load.sql, and none is in schema.sql
+query I
+SELECT count(*) FROM read_text('{TEST_DIR}/export_triggers/schema.sql') WHERE content LIKE '%TRIGGER%';
+----
+0
+
+query I
+SELECT regexp_matches(content, '^(COPY[^\n]*\n)+(CREATE TRIGGER[^\n]*\n)+$') FROM read_text('{TEST_DIR}/export_triggers/load.sql');
+----
+true
+
+query T
+SELECT line FROM (SELECT unnest(string_split(content, chr(10))) AS line FROM read_text('{TEST_DIR}/export_triggers/load.sql')) WHERE line LIKE 'CREATE TRIGGER%' ORDER BY line;
+----
+CREATE TRIGGER "Trigger ""Quoted""" AFTER UPDATE OF "Odd Col", "select" ON "Mixed Case" FOR EACH STATEMENT INSERT INTO audit (VALUES ('it''s quoted'));
+CREATE TRIGGER m_macro AFTER INSERT ON m FOR EACH ROW INSERT INTO audit (VALUES (tag("NEW".id)));
+CREATE TRIGGER m_view AFTER DELETE ON m FOR EACH STATEMENT INSERT INTO audit SELECT ('count ' || n) FROM audit_count;
+CREATE TRIGGER n_insert AFTER INSERT ON s."inner".n FOR EACH ROW INSERT INTO main.audit (VALUES (('insert s.inner.n ' || "NEW".id)));
+CREATE TRIGGER r_row_delete AFTER DELETE ON r FOR EACH ROW INSERT INTO audit (VALUES (('row delete ' || "OLD".id)));
+CREATE TRIGGER r_row_insert AFTER INSERT ON r FOR EACH ROW INSERT INTO audit (VALUES (('row insert ' || "NEW".id)));
+CREATE TRIGGER s_insert AFTER INSERT ON s.t FOR EACH STATEMENT INSERT INTO main.audit (VALUES ('insert s.t'));
+CREATE TRIGGER t_after_insert AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO audit (VALUES ('after insert t'));
+CREATE TRIGGER t_before_delete BEFORE DELETE ON t FOR EACH STATEMENT DELETE FROM audit WHERE (msg = 'gone');
+CREATE TRIGGER t_before_insert BEFORE INSERT ON t FOR EACH STATEMENT INSERT INTO audit (VALUES ('before insert t'));
+CREATE TRIGGER t_update_of AFTER UPDATE OF v ON t FOR EACH STATEMENT UPDATE counters SET n = (n + 1);
+CREATE TRIGGER u_upsert AFTER INSERT ON u FOR EACH STATEMENT INSERT INTO upserted (VALUES (1, 1)) ON CONFLICT (k) DO UPDATE SET hits = (upserted.hits + 1);
+CREATE TRIGGER uu_both AFTER UPDATE ON uu REFERENCING NEW TABLE AS n OLD TABLE AS o FOR EACH STATEMENT INSERT INTO audit SELECT ((('update ' || o.id) || ' to ') || n.id) FROM o , n;
+CREATE TRIGGER x_new_rows AFTER INSERT ON x REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT INSERT INTO audit SELECT ('new ' || id) FROM new_rows;
+CREATE TRIGGER x_old_rows AFTER DELETE ON x REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT INSERT INTO audit SELECT ('old ' || id) FROM old_rows;
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_triggers'
+
+# the import loads the data without firing the triggers
+query T rowsort
+SELECT msg FROM audit;
+----
+after insert t
+before insert t
+insert s.inner.n 60
+insert s.t
+macro 40
+new 20
+row insert 10
+row insert 11
+
+query II
+SELECT * FROM upserted;
+----
+1	1
+
+query I
+SELECT n FROM counters;
+----
+0
+
+query TTTTTTT
+SELECT schema_name, table_name, trigger_name, action_timing, event_manipulation, columns, for_each FROM duckdb_triggers() ORDER BY ALL;
+----
+inner	n	n_insert	AFTER	INSERT	[]	ROW
+main	Mixed Case	Trigger "Quoted"	AFTER	UPDATE	[Odd Col, select]	STATEMENT
+main	m	m_macro	AFTER	INSERT	[]	ROW
+main	m	m_view	AFTER	DELETE	[]	STATEMENT
+main	r	r_row_delete	AFTER	DELETE	[]	ROW
+main	r	r_row_insert	AFTER	INSERT	[]	ROW
+main	t	t_after_insert	AFTER	INSERT	[]	STATEMENT
+main	t	t_before_delete	BEFORE	DELETE	[]	STATEMENT
+main	t	t_before_insert	BEFORE	INSERT	[]	STATEMENT
+main	t	t_update_of	AFTER	UPDATE	[v]	STATEMENT
+main	u	u_upsert	AFTER	INSERT	[]	STATEMENT
+main	uu	uu_both	AFTER	UPDATE	[]	STATEMENT
+main	x	x_new_rows	AFTER	INSERT	[]	STATEMENT
+main	x	x_old_rows	AFTER	DELETE	[]	STATEMENT
+s	t	s_insert	AFTER	INSERT	[]	STATEMENT
+
+# the stored text of every imported trigger is the exported text
+query T
+SELECT sql FROM duckdb_triggers() ORDER BY sql;
+----
+CREATE TRIGGER "Trigger ""Quoted""" AFTER UPDATE OF "Odd Col", "select" ON "Mixed Case" FOR EACH STATEMENT INSERT INTO audit (VALUES ('it''s quoted'));
+CREATE TRIGGER m_macro AFTER INSERT ON m FOR EACH ROW INSERT INTO audit (VALUES (tag("NEW".id)));
+CREATE TRIGGER m_view AFTER DELETE ON m FOR EACH STATEMENT INSERT INTO audit SELECT ('count ' || n) FROM audit_count;
+CREATE TRIGGER n_insert AFTER INSERT ON s."inner".n FOR EACH ROW INSERT INTO main.audit (VALUES (('insert s.inner.n ' || "NEW".id)));
+CREATE TRIGGER r_row_delete AFTER DELETE ON r FOR EACH ROW INSERT INTO audit (VALUES (('row delete ' || "OLD".id)));
+CREATE TRIGGER r_row_insert AFTER INSERT ON r FOR EACH ROW INSERT INTO audit (VALUES (('row insert ' || "NEW".id)));
+CREATE TRIGGER s_insert AFTER INSERT ON s.t FOR EACH STATEMENT INSERT INTO main.audit (VALUES ('insert s.t'));
+CREATE TRIGGER t_after_insert AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO audit (VALUES ('after insert t'));
+CREATE TRIGGER t_before_delete BEFORE DELETE ON t FOR EACH STATEMENT DELETE FROM audit WHERE (msg = 'gone');
+CREATE TRIGGER t_before_insert BEFORE INSERT ON t FOR EACH STATEMENT INSERT INTO audit (VALUES ('before insert t'));
+CREATE TRIGGER t_update_of AFTER UPDATE OF v ON t FOR EACH STATEMENT UPDATE counters SET n = (n + 1);
+CREATE TRIGGER u_upsert AFTER INSERT ON u FOR EACH STATEMENT INSERT INTO upserted (VALUES (1, 1)) ON CONFLICT (k) DO UPDATE SET hits = (upserted.hits + 1);
+CREATE TRIGGER uu_both AFTER UPDATE ON uu REFERENCING NEW TABLE AS n OLD TABLE AS o FOR EACH STATEMENT INSERT INTO audit SELECT ((('update ' || o.id) || ' to ') || n.id) FROM o , n;
+CREATE TRIGGER x_new_rows AFTER INSERT ON x REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT INSERT INTO audit SELECT ('new ' || id) FROM new_rows;
+CREATE TRIGGER x_old_rows AFTER DELETE ON x REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT INSERT INTO audit SELECT ('old ' || id) FROM old_rows;
+
+statement ok
+DELETE FROM audit;
+
+# every trigger fires after the import
+statement ok
+INSERT INTO t VALUES (3, 'c');
+
+statement ok
+UPDATE t SET v = 'z' WHERE id = 3;
+
+statement ok
+UPDATE t SET id = 4 WHERE id = 3;
+
+query I
+SELECT n FROM counters;
+----
+1
+
+statement ok
+INSERT INTO audit VALUES ('gone');
+
+statement ok
+DELETE FROM t WHERE id = 4;
+
+statement ok
+INSERT INTO r VALUES (12);
+
+statement ok
+DELETE FROM r WHERE id = 10;
+
+statement ok
+INSERT INTO x VALUES (21), (22);
+
+statement ok
+DELETE FROM x WHERE id = 20;
+
+statement ok
+INSERT INTO u VALUES (31);
+
+statement ok
+UPDATE uu SET id = 71;
+
+query II
+SELECT * FROM upserted;
+----
+1	2
+
+statement ok
+UPDATE "Mixed Case" SET "Odd Col" = 1;
+
+statement ok
+INSERT INTO m VALUES (41);
+
+statement ok
+DELETE FROM m WHERE id = 40;
+
+statement ok
+INSERT INTO s.t VALUES (51);
+
+statement ok
+INSERT INTO t VALUES (5, 'main');
+
+statement ok
+INSERT INTO s.inner.n VALUES (61);
+
+query T rowsort
+SELECT msg FROM audit;
+----
+after insert t
+after insert t
+before insert t
+before insert t
+count 10
+insert s.inner.n 61
+insert s.t
+it's quoted
+macro 41
+new 21
+new 22
+old 20
+row delete 10
+row insert 12
+update 70 to 71
+
+# triggers of an attached database whose ON clause names the catalog, two of them with the same name
+statement ok
+ATTACH ':memory:' AS src;
+
+statement ok
+USE src;
+
+statement ok
+CREATE TABLE base(id INTEGER);
+
+statement ok
+CREATE TABLE other(id INTEGER);
+
+statement ok
+CREATE TABLE log(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER same_name AFTER INSERT ON src.base FOR EACH STATEMENT INSERT INTO log VALUES ('base');
+
+statement ok
+CREATE TRIGGER same_name AFTER INSERT ON src.main.other FOR EACH STATEMENT INSERT INTO log VALUES ('other');
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/export_triggers_catalog';
+
+query T
+SELECT line FROM (SELECT unnest(string_split(content, chr(10))) AS line FROM read_text('{TEST_DIR}/export_triggers_catalog/load.sql')) WHERE line LIKE 'CREATE TRIGGER%' ORDER BY line;
+----
+CREATE TRIGGER same_name AFTER INSERT ON base FOR EACH STATEMENT INSERT INTO log (VALUES ('base'));
+CREATE TRIGGER same_name AFTER INSERT ON other FOR EACH STATEMENT INSERT INTO log (VALUES ('other'));
+
+statement ok
+ATTACH ':memory:' AS dst;
+
+statement ok
+USE dst;
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_triggers_catalog'
+
+statement ok
+INSERT INTO base VALUES (1);
+
+statement ok
+INSERT INTO other VALUES (2);
+
+query T rowsort
+SELECT msg FROM dst.log;
+----
+base
+other
+
+query TT
+SELECT database_name, table_name FROM duckdb_triggers() WHERE trigger_name = 'same_name' ORDER BY ALL;
+----
+dst	base
+dst	other
+src	base
+src	other
+
+# triggers are recreated in creation order: a row trigger writing into a table must exist before that table's row
+# trigger, and a trigger created before the trigger its body reaches has no dependency on that trigger's tables
+statement ok
+ATTACH ':memory:' AS ord;
+
+statement ok
+USE ord;
+
+statement ok
+CREATE TABLE a(id INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER);
+
+statement ok
+CREATE TABLE z(id INTEGER);
+
+statement ok
+CREATE TABLE log(msg VARCHAR);
+
+statement ok
+CREATE TABLE log2(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER tb AFTER INSERT ON b FOR EACH ROW INSERT INTO a VALUES (NEW.id);
+
+statement ok
+CREATE TRIGGER ta AFTER INSERT ON a FOR EACH ROW INSERT INTO log VALUES ('a ' || NEW.id);
+
+statement ok
+CREATE TRIGGER parent AFTER DELETE ON z FOR EACH STATEMENT DELETE FROM a;
+
+statement ok
+CREATE TRIGGER child AFTER DELETE ON a FOR EACH STATEMENT INSERT INTO log2 VALUES ('a deleted');
+
+# MERGE and WITH bodies
+statement ok
+CREATE TRIGGER z_merge AFTER INSERT ON z FOR EACH STATEMENT MERGE INTO log USING (SELECT 'merged' AS msg) src ON log.msg = src.msg WHEN NOT MATCHED THEN INSERT VALUES (src.msg);
+
+statement ok
+CREATE TABLE w(id INTEGER);
+
+statement ok
+CREATE TRIGGER w_with AFTER INSERT ON w FOR EACH STATEMENT WITH cte AS (SELECT 'with ' || count(*) AS msg FROM w) INSERT INTO log SELECT msg FROM cte;
+
+statement error
+INSERT INTO b VALUES (1);
+----
+FOR EACH ROW trigger "tb" on table "b" writes to a table that has its own FOR EACH ROW trigger
+
+statement ok
+EXPORT DATABASE ord TO '{TEST_DIR}/export_triggers_order';
+
+query T nosort
+SELECT line FROM (SELECT unnest(string_split(content, chr(10))) AS line FROM read_text('{TEST_DIR}/export_triggers_order/load.sql')) WHERE line LIKE 'CREATE TRIGGER%';
+----
+CREATE TRIGGER tb AFTER INSERT ON b FOR EACH ROW INSERT INTO a (VALUES ("NEW".id));
+CREATE TRIGGER ta AFTER INSERT ON a FOR EACH ROW INSERT INTO log (VALUES (('a ' || "NEW".id)));
+CREATE TRIGGER parent AFTER DELETE ON z FOR EACH STATEMENT DELETE FROM a;
+CREATE TRIGGER child AFTER DELETE ON a FOR EACH STATEMENT INSERT INTO log2 (VALUES ('a deleted'));
+CREATE TRIGGER z_merge AFTER INSERT ON z FOR EACH STATEMENT MERGE INTO log USING (SELECT 'merged' AS msg) AS src ON (log.msg = src.msg) WHEN NOT MATCHED THEN INSERT VALUES (src.msg);
+CREATE TRIGGER w_with AFTER INSERT ON w FOR EACH STATEMENT WITH cte AS (SELECT ('with ' || count_star()) AS msg FROM w) INSERT INTO log SELECT msg FROM cte;
+
+statement ok
+ATTACH ':memory:' AS ord_dst;
+
+statement ok
+USE ord_dst;
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_triggers_order'
+
+# firing the cascade fails as it does in the exported database
+statement error
+INSERT INTO b VALUES (1);
+----
+FOR EACH ROW trigger "tb" on table "b" writes to a table that has its own FOR EACH ROW trigger
+
+statement ok
+INSERT INTO z VALUES (1);
+
+statement ok
+INSERT INTO w VALUES (1), (2);
+
+statement ok
+DELETE FROM z;
+
+query T rowsort
+SELECT msg FROM log UNION ALL SELECT msg FROM log2;
+----
+a deleted
+merged
+with 2
+
+statement ok
+DROP TRIGGER child ON a;
+
+statement ok
+DROP TABLE log2;
+
+# load.sql accepts CREATE TRIGGER besides COPY, and still rejects any other statement
+statement ok
+COPY (SELECT 'CREATE TABLE extra(i INTEGER);') TO '{TEST_DIR}/export_triggers_order/load.sql' (HEADER false, QUOTE '', DELIMITER '|');
+
+statement ok
+ATTACH ':memory:' AS rejected;
+
+statement ok
+USE rejected;
+
+statement error
+IMPORT DATABASE '{TEST_DIR}/export_triggers_order'
+----
+<REGEX>:Invalid Input Error.*load.sql may only contain COPY statements and CREATE TRIGGER statements, found: CREATE TABLE extra.*
+
+# creation order survives checkpoints and reloads, across schemas
+statement ok
+ATTACH '{TEST_DIR}/export_triggers_restart.db' AS persisted (STORAGE_VERSION 'v2.0.0');
+
+statement ok
+USE persisted;
+
+statement ok
+CREATE SCHEMA z;
+
+statement ok
+CREATE TABLE a(id INTEGER);
+
+statement ok
+CREATE TABLE z.b(id INTEGER);
+
+statement ok
+CREATE TABLE log(msg VARCHAR);
+
+statement ok
+CREATE TRIGGER tb AFTER INSERT ON z.b FOR EACH ROW INSERT INTO main.a VALUES (NEW.id);
+
+statement ok
+CREATE TABLE c(id INTEGER);
+
+statement ok
+CREATE TRIGGER tc AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO main.log VALUES ('c');
+
+statement ok
+CREATE TRIGGER ta AFTER INSERT ON a FOR EACH ROW INSERT INTO main.log VALUES ('a ' || NEW.id);
+
+statement ok
+CHECKPOINT persisted;
+
+statement ok
+USE rejected;
+
+statement ok
+DETACH persisted;
+
+statement ok
+ATTACH '{TEST_DIR}/export_triggers_restart.db' AS persisted;
+
+query TT
+SELECT schema_name, trigger_name FROM duckdb_triggers() WHERE database_name = 'persisted' ORDER BY trigger_oid;
+----
+z	tb
+main	tc
+main	ta
+
+# a second checkpoint and reload keep the order
+statement ok
+CREATE TABLE persisted.extra(i INTEGER);
+
+statement ok
+CHECKPOINT persisted;
+
+statement ok
+DETACH persisted;
+
+statement ok
+ATTACH '{TEST_DIR}/export_triggers_restart.db' AS persisted;
+
+query TT
+SELECT schema_name, trigger_name FROM duckdb_triggers() WHERE database_name = 'persisted' ORDER BY trigger_oid;
+----
+z	tb
+main	tc
+main	ta
+
+statement ok
+EXPORT DATABASE persisted TO '{TEST_DIR}/export_triggers_restart';
+
+statement ok
+ATTACH ':memory:' AS persisted_dst;
+
+statement ok
+USE persisted_dst;
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_triggers_restart'
+
+statement ok
+INSERT INTO a VALUES (7);
+
+statement ok
+INSERT INTO c VALUES (8);
+
+query T rowsort
+SELECT msg FROM log;
+----
+a 7
+c
+
+query TT
+SELECT schema_name, trigger_name FROM duckdb_triggers() WHERE database_name = 'persisted_dst' ORDER BY trigger_oid;
+----
+z	tb
+main	tc
+main	ta
