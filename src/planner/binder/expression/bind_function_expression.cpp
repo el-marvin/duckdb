@@ -166,6 +166,10 @@ ListReduceRebindResult MaybeRebindListReduceLambda(ClientContext &context, idx_t
 	}
 
 	if (has_initial) {
+		// operator== ignores collations, but a collated accumulator changes how the body compares strings
+		if (accumulator_type.EqualsIncludingCollation(function_child_types[2])) {
+			return result;
+		}
 		D_ASSERT(lambda_expr_copy);
 		auto rebind_child_types = function_child_types;
 		rebind_child_types[2] = accumulator_type;

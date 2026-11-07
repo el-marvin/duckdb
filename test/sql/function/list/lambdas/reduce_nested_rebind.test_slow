@@ -1,0 +1,11 @@
+# name: test/sql/function/list/lambdas/reduce_nested_rebind.test_slow
+# description: Deeply nested list_reduce calls with initial values
+# group: [lambdas]
+
+statement ok
+SET lambda_syntax='DISABLE_SINGLE_ARROW'
+
+query I
+SELECT list_reduce([x0 + 1], lambda acc1, x1: list_reduce([x1 + 1], lambda acc2, x2: list_reduce([x2 + 1], lambda acc3, x3: list_reduce([x3 + 1], lambda acc4, x4: list_reduce([x4 + 1], lambda acc5, x5: list_reduce([x5 + 1], lambda acc6, x6: list_reduce([x6 + 1], lambda acc7, x7: list_reduce([x7 + 1], lambda acc8, x8: list_reduce([x8 + 1], lambda acc9, x9: list_reduce([x9 + 1], lambda acc10, x10: list_reduce([x10 + 1], lambda acc11, x11: list_reduce([x11 + 1], lambda acc12, x12: acc12 + x12, 0), 0), 0), 0), 0), 0), 0), 0), 0), 0), 0), 0) AS r FROM (SELECT 0 AS x0)
+----
+12

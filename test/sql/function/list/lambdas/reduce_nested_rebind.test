@@ -1,0 +1,298 @@
+# name: test/sql/function/list/lambdas/reduce_nested_rebind.test
+# description: list_reduce binds its lambda a second time only when the accumulator type changes, nested calls included
+# group: [lambdas]
+
+statement ok
+SET lambda_syntax='DISABLE_SINGLE_ARROW'
+
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES ([1, 2, 3], 10, 'a'), ([4], 20, 'b'), ([], 30, 'c'), (NULL, 40, 'd')) t(l, c, s);
+
+# nests of list_reduce calls with initial values
+
+query I
+SELECT list_reduce([x0 + 1], lambda acc1, x1: list_reduce([x1 + 1], lambda acc2, x2: list_reduce([x2 + 1], lambda acc3, x3: list_reduce([x3 + 1], lambda acc4, x4: list_reduce([x4 + 1], lambda acc5, x5: list_reduce([x5 + 1], lambda acc6, x6: list_reduce([x6 + 1], lambda acc7, x7: list_reduce([x7 + 1], lambda acc8, x8: acc8 + x8, 0), 0), 0), 0), 0), 0), 0), 0) AS r FROM (SELECT 0 AS x0)
+----
+8
+
+# typeof(acc) shows the accumulator type of the bind the function runs
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: acc + x, 0) AS r);
+----
+6	INTEGER
+
+query I
+SELECT list_reduce([1, 2, 3], lambda acc, x: acc + length(typeof(acc)), 0);
+----
+18
+
+query I
+SELECT list_reduce([1, 2, 3], lambda acc, x: CASE WHEN typeof(acc) = 'DOUBLE' THEN acc + x + 0.5::DOUBLE ELSE -1000 END, 0);
+----
+7.5
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: acc + x + 0.5::DOUBLE, 0) AS r);
+----
+7.5	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: x + 0 * length(typeof(acc)), 0::BIGINT) AS r);
+----
+3	BIGINT
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([100::TINYINT, 100::TINYINT], lambda acc, x: acc + x, 0) AS r);
+----
+200	INTEGER
+
+statement error
+SELECT list_reduce([100::TINYINT, 100::TINYINT], lambda acc, x: acc + x, 0::TINYINT);
+----
+Overflow in addition of INT8 (100 + 100)
+
+# VARCHAR bodies
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: acc || x, '') AS r);
+----
+123	VARCHAR
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce(['a', 'b'], lambda acc, x: acc || typeof(acc) || x, 'z') AS r);
+----
+zVARCHARaVARCHARb	VARCHAR
+
+statement error
+SELECT list_reduce([1, 2, 3], lambda acc, x: acc || x, 0);
+----
+No common super type between initial value type INTEGER and lambda return type VARCHAR
+
+# nested list and struct bodies
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: list_append(acc, x), []) AS r);
+----
+[1, 2, 3]	INTEGER[]
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: list_append(acc, x), []::BIGINT[]) AS r);
+----
+[1, 2, 3]	BIGINT[]
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([[1], [2, 3]], lambda acc, x: list_concat(acc, x), [0]) AS r);
+----
+[0, 1, 2, 3]	INTEGER[]
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: [acc[1] + x], [0.5]) AS r);
+----
+[3.5]	DECIMAL(12,1)[]
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: {'s': acc.s + x, 'n': acc.n + 1}, {'s': 0, 'n': 0}) AS r);
+----
+{'s': 6, 'n': 3}	STRUCT(s INTEGER, n INTEGER)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: {'s': acc.s + x * 0.5}, {'s': 0}) AS r);
+----
+{'s': 3.0}	STRUCT(s DECIMAL(13,1))
+
+statement error
+SELECT list_reduce([1, 2], lambda acc, x: [acc], 0);
+----
+No common super type between initial value type INTEGER and lambda return type INTEGER[]
+
+statement error
+SELECT list_reduce([1, 2], lambda acc, x: {'a': acc}, 0);
+----
+No common super type between initial value type INTEGER and lambda return type STRUCT(a INTEGER)
+
+# decimals
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1.5, 2.25], lambda acc, x: acc + x, 0.0) AS r);
+----
+3.75	DECIMAL(4,2)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1.5, 2.25], lambda acc, x: acc + x, 100) AS r);
+----
+103.75	DECIMAL(13,2)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: acc + 0.5, 1.25::DECIMAL(18, 2)) AS r);
+----
+2.25	DECIMAL(19,2)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: acc * 1.5, 2.0::DECIMAL(4, 1)) AS r);
+----
+4.50	DECIMAL(6,2)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: x * 0.5, 0.000::DECIMAL(18, 3)) AS r);
+----
+1.000	DECIMAL(18,3)
+
+# NULL initial value and no initial value
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: acc + x, NULL) AS r);
+----
+NULL	INTEGER
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: coalesce(acc, 0) + x, NULL) AS r);
+----
+6	INTEGER
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: coalesce(acc, 0) + x, NULL::INTEGER) AS r);
+----
+6	INTEGER
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: acc + x) AS r);
+----
+6	INTEGER
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2, 3], lambda acc, x: acc + x * 0.5::DOUBLE) AS r);
+----
+3.5	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce(['a', 'b'], lambda acc, x: acc || typeof(acc) || x) AS r);
+----
+aVARCHARb	VARCHAR
+
+# the index parameter, captured columns, empty and NULL lists
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([10, 20, 30], lambda acc, x, i: acc + x * i, 0) AS r);
+----
+140	BIGINT
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([10, 20, 30], lambda acc, x, i: acc + x * i * 0.5::DOUBLE, 0) AS r);
+----
+70.0	DOUBLE
+
+query III
+SELECT l, r, typeof(r) FROM (SELECT l, list_reduce(l, lambda acc, x: acc + x + c, c) AS r FROM t) ORDER BY ALL;
+----
+[]	30	INTEGER
+[1, 2, 3]	46	INTEGER
+[4]	44	INTEGER
+NULL	NULL	INTEGER
+
+query III
+SELECT l, r, typeof(r) FROM (SELECT l, list_reduce(l, lambda acc, x: acc || s || x, s) AS r FROM t) ORDER BY ALL;
+----
+[]	c	VARCHAR
+[1, 2, 3]	aa1a2a3	VARCHAR
+[4]	bb4	VARCHAR
+NULL	NULL	VARCHAR
+
+query III
+SELECT l, r, typeof(r) FROM (SELECT l, list_reduce(l, lambda acc, x: acc + x * c * 0.5::DOUBLE, c) AS r FROM t) ORDER BY ALL;
+----
+[]	30.0	DOUBLE
+[1, 2, 3]	40.0	DOUBLE
+[4]	60.0	DOUBLE
+NULL	NULL	DOUBLE
+
+query II
+SELECT reduce([1, 2], lambda acc, x: acc + x, 0), array_reduce([1, 2], lambda acc, x: acc + x + 0.5::DOUBLE, 0);
+----
+3	4.0
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([]::INTEGER[], lambda acc, x: acc + x * 0.5::DOUBLE, 7) AS r);
+----
+7.0	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce(NULL::INTEGER[], lambda acc, x: acc + x, 7) AS r);
+----
+NULL	INTEGER
+
+# the collation of the settled accumulator type decides how the body compares, also when only the collation changes
+
+query I
+SELECT list_reduce(['A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END, 'x' COLLATE nocase);
+----
+hit
+
+query I
+SELECT list_reduce(['A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END, 'x');
+----
+miss
+
+query I
+SELECT list_reduce(['A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase, 'x');
+----
+hit
+
+query I
+SELECT list_reduce(['A', 'B'], lambda acc, x: CASE WHEN acc = 'HIT' THEN 'again' ELSE 'hit' END COLLATE nocase, 'x');
+----
+again
+
+query I
+SELECT list_reduce(['A'], lambda acc, x: [CASE WHEN acc[1] = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase], ['x']);
+----
+[hit]
+
+query I
+SELECT list_reduce(['A'], lambda acc, x: {'a': CASE WHEN acc.a = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase}, {'a': 'x'});
+----
+{'a': hit}
+
+# nested calls whose inner bodies reference the outer accumulator
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: list_reduce([x, 10], lambda a2, y: a2 + y + acc, 0), 0) AS r);
+----
+34	INTEGER
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: list_reduce([x, 10], lambda a2, y: a2 + y + acc, 0), 0.5::DOUBLE) AS r);
+----
+36.0	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: list_reduce([x, 10], lambda a2, y: a2 + y + acc + 0.5::DOUBLE, 0), 0) AS r);
+----
+37.0	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: acc || list_reduce([x, 10], lambda a2, y: a2 + y, 0), '') AS r);
+----
+1112	VARCHAR
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: list_reduce([x, 10], lambda a2, y: a2 + y, acc) + 0.5::DOUBLE, 0) AS r);
+----
+24.0	DOUBLE
+
+# the bound expressions match the bind that settles the accumulator type
+
+query II
+EXPLAIN SELECT list_reduce(l, lambda acc, x: acc + x + c, c) FROM t;
+----
+physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: \(\(acc \+ x\) \+ c\), c, c\).*
+
+query II
+EXPLAIN SELECT list_reduce(l, lambda acc, x: acc + x * 0.5::DOUBLE, 0) FROM t;
+----
+physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: \(acc \+ \(CAST\(x AS DOUBLE\) \* 0\.5\)\), 0\.0\).*
+
+query II
+EXPLAIN SELECT list_reduce(l, lambda acc, x: list_reduce([x], lambda a2, y: a2 + y + acc, 0), 0) FROM t;
+----
+physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: list_reduce\(list_value\(x\), lambda a2, y: \(\(a2 \+ y\) \+ acc\), CAST\(0 AS INTEGER\), x, acc\), 0\).*
