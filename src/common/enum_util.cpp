@@ -102,7 +102,6 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_options.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
-#include "duckdb/common/operator/decimal_cast_operators.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/sorting/sort_key.hpp"
 #include "duckdb/common/types.hpp"
@@ -2263,25 +2262,6 @@ const char* EnumUtil::ToChars<ExplainType>(ExplainType value) {
 template<>
 ExplainType EnumUtil::FromString<ExplainType>(const char *value) {
 	return static_cast<ExplainType>(StringUtil::StringToEnum(GetExplainTypeValues(), 3, "ExplainType", value));
-}
-
-const StringUtil::EnumStringLiteral *GetExponentTypeValues() {
-	static constexpr StringUtil::EnumStringLiteral values[] {
-		{ static_cast<uint32_t>(ExponentType::NONE), "NONE" },
-		{ static_cast<uint32_t>(ExponentType::POSITIVE), "POSITIVE" },
-		{ static_cast<uint32_t>(ExponentType::NEGATIVE), "NEGATIVE" }
-	};
-	return values;
-}
-
-template<>
-const char* EnumUtil::ToChars<ExponentType>(ExponentType value) {
-	return StringUtil::EnumToString(GetExponentTypeValues(), 3, "ExponentType", static_cast<uint32_t>(value));
-}
-
-template<>
-ExponentType EnumUtil::FromString<ExponentType>(const char *value) {
-	return static_cast<ExponentType>(StringUtil::StringToEnum(GetExponentTypeValues(), 3, "ExponentType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetExpressionClassValues() {
