@@ -4,6 +4,8 @@
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/types/arrow_string_view_type.hpp"
 
+#include <cerrno>
+
 using namespace duckdb;
 
 TEST_CASE("Test arrow in C API", "[capi][arrow]") {
@@ -1455,6 +1457,217 @@ TEST_CASE("Test C-API Arrow rejects non-monotonic string offsets", "[capi][arrow
 	REQUIRE(err != nullptr);
 	duckdb_destroy_error_data(&err);
 	duckdb_destroy_arrow_converted_schema(&converted);
+}
+
+namespace {
+
+idx_t exported_schema_nodes = 0;
+idx_t released_schema_nodes = 0;
+bool fail_schema_exports = false;
+
+struct ExportedSchemaNode {
+	string format;
+	string name;
+	duckdb::vector<ArrowSchema> children;
+	duckdb::vector<ArrowSchema *> child_pointers;
+};
+
+void ReleaseExportedSchema(ArrowSchema *schema) {
+	auto node = static_cast<ExportedSchemaNode *>(schema->private_data);
+	for (auto &child : node->children) {
+		if (child.release) {
+			child.release(&child);
+		}
+	}
+	delete node;
+	released_schema_nodes++;
+	schema->private_data = nullptr;
+	schema->release = nullptr;
+}
+
+// Allocates every node anew, as Arrow producers do for each get_schema call; the metadata stays borrowed and a
+// dictionary is not copied.
+void ExportSchemaCopy(const ArrowSchema &source, ArrowSchema &out) {
+	auto node = new ExportedSchemaNode();
+	node->format = source.format;
+	if (source.name) {
+		node->name = source.name;
+	}
+	node->children.resize(NumericCast<idx_t>(source.n_children));
+	for (idx_t i = 0; i < node->children.size(); i++) {
+		ExportSchemaCopy(*source.children[i], node->children[i]);
+		node->child_pointers.push_back(&node->children[i]);
+	}
+	out = {};
+	out.format = node->format.c_str();
+	out.name = source.name ? node->name.c_str() : nullptr;
+	out.metadata = source.metadata;
+	out.flags = source.flags;
+	out.n_children = source.n_children;
+	out.children = node->child_pointers.data();
+	out.private_data = node;
+	out.release = ReleaseExportedSchema;
+	exported_schema_nodes++;
+}
+
+// A release left by a failed export counts as a release of a node that was never exported.
+void ReleaseFailedExport(ArrowSchema *schema) {
+	released_schema_nodes++;
+	schema->release = nullptr;
+}
+
+int ExportBatchStreamSchema(ArrowArrayStream *stream, ArrowSchema *out) {
+	if (fail_schema_exports) {
+		*out = {};
+		out->release = ReleaseFailedExport;
+		return EINVAL;
+	}
+	ExportSchemaCopy(static_cast<BatchStream *>(stream->private_data)->schema, *out);
+	return 0;
+}
+
+const char *SchemaExportError(ArrowArrayStream *stream) {
+	return "the producer lost its schema";
+}
+
+void ResetSchemaCounts() {
+	exported_schema_nodes = 0;
+	released_schema_nodes = 0;
+	fail_schema_exports = false;
+}
+
+} // namespace
+
+TEST_CASE("duckdb_arrow_scan releases every schema its stream exports", "[capi][arrow]") {
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+	BatchStream batches(PlainSchema(tester), QueryToArrowBatches(tester, {PLAIN_BATCHES[0], PLAIN_BATCHES[1]}));
+	batches.stream.get_schema = ExportBatchStreamSchema;
+	ResetSchemaCounts();
+
+	REQUIRE(duckdb_arrow_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_stream>(&batches.stream)) ==
+	        DuckDBSuccess);
+	REQUIRE(exported_schema_nodes > 0);
+	REQUIRE(released_schema_nodes == exported_schema_nodes);
+
+	auto exported = exported_schema_nodes;
+	duckdb_prepared_statement prepared;
+	REQUIRE(duckdb_prepare(tester.connection, "SELECT count(*), sum(a) FROM t", &prepared) == DuckDBSuccess);
+	duckdb_result result;
+	REQUIRE(duckdb_execute_prepared(prepared, &result) == DuckDBSuccess);
+	REQUIRE(duckdb_value_int64(&result, 0, 0) == 6);
+	REQUIRE(duckdb_value_int64(&result, 1, 0) == 18);
+	duckdb_destroy_result(&result);
+	duckdb_destroy_prepare(&prepared);
+	REQUIRE(exported_schema_nodes > exported);
+	REQUIRE(released_schema_nodes == exported_schema_nodes);
+
+	for (auto query :
+	     {"SELECT count(*) FROM t", "SELECT missing FROM t", "SELECT count(*) FROM t t1 JOIN t t2 USING (a)"}) {
+		INFO(query);
+		exported = exported_schema_nodes;
+		REQUIRE_FAIL(tester.Query(query));
+		REQUIRE(exported_schema_nodes > exported);
+		REQUIRE(released_schema_nodes == exported_schema_nodes);
+	}
+
+	REQUIRE_NO_FAIL(tester.Query("DROP VIEW t"));
+	REQUIRE(released_schema_nodes == exported_schema_nodes);
+}
+
+TEST_CASE("duckdb_arrow_scan fails when its stream cannot export a schema", "[capi][arrow]") {
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+	BatchStream batches(PlainSchema(tester), QueryToArrowBatches(tester, {PLAIN_BATCHES[0], PLAIN_BATCHES[1]}));
+	batches.stream.get_schema = ExportBatchStreamSchema;
+	batches.stream.get_last_error = SchemaExportError;
+	ResetSchemaCounts();
+
+	SECTION("when the view is created") {
+		fail_schema_exports = true;
+		REQUIRE(duckdb_arrow_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_stream>(&batches.stream)) ==
+		        DuckDBError);
+		auto result = tester.Query("SELECT count(*) FROM t");
+		REQUIRE_FAIL(result);
+		REQUIRE(result->ErrorType() == DUCKDB_ERROR_CATALOG);
+		REQUIRE(exported_schema_nodes == 0);
+		REQUIRE(released_schema_nodes == 0);
+	}
+	SECTION("inside an explicit transaction") {
+		REQUIRE_NO_FAIL(tester.Query("BEGIN TRANSACTION"));
+		fail_schema_exports = true;
+		REQUIRE(duckdb_arrow_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_stream>(&batches.stream)) ==
+		        DuckDBError);
+		auto aborted = tester.Query("SELECT 42");
+		REQUIRE_FAIL(aborted);
+		REQUIRE(aborted->ErrorType() == DUCKDB_ERROR_TRANSACTION);
+		REQUIRE_NO_FAIL(tester.Query("ROLLBACK"));
+		auto result = tester.Query("SELECT 42");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int32_t>(0, 0) == 42);
+		REQUIRE(exported_schema_nodes == 0);
+		REQUIRE(released_schema_nodes == 0);
+	}
+	SECTION("without an error message") {
+		batches.stream.get_last_error = BatchStream::GetLastError;
+		REQUIRE(duckdb_arrow_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_stream>(&batches.stream)) ==
+		        DuckDBSuccess);
+		fail_schema_exports = true;
+		auto failed = tester.Query("SELECT count(*) FROM t");
+		REQUIRE_FAIL(failed);
+		REQUIRE_THAT(failed->ErrorMessage(), Catch::Matchers::Contains("get_schema failed(): unknown error"));
+		REQUIRE(released_schema_nodes == exported_schema_nodes);
+	}
+	SECTION("when a later query binds the view") {
+		REQUIRE(duckdb_arrow_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_stream>(&batches.stream)) ==
+		        DuckDBSuccess);
+		fail_schema_exports = true;
+		auto failed = tester.Query("SELECT count(*) FROM t");
+		REQUIRE_FAIL(failed);
+		REQUIRE(failed->ErrorType() == DUCKDB_ERROR_INVALID_INPUT);
+		REQUIRE_THAT(failed->ErrorMessage(), Catch::Matchers::Contains("the producer lost its schema"));
+		REQUIRE(released_schema_nodes == exported_schema_nodes);
+
+		fail_schema_exports = false;
+		auto result = tester.Query("SELECT count(*) FROM t");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->Fetch<int64_t>(0, 0) == 6);
+		REQUIRE_NO_FAIL(tester.Query("DROP VIEW t"));
+		REQUIRE(released_schema_nodes == exported_schema_nodes);
+	}
+	fail_schema_exports = false;
+}
+
+TEST_CASE("duckdb_arrow_array_scan never releases the caller's schema", "[capi][arrow]") {
+	if (STANDARD_VECTOR_SIZE < 3) {
+		return;
+	}
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+	ArrowSchemaWrapper plain;
+	plain.arrow_schema = PlainSchema(tester);
+	ResetSchemaCounts();
+	{
+		auto batches = QueryToArrowBatches(tester, {PLAIN_BATCHES[0]});
+		REQUIRE(batches.size() == 1);
+		ArrowSchema schema;
+		ExportSchemaCopy(plain.arrow_schema, schema);
+		ArrayScanInput input(schema, batches[0]);
+		REQUIRE(duckdb_arrow_array_scan(tester.connection, "t", reinterpret_cast<duckdb_arrow_schema>(&input.schema),
+		                                reinterpret_cast<duckdb_arrow_array>(&input.array),
+		                                reinterpret_cast<duckdb_arrow_stream *>(&input.stream)) == DuckDBSuccess);
+		REQUIRE(released_schema_nodes == 0);
+		for (idx_t scan = 0; scan < 3; scan++) {
+			auto result = tester.Query("SELECT count(*), sum(a) FROM t");
+			REQUIRE_NO_FAIL(*result);
+			REQUIRE(result->Fetch<int64_t>(0, 0) == 3);
+			REQUIRE(result->Fetch<int64_t>(1, 0) == 3);
+			REQUIRE(released_schema_nodes == 0);
+		}
+		REQUIRE_NO_FAIL(tester.Query("DROP VIEW t"));
+		REQUIRE(released_schema_nodes == 0);
+	}
+	REQUIRE(released_schema_nodes == exported_schema_nodes);
 }
 
 TEST_CASE("Test C-API Arrow round trip of timestamps below the first midnight of the range", "[capi][arrow]") {

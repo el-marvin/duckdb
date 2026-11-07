@@ -401,12 +401,10 @@ struct PrivateData {
 	bool done = false;
 };
 
-// LCOV_EXCL_START
-// This function is never called, but used to set ArrowSchema's release functions to a non-null NOOP.
+//! Releases a schema that borrows the caller's memory, so there is nothing to free
 void EmptySchemaRelease(ArrowSchema *schema) {
 	schema->release = nullptr;
 }
-// LCOV_EXCL_STOP
 
 void EmptyArrayRelease(ArrowArray *array) {
 	array->release = nullptr;
@@ -414,16 +412,6 @@ void EmptyArrayRelease(ArrowArray *array) {
 
 void EmptyStreamRelease(ArrowArrayStream *stream) {
 	stream->release = nullptr;
-}
-
-void FactoryGetSchema(ArrowArrayStream *stream, ArrowSchema &schema) {
-	stream->get_schema(stream, &schema);
-
-	// Need to nullify the root schema's release function here, because streams don't allow us to set the release
-	// function. For the schema's children, we nullify the release functions in `duckdb_arrow_scan`, so we don't need to
-	// handle them again here. We set this to nullptr and not EmptySchemaRelease to prevent ArrowSchemaWrapper's
-	// destructor from destroying the schema (it's the caller's responsibility).
-	schema.release = nullptr;
 }
 
 int GetSchema(struct ArrowArrayStream *stream, struct ArrowSchema *out) {
@@ -456,8 +444,15 @@ public:
 	    : stream(stream_p), view_name(std::move(view_name_p)) {
 	}
 
+	//! What get_schema returns belongs to the consumer, so the bind data releases it with its own callback
 	void GetSchema(ArrowSchema &schema) override {
-		FactoryGetSchema(&stream.get(), schema);
+		auto &source = stream.get();
+		if (source.get_schema(&source, &schema) != 0) {
+			// A failed call returns no schema, so nothing it left behind is released.
+			schema.release = nullptr;
+			auto error = source.get_last_error(&source);
+			throw duckdb::InvalidInputException("arrow_scan: get_schema failed(): %s", error ? error : "unknown error");
+		}
 	}
 
 	duckdb::unique_ptr<duckdb::ArrowArrayStreamWrapper>
@@ -542,45 +537,11 @@ duckdb_state Ingest(duckdb_connection connection, const char *table_name,
 		// The factories hand out the caller's data unchanged, so neither projections nor filters can be pushed into it
 		cconn->TableFunction("arrow_scan_dumb", {}, {}, std::move(factory))
 		    ->CreateView(duckdb::Identifier(table_name), true, true);
-	} catch (...) { // LCOV_EXCL_START
-		// Tried covering this in tests, but it proved harder than expected. At the time of writing:
-		// - Passing any name to `CreateView` worked without throwing an exception
-		// - Passing a null Arrow array worked without throwing an exception
-		// - Passing an invalid schema (without any columns) led to an InternalException with SIGABRT, which is meant to
-		//   be un-catchable. This case likely needs to be handled gracefully within `arrow_scan`.
-		// Ref: https://discord.com/channels/909674491309850675/921100573732909107/1115230468699336785
+	} catch (...) {
 		return DuckDBError;
-	} // LCOV_EXCL_STOP
+	}
 
 	return DuckDBSuccess;
-}
-
-duckdb_state Scan(duckdb_connection connection, const char *table_name, ArrowArrayStream *stream,
-                  duckdb::shared_ptr<duckdb::ArrowScanFactory> factory) {
-	// Backup release functions - we nullify children schema release functions because we don't want to release on
-	// behalf of the caller, downstream in our code. Note that Arrow releases target immediate children, but aren't
-	// recursive. So we only back up immediate children here and restore their functions.
-	ArrowSchema schema;
-	if (stream->get_schema(stream, &schema) == DuckDBError) {
-		return DuckDBError;
-	}
-
-	typedef void (*release_fn_t)(ArrowSchema *);
-	std::vector<release_fn_t> release_fns(duckdb::NumericCast<idx_t>(schema.n_children));
-	for (idx_t i = 0; i < duckdb::NumericCast<idx_t>(schema.n_children); i++) {
-		auto child = schema.children[i];
-		release_fns[i] = child->release;
-		child->release = arrow_array_stream_wrapper::EmptySchemaRelease;
-	}
-
-	auto ret = Ingest(connection, table_name, std::move(factory));
-
-	// Restore release functions.
-	for (idx_t i = 0; i < duckdb::NumericCast<idx_t>(schema.n_children); i++) {
-		schema.children[i]->release = release_fns[i];
-	}
-
-	return ret;
 }
 } // namespace
 } // namespace arrow_array_stream_wrapper
@@ -592,7 +553,7 @@ duckdb_state duckdb_arrow_scan(duckdb_connection connection, const char *table_n
 	}
 	try {
 		auto factory = duckdb::make_shared_ptr<arrow_array_stream_wrapper::CArrowScanFactory>(*stream, table_name);
-		return arrow_array_stream_wrapper::Scan(connection, table_name, stream, std::move(factory));
+		return arrow_array_stream_wrapper::Ingest(connection, table_name, std::move(factory));
 	} catch (...) { // LCOV_EXCL_START
 		return DuckDBError;
 	} // LCOV_EXCL_STOP
@@ -615,11 +576,9 @@ duckdb_state duckdb_arrow_array_scan(duckdb_connection connection, const char *t
 		}
 		return DuckDBError;
 	} // LCOV_EXCL_STOP
-	auto view_stream = stream.release();
-	*out_stream = reinterpret_cast<duckdb_arrow_stream>(view_stream);
-	try {
-		return arrow_array_stream_wrapper::Scan(connection, table_name, view_stream, std::move(factory));
-	} catch (...) { // LCOV_EXCL_START
+	*out_stream = reinterpret_cast<duckdb_arrow_stream>(stream.release());
+	if (!schema) {
 		return DuckDBError;
-	} // LCOV_EXCL_STOP
+	}
+	return arrow_array_stream_wrapper::Ingest(connection, table_name, std::move(factory));
 }
