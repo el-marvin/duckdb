@@ -167,14 +167,25 @@ interval_parse_number:
 interval_parse_time : {
 	// parse the remainder of the time as a Time type
 	dtime_t time;
-	idx_t pos;
-	if (!Time::TryConvertInterval(str + start_pos, len - start_pos, pos, time, false, nullptr, negative)) {
+	idx_t time_pos;
+	if (!Time::TryConvertInterval(str + start_pos, len - start_pos, time_pos, time, false, nullptr, negative)) {
 		return false;
 	}
 	if (!IntervalTryAddition<int64_t>(result.micros, time.value, 1, error_message)) {
 		return false;
 	}
 	found_any = true;
+	// a time is the last unit of an interval: only "ago" may follow it
+	for (pos = start_pos + time_pos; pos < len; pos++) {
+		char c = str[pos];
+		if (c == ' ' || c == '\t' || c == '\n') {
+			continue;
+		} else if (c == 'a' || c == 'A') {
+			goto interval_parse_ago;
+		} else {
+			return false;
+		}
+	}
 	goto end_of_string;
 }
 interval_parse_identifier:

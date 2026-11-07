@@ -1,0 +1,220 @@
+# name: test/sql/types/interval/interval_trailing_text.test
+# description: A VARCHAR to INTERVAL cast rejects text after a time
+# group: [interval]
+
+statement error
+SELECT CAST('12:00:00xyz' AS INTERVAL)
+----
+<REGEX>:Conversion Error:.*Could not convert string '12:00:00xyz' to INTERVAL.*
+
+statement error
+SELECT INTERVAL '12:00:00xyz'
+----
+<REGEX>:Conversion Error:.*Could not convert string '12:00:00xyz' to INTERVAL.*
+
+statement error
+SELECT CAST('12:00:00 1 day' AS INTERVAL)
+----
+<REGEX>:Conversion Error:.*Could not convert string '12:00:00 1 day' to INTERVAL.*
+
+# a time ends the interval: nothing but "ago" and whitespace may follow it
+query II
+SELECT i, TRY_CAST(s AS INTERVAL) FROM (VALUES
+	(1, '12:00:00xyz'),
+	(2, '12:00:00 xyz'),
+	(3, '12:00:00.5xyz'),
+	(4, '12:00:00Z'),
+	(5, '12:00:00+05'),
+	(6, '12:00:00:00'),
+	(7, '12:00:00 1 day'),
+	(8, '12:00:00 12:00:00'),
+	(9, '12:00:00 agox'),
+	(10, '12:00:00 ago xyz'),
+	(11, '12:00:00 ag'),
+	(12, '-12:00:00xyz'),
+	(13, '1 day 12:00:00 xyz'),
+	(14, '100:00:00 abc'),
+	(15, '12:00:00 ' || chr(13)),
+	(16, '12:00:00' || chr(12))
+) t(i, s) ORDER BY i
+----
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+7	NULL
+8	NULL
+9	NULL
+10	NULL
+11	NULL
+12	NULL
+13	NULL
+14	NULL
+15	NULL
+16	NULL
+
+# a malformed time stays rejected
+query II
+SELECT TRY_CAST('12:x' AS INTERVAL), TRY_CAST('12:00:x' AS INTERVAL)
+----
+NULL	NULL
+
+statement error
+SELECT CAST('12:00:00 ago xyz' AS INTERVAL)
+----
+<REGEX>:Conversion Error:.*Could not convert string '12:00:00 ago xyz' to INTERVAL.*
+
+statement error
+SELECT CAST('12:00:00+05' AS INTERVAL)
+----
+<REGEX>:Conversion Error:.*Could not convert string '12:00:00\+05' to INTERVAL.*
+
+# whitespace around the time stays accepted
+query II
+SELECT i, TRY_CAST(s AS INTERVAL) FROM (VALUES
+	(1, '12:00:00 '),
+	(2, ' 12:00:00'),
+	(3, '12:00:00' || chr(9)),
+	(4, '12:00:00' || chr(10)),
+	(5, '1 day 12:00:00  '),
+	(6, '12:00:00.5 ')
+) t(i, s) ORDER BY i
+----
+1	12:00:00
+2	12:00:00
+3	12:00:00
+4	12:00:00
+5	1 day 12:00:00
+6	12:00:00.5
+
+# "ago" after a time negates the interval, as after any other unit
+query II
+SELECT i, TRY_CAST(s AS INTERVAL) FROM (VALUES
+	(1, '12:00:00 ago'),
+	(2, '12:00:00ago'),
+	(3, '1 day 12:00:00 ago'),
+	(4, '-12:00:00 AGO '),
+	(5, '@ 1 day 02:03:04.5 ago'),
+	(6, '12:00:00. ago')
+) t(i, s) ORDER BY i
+----
+1	-12:00:00
+2	-12:00:00
+3	-1 day -12:00:00
+4	12:00:00
+5	-1 day -02:03:04.5
+6	-12:00:00
+
+# negating the smallest time overflows
+statement error
+SELECT CAST('-2562047788:00:54.775808 ago' AS INTERVAL)
+----
+<REGEX>:Out of Range Error:.*AGO interval value is out of range.*
+
+query I
+SELECT TRY_CAST('-2562047788:00:54.775808 ago' AS INTERVAL)
+----
+NULL
+
+# the lenient time forms stay accepted
+query II
+SELECT i, TRY_CAST(s AS INTERVAL) FROM (VALUES
+	(1, '12:'),
+	(2, '12:00:'),
+	(3, '1:2:3'),
+	(4, '100:00:00'),
+	(5, '-12:00:00'),
+	(6, '12:00:00.123456'),
+	(7, '1 day 12:00:00'),
+	(8, '2 years 3 months -12:30:00'),
+	(9, '12:30')
+) t(i, s) ORDER BY i
+----
+1	12:00:00
+2	12:00:00
+3	01:02:03
+4	100:00:00
+5	-12:00:00
+6	12:00:00.123456
+7	1 day 12:00:00
+8	2 years 3 months -12:30:00
+9	12:30:00
+
+# a column with NULLs: TRY_CAST nulls the malformed rows only, CAST raises on them
+statement ok
+CREATE TABLE intervals AS SELECT * FROM (VALUES (1, '12:00:00'), (2, NULL), (3, '12:00:00xyz'), (4, '1 day 02:00:00'), (5, '13:00:00 1 day')) v(i, s)
+
+query II
+SELECT i, TRY_CAST(s AS INTERVAL) FROM intervals ORDER BY i
+----
+1	12:00:00
+2	NULL
+3	NULL
+4	1 day 02:00:00
+5	NULL
+
+statement error
+SELECT CAST(s AS INTERVAL) FROM intervals
+----
+<REGEX>:Conversion Error:.*Could not convert string '12:00:00xyz' to INTERVAL.*
+
+statement ok
+SELECT CAST(s AS INTERVAL) FROM intervals WHERE i IN (1, 2, 4)
+
+# the CSV reader with an explicit INTERVAL column
+statement ok
+COPY (SELECT s AS v FROM intervals ORDER BY i) TO '{TEST_DIR}/trailing_interval.csv' (HEADER true)
+
+statement error
+SELECT * FROM read_csv('{TEST_DIR}/trailing_interval.csv', columns = {'v': 'INTERVAL'}, header = true)
+----
+<REGEX>:Conversion Error:.*12:00:00xyz.*
+
+# ignore_errors drops the malformed rows
+query I
+SELECT v FROM read_csv('{TEST_DIR}/trailing_interval.csv', columns = {'v': 'INTERVAL'}, header = true, ignore_errors = true) ORDER BY v NULLS LAST
+----
+12:00:00
+1 day 02:00:00
+NULL
+
+statement ok
+SELECT * FROM read_csv('{TEST_DIR}/trailing_interval.csv', columns = {'v': 'INTERVAL'}, header = true, store_rejects = true)
+
+query III
+SELECT line, column_name, error_type FROM reject_errors ORDER BY line
+----
+4	v	CAST
+6	v	CAST
+
+require json
+
+statement ok
+COPY (SELECT s AS v FROM intervals ORDER BY i) TO '{TEST_DIR}/trailing_interval.json'
+
+statement error
+SELECT * FROM read_json('{TEST_DIR}/trailing_interval.json', columns = {'v': 'INTERVAL'})
+----
+<REGEX>:Invalid Input Error: JSON transform error.*12:00:00xyz.*
+
+# ignore_errors keeps the malformed rows as NULL
+query I
+SELECT v FROM read_json('{TEST_DIR}/trailing_interval.json', columns = {'v': 'INTERVAL'}, ignore_errors = true) ORDER BY v NULLS LAST
+----
+12:00:00
+1 day 02:00:00
+NULL
+NULL
+NULL
+
+query I
+SELECT json_transform('{"v": "12:00:00xyz"}', '{"v": "INTERVAL"}')
+----
+{'v': NULL}
+
+statement error
+SELECT json_transform_strict('{"v": "12:00:00xyz"}', '{"v": "INTERVAL"}')
+----
+<REGEX>:Invalid Input Error:.*12:00:00xyz.*
