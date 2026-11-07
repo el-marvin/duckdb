@@ -350,8 +350,7 @@ LogicalType ArrowType::GetDuckType(bool use_dictionary) const {
 		return type;
 	}
 	if (run_end_encoded) {
-		// the type info describes the run ends and the values, not the value type the rebuild below expects
-		return type;
+		return type_info->Cast<ArrowStructInfo>().GetChild(1).GetDuckType(true);
 	}
 	// Dictionaries can exist in arbitrarily nested schemas
 	// have to reconstruct the type
@@ -404,7 +403,14 @@ LogicalType ArrowType::GetDuckType(bool use_dictionary) const {
 
 unique_ptr<ArrowType> ArrowType::GetArrowLogicalType(ClientContext &context, ArrowSchema &schema) {
 	auto arrow_type = ArrowType::GetTypeFromSchema(context, schema);
+	if (arrow_type->RunEndEncoded() &&
+	    arrow_type->GetTypeInfo<ArrowStructInfo>().GetChild(0).GetPhysicalType() != ArrowArrayPhysicalType::DEFAULT) {
+		throw InvalidInputException("Arrow run ends cannot be dictionary or run-end encoded");
+	}
 	if (schema.dictionary) {
+		if (arrow_type->RunEndEncoded()) {
+			throw InvalidInputException("Arrow dictionary indices cannot be run-end encoded");
+		}
 		auto dictionary = GetArrowLogicalType(context, *schema.dictionary);
 		arrow_type->SetDictionary(std::move(dictionary));
 	}
