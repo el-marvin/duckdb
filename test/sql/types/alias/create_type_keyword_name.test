@@ -1,0 +1,289 @@
+# name: test/sql/types/alias/create_type_keyword_name.test
+# description: CREATE TYPE accepts every bare name that DROP TYPE and a type use accept
+# group: [alias]
+
+# semi, anti, verbose, left, by, is and unpack are type_name keywords: DROP TYPE and a cast take them bare
+
+statement ok
+CREATE TYPE semi AS INTEGER
+
+query I
+SELECT 41::semi + 1
+----
+42
+
+query I
+SELECT CAST('7' AS semi)
+----
+7
+
+query II
+SELECT schema_name, logical_type FROM duckdb_types() WHERE type_name = 'semi'
+----
+main	INTEGER
+
+statement ok
+CREATE TABLE t (c semi, l semi[], s STRUCT(a semi))
+
+statement ok
+INSERT INTO t VALUES (1, [2, 3], {'a': 4})
+
+query III
+SELECT c, l, s FROM t
+----
+1	[2, 3]	{'a': 4}
+
+statement ok
+DROP TABLE t
+
+statement ok
+COMMENT ON TYPE "semi" IS 'quoted semi'
+
+statement ok
+COMMENT ON TYPE main.semi IS 'qualified semi'
+
+query I
+SELECT comment FROM duckdb_types() WHERE type_name = 'semi'
+----
+qualified semi
+
+statement error
+CREATE TYPE semi AS VARCHAR
+----
+Catalog Error: Type with name "semi" already exists
+
+statement ok
+CREATE TYPE IF NOT EXISTS semi AS VARCHAR
+
+query I
+SELECT logical_type FROM duckdb_types() WHERE type_name = 'semi'
+----
+INTEGER
+
+statement ok
+CREATE OR REPLACE TYPE semi AS VARCHAR
+
+query I
+SELECT logical_type FROM duckdb_types() WHERE type_name = 'semi'
+----
+VARCHAR
+
+statement ok
+DROP TYPE semi
+
+statement ok
+DROP TYPE IF EXISTS semi
+
+statement ok
+CREATE TYPE anti AS ENUM ('x', 'y')
+
+query II
+SELECT 'y'::anti, TRY_CAST('z' AS anti)
+----
+y	NULL
+
+statement ok
+CREATE TYPE verbose AS STRUCT(a INTEGER, b VARCHAR)
+
+query I
+SELECT {'a': 1, 'b': 'q'}::verbose
+----
+{'a': 1, 'b': q}
+
+statement ok
+CREATE TYPE left AS UNION(n INTEGER, s VARCHAR)
+
+query I
+SELECT union_tag(42::left)
+----
+n
+
+statement ok
+CREATE TEMP TYPE by AS BIGINT
+
+query II
+SELECT database_name, logical_type FROM duckdb_types() WHERE type_name = 'by'
+----
+temp	BIGINT
+
+statement ok
+CREATE TYPE is AS SMALLINT
+
+query I
+SELECT typeof(1::is)
+----
+SMALLINT
+
+statement ok
+CREATE TYPE unpack AS anti
+
+query I
+SELECT 'x'::unpack
+----
+x
+
+statement ok
+DROP TYPE unpack
+
+statement ok
+DROP TYPE anti
+
+statement ok
+DROP TYPE verbose
+
+statement ok
+DROP TYPE left
+
+statement ok
+DROP TYPE by
+
+statement ok
+DROP TYPE is
+
+query I
+SELECT count(*) FROM duckdb_types() WHERE type_name IN ('semi', 'anti', 'verbose', 'left', 'by', 'is', 'unpack')
+----
+0
+
+statement ok
+CREATE TYPE main.semi AS INTEGER
+
+query I
+SELECT 6::semi
+----
+6
+
+statement ok
+DROP TYPE semi
+
+foreach kw asof at authorization collation concurrently cross freeze full glob ilike inner isnull join like natural notnull outer overlaps positional right similar tablesample
+
+statement ok
+CREATE TYPE {kw} AS INTEGER
+
+query I
+SELECT 8::{kw}
+----
+8
+
+statement ok
+CREATE TABLE t (c {kw})
+
+statement ok
+DROP TABLE t
+
+statement ok
+DROP TYPE {kw}
+
+endloop
+
+# an unreserved keyword, and the type_name keywords that are also column_name keywords, worked bare before
+
+statement ok
+CREATE TYPE abort AS INTEGER
+
+statement ok
+CREATE TYPE try_cast AS INTEGER
+
+statement ok
+CREATE TYPE columns AS INTEGER
+
+query III
+SELECT 1::abort, 2::try_cast, 3::columns
+----
+1	2	3
+
+statement ok
+DROP TYPE abort
+
+statement ok
+DROP TYPE try_cast
+
+statement ok
+DROP TYPE columns
+
+# a column_name keyword that is not a type_name keyword is accepted bare by CREATE TYPE only
+
+statement ok
+CREATE TYPE coalesce AS INTEGER
+
+statement error
+SELECT 1::coalesce
+----
+Parser Error: syntax error
+
+statement error
+CREATE TABLE t (c coalesce)
+----
+Parser Error: syntax error
+
+statement error
+DROP TYPE coalesce
+----
+Parser Error: syntax error
+
+query I
+SELECT 1::"coalesce" + 1::main.coalesce
+----
+2
+
+statement ok
+DROP TYPE "coalesce"
+
+statement ok
+CREATE TYPE generated AS INTEGER
+
+statement error
+DROP TYPE generated
+----
+Parser Error: syntax error
+
+statement ok
+DROP TYPE main.generated
+
+# a reserved keyword needs quoting or a schema
+
+statement error
+CREATE TYPE select AS INTEGER
+----
+Parser Error: syntax error at or near "select"
+
+statement ok
+CREATE TYPE "select" AS INTEGER
+
+statement error
+DROP TYPE select
+----
+Parser Error: syntax error at or near "select"
+
+statement ok
+DROP TYPE "select"
+
+statement ok
+CREATE TYPE main.select AS INTEGER
+
+query I
+SELECT 5::main.select
+----
+5
+
+statement ok
+DROP TYPE main.select
+
+# a string literal name works in CREATE TYPE but not in DROP TYPE
+
+statement ok
+CREATE TYPE 'semi' AS INTEGER
+
+statement error
+DROP TYPE 'semi'
+----
+Parser Error: syntax error
+
+query I
+SELECT 3::semi
+----
+3
+
+statement ok
+DROP TYPE semi

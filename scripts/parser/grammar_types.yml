@@ -825,6 +825,7 @@ QualifiedName:
     - IdentifierOrStringLiteral
     - QualifiedTypeName
     - TypeNameAsQualifiedName
+    - CreateTypeName
     - SchemaReservedTypeName
     - CatalogReservedSchemaTypeName
     - QualifiedName

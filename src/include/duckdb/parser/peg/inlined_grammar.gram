@@ -1467,7 +1467,8 @@ ForEachClause <- ForEachRow / ForEachStatement
 ForEachRow <- 'FOR' 'EACH' 'ROW'
 ForEachStatement <- 'FOR' 'EACH' 'STATEMENT'
 
-CreateTypeStmt <- 'TYPE' IfNotExists? QualifiedName 'AS' CreateType
+CreateTypeStmt <- 'TYPE' IfNotExists? CreateTypeName 'AS' CreateType
+CreateTypeName <- QualifiedName / TypeNameAsQualifiedName
 CreateType <- EnumSelectType / EnumStringLiteralList / CreateTypeFromType
 CreateTypeFromType <- Type
 EnumSelectType <- 'ENUM' Parens(SelectStatementInternal)

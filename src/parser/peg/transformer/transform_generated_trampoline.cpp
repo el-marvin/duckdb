@@ -2097,7 +2097,7 @@ static const TransformChildPlan FRAME_CHILDREN_148[] = {{PEGRuleId::CreateType,
                                                          false,
                                                          {0, TRANSFORM_PATH_END, 0},
                                                          {0, TRANSFORM_PATH_END, 0}},
-                                                        {PEGRuleId::QualifiedName,
+                                                        {PEGRuleId::CreateTypeName,
                                                          TransformChildKind::REQUIRED,
                                                          2,
                                                          1,
@@ -7690,6 +7690,8 @@ static const TransformFrameOps GENERATED_FRAME_OPS[] = {
      &PEGTransformerFactory::FinalizeForEachStatementTrampoline, &FRAME_PLAN_12},
     {"CreateTypeStmt", &PEGTransformerFactory::InitializePlannedTrampoline,
      &PEGTransformerFactory::FinalizeCreateTypeStmtTrampoline, &FRAME_PLAN_161},
+    {"CreateTypeName", &PEGTransformerFactory::InitializePlannedChoiceTrampoline,
+     &PEGTransformerFactory::FinalizePassthroughTrampoline, &FRAME_PLAN_1},
     {"CreateType", &PEGTransformerFactory::InitializePlannedChoiceTrampoline,
      &PEGTransformerFactory::FinalizePassthroughTrampoline, &FRAME_PLAN_1},
     {"CreateTypeFromType", &PEGTransformerFactory::InitializePlannedTrampoline,
@@ -12625,9 +12627,9 @@ PEGTransformerFactory::FinalizeCreateTypeStmtTrampoline(PEGTransformer &transfor
 	if (process.child_results[0]) {
 		if_not_exists = process.TakeResult<bool>(0);
 	}
-	auto qualified_name = process.TakeResult<QualifiedName>(1);
+	auto create_type_name = process.TakeResult<QualifiedName>(1);
 	auto create_type = process.TakeResult<unique_ptr<CreateTypeInfo>>(2);
-	auto result = TransformCreateTypeStmt(transformer, if_not_exists, qualified_name, std::move(create_type));
+	auto result = TransformCreateTypeStmt(transformer, if_not_exists, create_type_name, std::move(create_type));
 	return transformer.MakeResult<unique_ptr<CreateStatement>>(std::move(result));
 }
 
