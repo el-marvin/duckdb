@@ -185,6 +185,7 @@ struct CTEBindState {
 	QueryNode &cte_def;
 	const vector<Identifier> &aliases;
 	idx_t active_binder_count;
+	bool is_trigger_body = false;
 	shared_ptr<Binder> query_binder;
 	BoundStatement query;
 	vector<Identifier> names;
