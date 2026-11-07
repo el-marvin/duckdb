@@ -13,6 +13,14 @@ unique_ptr<ParsedExpression> SelectBindState::BindAlias(idx_t index) {
 	return original_expressions[index]->Copy();
 }
 
+void SelectBindState::AddGroup(unique_ptr<ParsedExpression> group, ProjectionIndex group_index) {
+	group_map[*group] = group_index;
+	if (group->GetExpressionClass() != ExpressionClass::COLUMN_REF) {
+		has_compound_groups = true;
+	}
+	unbound_groups.push_back(std::move(group));
+}
+
 void SelectBindState::SetExpressionIsVolatile(idx_t index) {
 	// check if this expression has been referenced before
 	if (referenced_aliases.find(index) != referenced_aliases.end()) {

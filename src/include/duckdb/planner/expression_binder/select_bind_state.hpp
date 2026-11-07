@@ -35,6 +35,7 @@ struct SelectBindState {
 
 public:
 	unique_ptr<ParsedExpression> BindAlias(idx_t index);
+	void AddGroup(unique_ptr<ParsedExpression> group, ProjectionIndex group_index);
 
 	void SetExpressionIsVolatile(idx_t index);
 	void SetExpressionHasSubquery(idx_t index);

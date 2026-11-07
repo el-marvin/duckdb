@@ -590,12 +590,7 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 		GroupBinder::ReplaceSelectRef(statement, bind_state, ProjectionIndex(i), grp);
 
 		// set up a mapping of expression -> group index so we can map expressions in the select list / having to groups
-		auto grp_copy = grp->Copy();
-		bind_state.group_map[*grp_copy] = ProjectionIndex(i);
-		if (grp_copy->GetExpressionClass() != ExpressionClass::COLUMN_REF) {
-			bind_state.has_compound_groups = true;
-		}
-		bind_state.unbound_groups.push_back(std::move(grp_copy));
+		bind_state.AddGroup(grp->Copy(), ProjectionIndex(i));
 	}
 
 	if (statement.qualify) {
@@ -700,7 +695,7 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 	vector<Identifier> new_names;
 	vector<LogicalType> internal_sql_types;
 
-	for (idx_t i = 0; i < statement.select_list.size(); i++) {
+	auto bind_select_entry = [&](idx_t i) {
 		bool is_window = statement.select_list[i]->IsWindow();
 		idx_t unnest_count = result.unnests.SelectList().size();
 		LogicalType result_type;
@@ -737,7 +732,7 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 				result.select_list.push_back(std::move(struct_expr));
 			}
 			bind_state.AddExpandedColumn(struct_expressions.size());
-			continue;
+			return;
 		}
 
 		if (expr->IsVolatile()) {
@@ -774,6 +769,9 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 		if (can_group_by_all) {
 			select_binder.ResetBindings();
 		}
+	};
+	for (idx_t i = 0; i < result.column_count; i++) {
+		bind_select_entry(i);
 	}
 
 	// push the GROUP BY ALL expressions into the group set
@@ -810,12 +808,13 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 		}
 		group_by_all_groups.emplace_back(group_by_all_index, group_proj_idx);
 	}
-	// map the select expressions to their groups, so HAVING binds to them
-	// this happens after all select expressions are bound, since binding them again must not resolve to a group
+	// map the select expressions to their groups, so HAVING and the entries past column_count bind to them
+	// this happens after the original select entries are bound, since binding them again must not resolve to a group
 	for (auto &entry : group_by_all_groups) {
-		auto group_copy = bind_state.original_expressions[entry.first]->Copy();
-		bind_state.group_map[*group_copy] = entry.second;
-		bind_state.unbound_groups.push_back(std::move(group_copy));
+		bind_state.AddGroup(bind_state.original_expressions[entry.first]->Copy(), entry.second);
+	}
+	for (idx_t i = result.column_count; i < statement.select_list.size(); i++) {
+		bind_select_entry(i);
 	}
 
 	// bind the HAVING clause, if any, after the SELECT list and its groups
