@@ -1,4 +1,5 @@
 #include "duckdb/function/window/window_executor.hpp"
+#include "duckdb/common/bit_utils.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/interpolate.hpp"
@@ -1325,121 +1326,354 @@ static double FillSlopeFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_vali
 	return num / den;
 }
 
-typedef double (*fill_slope_t)(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid);
+//	Integer backed values and orderings are handled as their distance from the minimum of their type,
+//	which fits a uhugeint_t for every integer type, so no difference of two of them overflows.
+template <typename T>
+static uhugeint_t FillOffset(T value) {
+	return uhugeint_t(0, static_cast<uint64_t>(value) - static_cast<uint64_t>(NumericLimits<T>::Minimum()));
+}
 
-static fill_slope_t GetFillSlopeFunction(const LogicalType &type) {
-	switch (type.InternalType()) {
+template <>
+uhugeint_t FillOffset(hugeint_t value) {
+	return uhugeint_t(static_cast<uint64_t>(value.upper) ^ (uint64_t(1) << 63), value.lower);
+}
+
+template <>
+uhugeint_t FillOffset(uhugeint_t value) {
+	return value;
+}
+
+template <typename T>
+static bool TryFillValue(const uhugeint_t &offset, T &result) {
+	if (offset.upper != 0 || offset.lower > FillOffset(NumericLimits<T>::Maximum()).lower) {
+		return false;
+	}
+	result = static_cast<T>(offset.lower + static_cast<uint64_t>(NumericLimits<T>::Minimum()));
+	return true;
+}
+
+template <>
+bool TryFillValue(const uhugeint_t &offset, hugeint_t &result) {
+	result = hugeint_t(static_cast<int64_t>(offset.upper ^ (uint64_t(1) << 63)), offset.lower);
+	return true;
+}
+
+template <>
+bool TryFillValue(const uhugeint_t &offset, uhugeint_t &result) {
+	result = offset;
+	return true;
+}
+
+struct FillDifference {
+	uhugeint_t magnitude;
+	bool negative;
+};
+
+static FillDifference FillSubtract(const uhugeint_t &lhs, const uhugeint_t &rhs) {
+	if (lhs.upper > rhs.upper || (lhs.upper == rhs.upper && lhs.lower >= rhs.lower)) {
+		return {uhugeint_t(lhs.upper - rhs.upper - (lhs.lower < rhs.lower), lhs.lower - rhs.lower), false};
+	}
+	return {uhugeint_t(rhs.upper - lhs.upper - (rhs.lower < lhs.lower), rhs.lower - lhs.lower), true};
+}
+
+//! The position (x - x0) / (x1 - x0) of a row: a double slope for floating point values, and for integer values
+//! exactly numerator * 2^exponent / denominator, the exponent nonzero only for floating point orderings.
+struct FillPosition {
+	double slope = 0;
+	bool negative = false;
+	uhugeint_t numerator {0, 0};
+	uhugeint_t denominator {0, 1};
+	int64_t exponent = 0;
+};
+
+typedef FillPosition (*fill_position_t)(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid);
+
+template <typename T>
+static FillPosition FillSlopePositionFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid) {
+	FillPosition position;
+	position.slope = FillSlopeFunc<T>(cursor, row_idx, prev_valid, next_valid);
+	return position;
+}
+
+template <typename T>
+static FillPosition FillPositionFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid) {
+	FillPosition position;
+	const auto x0 = FillOffset(cursor.GetCell<T>(0, prev_valid));
+	const auto num = FillSubtract(FillOffset(cursor.GetCell<T>(0, row_idx)), x0);
+	const auto den = FillSubtract(FillOffset(cursor.GetCell<T>(0, next_valid)), x0);
+	if (den.magnitude.upper == 0 && den.magnitude.lower == 0) {
+		// Duplicate X values, so pick the first.
+		return position;
+	}
+	position.negative = num.negative != den.negative;
+	position.numerator = num.magnitude;
+	position.denominator = den.magnitude;
+	return position;
+}
+
+template <typename T>
+static FillPosition FillFloatingPositionFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid) {
+	FillPosition position;
+	position.slope = FillSlopeFunc<T>(cursor, row_idx, prev_valid, next_valid);
+	position.negative = std::signbit(position.slope);
+	if (!std::isfinite(position.slope)) {
+		//	The double position overflowed, so only equal endpoints still give an exact value
+		position.numerator = 1;
+		position.exponent = NumericLimits<int64_t>::Maximum();
+		return position;
+	}
+	int exponent;
+	const auto mantissa = std::frexp(std::abs(position.slope), &exponent);
+	const int32_t mantissa_bits = std::numeric_limits<double>::digits;
+	position.numerator = static_cast<uint64_t>(std::ldexp(mantissa, mantissa_bits));
+	position.exponent = exponent - mantissa_bits;
+	return position;
+}
+
+static fill_position_t GetFillPositionFunction(const LogicalType &order_type, const LogicalType &value_type) {
+	const auto floating_values =
+	    value_type.InternalType() == PhysicalType::FLOAT || value_type.InternalType() == PhysicalType::DOUBLE;
+	switch (order_type.InternalType()) {
 	case PhysicalType::UINT8:
-		return FillSlopeFunc<uint8_t>;
+		return floating_values ? FillSlopePositionFunc<uint8_t> : FillPositionFunc<uint8_t>;
 	case PhysicalType::UINT16:
-		return FillSlopeFunc<uint16_t>;
+		return floating_values ? FillSlopePositionFunc<uint16_t> : FillPositionFunc<uint16_t>;
 	case PhysicalType::UINT32:
-		return FillSlopeFunc<uint32_t>;
+		return floating_values ? FillSlopePositionFunc<uint32_t> : FillPositionFunc<uint32_t>;
 	case PhysicalType::UINT64:
-		return FillSlopeFunc<uint64_t>;
+		return floating_values ? FillSlopePositionFunc<uint64_t> : FillPositionFunc<uint64_t>;
 	case PhysicalType::UINT128:
-		return FillSlopeFunc<uhugeint_t>;
+		return floating_values ? FillSlopePositionFunc<uhugeint_t> : FillPositionFunc<uhugeint_t>;
 	case PhysicalType::INT8:
-		return FillSlopeFunc<int8_t>;
+		return floating_values ? FillSlopePositionFunc<int8_t> : FillPositionFunc<int8_t>;
 	case PhysicalType::INT16:
-		return FillSlopeFunc<int16_t>;
+		return floating_values ? FillSlopePositionFunc<int16_t> : FillPositionFunc<int16_t>;
 	case PhysicalType::INT32:
-		return FillSlopeFunc<int32_t>;
+		return floating_values ? FillSlopePositionFunc<int32_t> : FillPositionFunc<int32_t>;
 	case PhysicalType::INT64:
-		return FillSlopeFunc<int64_t>;
+		return floating_values ? FillSlopePositionFunc<int64_t> : FillPositionFunc<int64_t>;
 	case PhysicalType::INT128:
-		return FillSlopeFunc<hugeint_t>;
+		return floating_values ? FillSlopePositionFunc<hugeint_t> : FillPositionFunc<hugeint_t>;
 	case PhysicalType::FLOAT:
-		return FillSlopeFunc<float>;
+		return floating_values ? FillSlopePositionFunc<float> : FillFloatingPositionFunc<float>;
 	case PhysicalType::DOUBLE:
-		return FillSlopeFunc<double>;
+		return floating_values ? FillSlopePositionFunc<double> : FillFloatingPositionFunc<double>;
 	default:
 		throw InternalException("Unsupported FILL slope type.");
 	}
 }
 
-struct TryExtrapolateOperator {
-	template <typename T>
-	static bool Operation(const T &lo, const double d, const T &hi, T &result) {
-		if (lo > hi) {
-			//	Swap the endpoints to keep the offset positive.
-			//	The slope in the exchanged frame is (1 - d), not (-d):
-			//	lo + d*(hi - lo) == hi + (1 - d)*(lo - hi)
-			return Operation<T>(hi, 1 - d, lo, result);
-		}
-		const auto delta = LossyNumericCast<double>(hi) - LossyNumericCast<double>(lo);
-		T offset;
-		if (d < 0) {
-			if (!TryCast::Operation(delta * (-d), offset)) {
-				return false;
-			}
-			return TrySubtractOperator::Operation(lo, offset, result);
-			;
-		}
+//! A 256 bit unsigned integer, wide enough for the product of two uhugeint_t values
+struct FillWide {
+	uhugeint_t upper;
+	uhugeint_t lower;
 
-		if (!TryCast::Operation(delta * d, offset)) {
-			return false;
-		}
-		return TryAddOperator::Operation(lo, offset, result);
+	bool operator==(const FillWide &rhs) const {
+		return upper == rhs.upper && lower == rhs.lower;
+	}
+	bool operator!=(const FillWide &rhs) const {
+		return !(*this == rhs);
 	}
 };
 
-template <>
-bool TryExtrapolateOperator::Operation(const double &lo, const double d, const double &hi, double &result) {
-	result = InterpolateOperator::Operation<double>(lo, d, hi);
-	return true;
+static FillWide FillMultiply(const uhugeint_t &lhs, const uhugeint_t &rhs) {
+	if (lhs.upper == 0 && rhs.upper == 0) {
+		return {0, uhugeint_t(lhs.lower) * uhugeint_t(rhs.lower)};
+	}
+	const auto lower_lower = uhugeint_t(lhs.lower) * uhugeint_t(rhs.lower);
+	const auto lower_upper = uhugeint_t(lhs.lower) * uhugeint_t(rhs.upper);
+	const auto upper_lower = uhugeint_t(lhs.upper) * uhugeint_t(rhs.lower);
+	const auto upper_upper = uhugeint_t(lhs.upper) * uhugeint_t(rhs.upper);
+	const auto middle = uhugeint_t(lower_lower.upper) + uhugeint_t(lower_upper.lower) + uhugeint_t(upper_lower.lower);
+	FillWide result;
+	result.lower = uhugeint_t(middle.lower, lower_lower.lower);
+	result.upper =
+	    upper_upper + uhugeint_t(lower_upper.upper) + uhugeint_t(upper_lower.upper) + uhugeint_t(middle.upper);
+	return result;
 }
 
-template <>
-bool TryExtrapolateOperator::Operation(const float &lo, const double d, const float &hi, float &result) {
-	result = InterpolateOperator::Operation<float>(lo, d, hi);
-	return true;
+static FillWide FillShiftLeft(const FillWide &value, idx_t shift) {
+	if (shift >= 256) {
+		return {0, 0};
+	}
+	if (shift >= 128) {
+		return {value.lower << (shift - 128), 0};
+	}
+	return {(value.upper << shift) | (value.lower >> (128 - shift)), value.lower << shift};
 }
 
-template <>
-bool TryExtrapolateOperator::Operation(const hugeint_t &lo, const double d, const hugeint_t &hi, hugeint_t &result) {
-	double temp;
-	return Operation(Hugeint::Cast<double>(lo), d, Hugeint::Cast<double>(hi), temp) &&
-	       Hugeint::TryConvert(temp, result);
+static FillWide FillShiftRight(const FillWide &value, idx_t shift) {
+	if (shift >= 256) {
+		return {0, 0};
+	}
+	if (shift >= 128) {
+		return {0, value.upper >> (shift - 128)};
+	}
+	return {value.upper >> shift, (value.lower >> shift) | (value.upper << (128 - shift))};
 }
 
-template <>
-bool TryExtrapolateOperator::Operation(const uhugeint_t &lo, const double d, const uhugeint_t &hi, uhugeint_t &result) {
-	double temp;
-	return Operation(Uhugeint::Cast<double>(lo), d, Uhugeint::Cast<double>(hi), temp) &&
-	       Uhugeint::TryConvert(temp, result);
-}
+enum class FillRemainder : uint8_t { BELOW_HALF, HALF, ABOVE_HALF };
 
-typedef void (*fill_interpolate_t)(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi, double slope);
+struct FillQuotient {
+	uhugeint_t magnitude;
+	FillRemainder remainder;
+};
 
 template <typename T>
-static void FillInterpolateFunc(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi, double slope) {
+static FillRemainder FillCompareHalf(const T &remainder, const T &divisor) {
+	const T rest = divisor - remainder;
+	if (remainder < rest) {
+		return FillRemainder::BELOW_HALF;
+	}
+	return remainder == rest ? FillRemainder::HALF : FillRemainder::ABOVE_HALF;
+}
+
+//! (upper * 2^64 + lower) / divisor for upper < divisor, by 32 bit digits (Hacker's Delight, divlu)
+static uint64_t FillDivideDigit(uint64_t upper, uint64_t lower, uint64_t divisor, uint64_t &remainder) {
+	D_ASSERT(upper < divisor);
+	const uint64_t base = uint64_t(1) << 32;
+	const auto shift = CountZeros<uint64_t>::Leading(divisor);
+	divisor <<= shift;
+	const auto divisor_upper = divisor >> 32;
+	const auto divisor_lower = divisor & (base - 1);
+	const auto numerator = shift == 0 ? upper : (upper << shift) | (lower >> (64 - shift));
+	const auto shifted_lower = lower << shift;
+	const auto digit_upper = shifted_lower >> 32;
+	const auto digit_lower = shifted_lower & (base - 1);
+
+	auto quotient_upper = numerator / divisor_upper;
+	auto rest = numerator - quotient_upper * divisor_upper;
+	while (quotient_upper >= base || quotient_upper * divisor_lower > base * rest + digit_upper) {
+		quotient_upper -= 1;
+		rest += divisor_upper;
+		if (rest >= base) {
+			break;
+		}
+	}
+	const auto partial = numerator * base + digit_upper - quotient_upper * divisor;
+	auto quotient_lower = partial / divisor_upper;
+	rest = partial - quotient_lower * divisor_upper;
+	while (quotient_lower >= base || quotient_lower * divisor_lower > base * rest + digit_lower) {
+		quotient_lower -= 1;
+		rest += divisor_upper;
+		if (rest >= base) {
+			break;
+		}
+	}
+	remainder = (partial * base + digit_lower - quotient_lower * divisor) >> shift;
+	return quotient_upper * base + quotient_lower;
+}
+
+static bool FillDivide(const FillWide &dividend, const uhugeint_t &divisor, FillQuotient &result) {
+	if (dividend.upper >= divisor) {
+		return false;
+	}
+	uhugeint_t remainder;
+	if (divisor.upper == 0) {
+		uint64_t digit_remainder = dividend.upper.lower;
+		const auto quotient_upper =
+		    FillDivideDigit(digit_remainder, dividend.lower.upper, divisor.lower, digit_remainder);
+		const auto quotient_lower =
+		    FillDivideDigit(digit_remainder, dividend.lower.lower, divisor.lower, digit_remainder);
+		result.magnitude = uhugeint_t(quotient_upper, quotient_lower);
+		remainder = digit_remainder;
+	} else {
+		remainder = dividend.upper;
+		result.magnitude = 0;
+		for (idx_t bit = 128; bit > 0; bit -= 1) {
+			const auto carry = (remainder.upper >> 63) != 0;
+			remainder = (remainder << 1) | ((dividend.lower >> (bit - 1)) & 1);
+			result.magnitude = result.magnitude << 1;
+			if (carry || remainder >= divisor) {
+				remainder = remainder - divisor;
+				result.magnitude = result.magnitude | 1;
+			}
+		}
+	}
+	result.remainder = FillCompareHalf(remainder, divisor);
+	return true;
+}
+
+static bool FillDividePowerOfTwo(const FillWide &dividend, idx_t shift, FillQuotient &result) {
+	D_ASSERT(shift > 0);
+	const auto quotient = FillShiftRight(dividend, shift);
+	if (quotient.upper != 0) {
+		return false;
+	}
+	result.magnitude = quotient.lower;
+	const auto half_bit = shift - 1;
+	if (half_bit >= 256 || (FillShiftRight(dividend, half_bit).lower & 1) == 0) {
+		result.remainder = FillRemainder::BELOW_HALF;
+	} else if (FillShiftLeft(dividend, 256 - half_bit) == FillWide {0, 0}) {
+		result.remainder = FillRemainder::HALF;
+	} else {
+		result.remainder = FillRemainder::ABOVE_HALF;
+	}
+	return true;
+}
+
+//! |delta| * position, which fails when the quotient does not fit a uhugeint_t
+static bool FillScale(const uhugeint_t &delta, const FillPosition &position, FillQuotient &result) {
+	if (position.exponent == 0 && delta.upper == 0 && position.numerator.upper == 0 &&
+	    position.denominator.upper == 0 &&
+	    (position.numerator.lower == 0 ||
+	     delta.lower <= NumericLimits<uint64_t>::Maximum() / position.numerator.lower)) {
+		const auto product = delta.lower * position.numerator.lower;
+		const auto divisor = position.denominator.lower;
+		result.magnitude = uhugeint_t(0, product / divisor);
+		result.remainder = FillCompareHalf(product % divisor, divisor);
+		return true;
+	}
+	auto product = FillMultiply(delta, position.numerator);
+	if (position.exponent < 0) {
+		D_ASSERT(position.denominator == 1);
+		return FillDividePowerOfTwo(product, static_cast<idx_t>(-position.exponent), result);
+	}
+	if (position.exponent > 0) {
+		const auto shift = static_cast<idx_t>(position.exponent);
+		const auto shifted = FillShiftLeft(product, shift);
+		if (FillShiftRight(shifted, shift) != product) {
+			return false;
+		}
+		product = shifted;
+	}
+	return FillDivide(product, position.denominator, result);
+}
+
+typedef void (*fill_interpolate_t)(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi,
+                                   const FillPosition &position);
+
+//	Integer backed values are computed exactly and rounded once to the nearest value, ties to even,
+//	which is how a DOUBLE casts to an integer; a result outside the type stays NULL.
+template <typename T>
+static void FillInterpolateFunc(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi,
+                                const FillPosition &position) {
+	auto value = FillOffset(cursor.GetCell<T>(0, lo));
+	const auto delta = FillSubtract(FillOffset(cursor.GetCell<T>(0, hi)), value);
+	FillQuotient offset;
+	if (!FillScale(delta.magnitude, position, offset)) {
+		return;
+	}
+	const auto negative = delta.negative != position.negative;
+	auto valid = negative ? Uhugeint::TrySubtractInPlace(value, offset.magnitude)
+	                      : Uhugeint::TryAddInPlace(value, offset.magnitude);
+	const auto odd = (value.lower & 1) != 0;
+	if (valid && (offset.remainder == FillRemainder::ABOVE_HALF || (offset.remainder == FillRemainder::HALF && odd))) {
+		valid = negative ? Uhugeint::TrySubtractInPlace(value, 1) : Uhugeint::TryAddInPlace(value, 1);
+	}
+	auto data = FlatVector::GetDataMutable<T>(result);
+	if (valid && TryFillValue(value, data[i])) {
+		FlatVector::SetNull(result, i, false);
+	}
+}
+
+template <typename T>
+static void FillInterpolateFloatingFunc(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi,
+                                        const FillPosition &position) {
 	const auto y0 = cursor.GetCell<T>(0, lo);
 	const auto y1 = cursor.GetCell<T>(0, hi);
-	auto data = FlatVector::GetDataMutable<T>(result);
-	if (slope < 0 || slope > 1) {
-		if (TryExtrapolateOperator::Operation(y0, slope, y1, data[i])) {
-			FlatVector::SetNull(result, i, false);
-		}
-		return;
-	}
-
+	FlatVector::GetDataMutable<T>(result)[i] = InterpolateOperator::Operation<T>(y0, position.slope, y1);
 	FlatVector::SetNull(result, i, false);
-	if constexpr (std::is_integral<T>::value) {
-		//	The interpolated value lies between the two values, but the double result can round past them
-		const auto lo = MinValue(y0, y1);
-		const auto hi = MaxValue(y0, y1);
-		const auto interpolated = static_cast<double>(y0) + (static_cast<double>(y1) - static_cast<double>(y0)) * slope;
-		if (interpolated <= static_cast<double>(lo)) {
-			data[i] = lo;
-		} else if (interpolated >= static_cast<double>(hi)) {
-			data[i] = hi;
-		} else {
-			data[i] = static_cast<T>(interpolated);
-		}
-		return;
-	}
-	data[i] = InterpolateOperator::Operation<T>(y0, slope, y1);
 }
 
 static fill_interpolate_t GetFillInterpolateFunction(const LogicalType &type) {
@@ -1465,9 +1699,9 @@ static fill_interpolate_t GetFillInterpolateFunction(const LogicalType &type) {
 	case PhysicalType::INT128:
 		return FillInterpolateFunc<hugeint_t>;
 	case PhysicalType::FLOAT:
-		return FillInterpolateFunc<float>;
+		return FillInterpolateFloatingFunc<float>;
 	case PhysicalType::DOUBLE:
-		return FillInterpolateFunc<double>;
+		return FillInterpolateFloatingFunc<double>;
 	default:
 		throw InternalException("Unsupported FILL interpolation type.");
 	}
@@ -1784,8 +2018,8 @@ void WindowFillExecutor::GetData(ExecutionContext &context, DataChunk &eval_chun
 	const auto &fill_type = wexpr.GetChildren()[0]->GetReturnType();
 	auto interpolate_func = GetFillInterpolateFunction(fill_type);
 	auto validate_func = GetFillValidateFunction(fill_type);
-	auto interpolate = [&](idx_t i, idx_t lo, idx_t hi, double slope) {
-		interpolate_func(result, i, cursor, lo, hi, slope);
+	auto interpolate = [&](idx_t i, idx_t lo, idx_t hi, const FillPosition &position) {
+		interpolate_func(result, i, cursor, lo, hi, position);
 		if (validate_func && FlatVector::Validity(result).RowIsValid(i) && !validate_func(result, i, fill_type)) {
 			FlatVector::SetNull(result, i, true);
 		}
@@ -1796,7 +2030,7 @@ void WindowFillExecutor::GetData(ExecutionContext &context, DataChunk &eval_chun
 	if (gfstate.value_tree) {
 		//	Roughly what we need to do is find the previous and next non-null values
 		//	with non-null ordering values. This is essentially LEAD/LAG(IGNORE NULLS)
-		auto slope_func = GetFillSlopeFunction(wexpr.ArgOrders()[0].expression->GetReturnType());
+		auto position_func = GetFillPositionFunction(wexpr.ArgOrders()[0].expression->GetReturnType(), fill_type);
 		auto order_value_func = GetFillValueFunction(wexpr.ArgOrders()[0].expression->GetReturnType());
 		auto &frames = lfstate.frames;
 		frames.resize(1);
@@ -1899,8 +2133,8 @@ void WindowFillExecutor::GetData(ExecutionContext &context, DataChunk &eval_chun
 
 			//	Two values, so interpolate
 			//	y = y0 + (y1 - y0) / (x1 - x0) * (x - x0)
-			const auto slope = slope_func(order_cursor, row_idx, prev_valid, next_valid);
-			interpolate(i, prev_valid, next_valid, slope);
+			const auto position = position_func(order_cursor, row_idx, prev_valid, next_valid);
+			interpolate(i, prev_valid, next_valid, position);
 		}
 		return;
 	}
@@ -1908,7 +2142,7 @@ void WindowFillExecutor::GetData(ExecutionContext &context, DataChunk &eval_chun
 	auto valid_begin = FlatVector::GetData<const idx_t>(bounds.data[VALID_BEGIN]);
 	auto valid_end = FlatVector::GetData<const idx_t>(bounds.data[VALID_END]);
 	idx_t prev_partition = DConstants::INVALID_INDEX;
-	auto slope_func = GetFillSlopeFunction(wexpr.OrderBy()[0].expression->GetReturnType());
+	auto position_func = GetFillPositionFunction(wexpr.OrderBy()[0].expression->GetReturnType(), fill_type);
 	auto order_value_func = GetFillValueFunction(wexpr.OrderBy()[0].expression->GetReturnType());
 
 	for (idx_t i = 0; i < count; ++i, ++row_idx) {
@@ -2007,8 +2241,8 @@ void WindowFillExecutor::GetData(ExecutionContext &context, DataChunk &eval_chun
 
 		//	Two values, so interpolate
 		//	y = y0 + (y1 - y0) / (x1 - x0) * (x - x0)
-		const auto slope = slope_func(order_cursor, row_idx, prev_valid, next_valid);
-		interpolate(i, prev_valid, next_valid, slope);
+		const auto position = position_func(order_cursor, row_idx, prev_valid, next_valid);
+		interpolate(i, prev_valid, next_valid, position);
 	}
 }
 
