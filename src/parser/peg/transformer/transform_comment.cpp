@@ -10,10 +10,52 @@ PEGTransformerFactory::TransformCommentStringLiteralIdentifier(PEGTransformer &t
 	return {string_literal_identifier.GetIdentifierName()};
 }
 
-unique_ptr<SQLStatement> PEGTransformerFactory::TransformCommentStatement(PEGTransformer &transformer,
-                                                                          const CatalogType &comment_on_type,
-                                                                          const vector<string> &comment_target,
-                                                                          const Value &comment_value) {
+vector<string> PEGTransformerFactory::TransformCommentFunctionName(PEGTransformer &transformer,
+                                                                   const Identifier &function_name) {
+	return {function_name.GetIdentifierName()};
+}
+
+vector<string> PEGTransformerFactory::TransformCommentTableFunctionName(PEGTransformer &transformer,
+                                                                        const Identifier &table_function_name) {
+	return {table_function_name.GetIdentifierName()};
+}
+
+vector<string> PEGTransformerFactory::TransformCommentTypeName(PEGTransformer &transformer,
+                                                               const Identifier &type_name) {
+	return {type_name.GetIdentifierName()};
+}
+
+pair<CatalogType, vector<string>>
+PEGTransformerFactory::TransformCommentOnTableMacroEntry(PEGTransformer &transformer,
+                                                         const CatalogType &comment_macro_table,
+                                                         const vector<string> &comment_table_macro_target) {
+	return make_pair(comment_macro_table, comment_table_macro_target);
+}
+
+pair<CatalogType, vector<string>>
+PEGTransformerFactory::TransformCommentOnFunctionEntry(PEGTransformer &transformer,
+                                                       const CatalogType &comment_on_function_type,
+                                                       const vector<string> &comment_function_target) {
+	return make_pair(comment_on_function_type, comment_function_target);
+}
+
+pair<CatalogType, vector<string>>
+PEGTransformerFactory::TransformCommentOnTypeEntry(PEGTransformer &transformer, const CatalogType &comment_type,
+                                                   const vector<string> &comment_type_target) {
+	return make_pair(comment_type, comment_type_target);
+}
+
+pair<CatalogType, vector<string>> PEGTransformerFactory::TransformCommentOnObjectEntry(
+    PEGTransformer &transformer, const CatalogType &comment_on_object_type, const vector<string> &comment_target) {
+	return make_pair(comment_on_object_type, comment_target);
+}
+
+unique_ptr<SQLStatement>
+PEGTransformerFactory::TransformCommentStatement(PEGTransformer &transformer,
+                                                 const pair<CatalogType, vector<string>> &comment_on_entry,
+                                                 const Value &comment_value) {
+	auto comment_on_type = comment_on_entry.first;
+	auto &comment_target = comment_on_entry.second;
 	auto result = make_uniq<AlterStatement>();
 	unique_ptr<AlterInfo> info;
 

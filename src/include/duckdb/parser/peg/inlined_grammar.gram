@@ -1159,13 +1159,25 @@ CallStatement <- 'CALL' QualifiedTableFunction TableFunctionArguments
 CheckpointStatement <- CheckpointForce? 'CHECKPOINT' CatalogName?
 CheckpointForce <- 'FORCE'
 
-CommentStatement <- 'COMMENT' 'ON' CommentOnType CommentTarget 'IS' CommentValue
+CommentStatement <- 'COMMENT' 'ON' CommentOnEntry 'IS' CommentValue
+
+CommentOnEntry <- CommentOnTableMacroEntry / CommentOnFunctionEntry / CommentOnTypeEntry / CommentOnObjectEntry
+CommentOnTableMacroEntry <- CommentMacroTable CommentTableMacroTarget
+CommentOnFunctionEntry <- CommentOnFunctionType CommentFunctionTarget
+CommentOnTypeEntry <- CommentType CommentTypeTarget
+CommentOnObjectEntry <- CommentOnObjectType CommentTarget
 
 CommentTarget <- DottedIdentifier / CommentStringLiteralIdentifier
 CommentStringLiteralIdentifier <- StringLiteralIdentifier
+CommentFunctionTarget <- CommentTarget / CommentFunctionName
+CommentFunctionName <- FunctionName
+CommentTableMacroTarget <- CommentTarget / CommentTableFunctionName
+CommentTableFunctionName <- TableFunctionName
+CommentTypeTarget <- CommentTarget / CommentTypeName
+CommentTypeName <- TypeName
 
-CommentOnType <-    CommentTable / CommentSequence / CommentFunction / CommentMacroTable / CommentMacro /
-                    CommentView / CommentDatabase / CommentIndex / CommentSchema / CommentType / CommentColumn
+CommentOnFunctionType <- CommentFunction / CommentMacro
+CommentOnObjectType <- CommentTable / CommentSequence / CommentView / CommentDatabase / CommentIndex / CommentSchema / CommentColumn
 
 CommentTable <- 'TABLE'
 CommentSequence <- 'SEQUENCE'

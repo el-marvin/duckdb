@@ -176,6 +176,8 @@ DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.case_insensitive_
                                       case_insensitive_map_t<unique_ptr<ParsedExpression>>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.int64_t", int64_t);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.optional_idx", optional_idx);
+DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<CatalogType, vector<string>>",
+                                      pair<CatalogType, vector<string>>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<Identifier, unique_ptr<CommonTableExpressionInfo>>",
                                       pair<Identifier, unique_ptr<CommonTableExpressionInfo>>);
 DUCKDB_REGISTER_TRANSFORM_RESULT_TYPE("duckdb.transform_result.pair<Identifier, unique_ptr<ParsedExpression>>",
@@ -921,7 +923,21 @@ public:
 	static arena_ptr<TransformResultValue> FinalizeCommentStatementTrampoline(PEGTransformer &transformer,
 	                                                                          GeneratedTransformProcess &process);
 	static arena_ptr<TransformResultValue>
+	FinalizeCommentOnTableMacroEntryTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue> FinalizeCommentOnFunctionEntryTrampoline(PEGTransformer &transformer,
+	                                                                                GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue> FinalizeCommentOnTypeEntryTrampoline(PEGTransformer &transformer,
+	                                                                            GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue> FinalizeCommentOnObjectEntryTrampoline(PEGTransformer &transformer,
+	                                                                              GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue>
 	FinalizeCommentStringLiteralIdentifierTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue> FinalizeCommentFunctionNameTrampoline(PEGTransformer &transformer,
+	                                                                             GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue>
+	FinalizeCommentTableFunctionNameTrampoline(PEGTransformer &transformer, GeneratedTransformProcess &process);
+	static arena_ptr<TransformResultValue> FinalizeCommentTypeNameTrampoline(PEGTransformer &transformer,
+	                                                                         GeneratedTransformProcess &process);
 	static arena_ptr<TransformResultValue> FinalizeCommentTableTrampoline(PEGTransformer &transformer,
 	                                                                      GeneratedTransformProcess &process);
 	static arena_ptr<TransformResultValue> FinalizeCommentSequenceTrampoline(PEGTransformer &transformer,
@@ -2806,11 +2822,26 @@ public:
 	                                                             const optional<Identifier> &catalog_name);
 	static bool TransformCheckpointForce(PEGTransformer &transformer);
 	static unique_ptr<SQLStatement> TransformCommentStatement(PEGTransformer &transformer,
-	                                                          const CatalogType &comment_on_type,
-	                                                          const vector<string> &comment_target,
+	                                                          const pair<CatalogType, vector<string>> &comment_on_entry,
 	                                                          const Value &comment_value);
+	static pair<CatalogType, vector<string>>
+	TransformCommentOnTableMacroEntry(PEGTransformer &transformer, const CatalogType &comment_macro_table,
+	                                  const vector<string> &comment_table_macro_target);
+	static pair<CatalogType, vector<string>>
+	TransformCommentOnFunctionEntry(PEGTransformer &transformer, const CatalogType &comment_on_function_type,
+	                                const vector<string> &comment_function_target);
+	static pair<CatalogType, vector<string>> TransformCommentOnTypeEntry(PEGTransformer &transformer,
+	                                                                     const CatalogType &comment_type,
+	                                                                     const vector<string> &comment_type_target);
+	static pair<CatalogType, vector<string>> TransformCommentOnObjectEntry(PEGTransformer &transformer,
+	                                                                       const CatalogType &comment_on_object_type,
+	                                                                       const vector<string> &comment_target);
 	static vector<string> TransformCommentStringLiteralIdentifier(PEGTransformer &transformer,
 	                                                              const Identifier &string_literal_identifier);
+	static vector<string> TransformCommentFunctionName(PEGTransformer &transformer, const Identifier &function_name);
+	static vector<string> TransformCommentTableFunctionName(PEGTransformer &transformer,
+	                                                        const Identifier &table_function_name);
+	static vector<string> TransformCommentTypeName(PEGTransformer &transformer, const Identifier &type_name);
 	static CatalogType TransformCommentTable(PEGTransformer &transformer);
 	static CatalogType TransformCommentSequence(PEGTransformer &transformer);
 	static CatalogType TransformCommentFunction(PEGTransformer &transformer);
