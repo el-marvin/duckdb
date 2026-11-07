@@ -241,15 +241,17 @@ struct QuantileScalarOperation : public QuantileOperation {
 //! Buffers the sort key of each input row in the state's linked list - NULL inputs are skipped
 //! The quantile parameter is folded into the bind data by the bind, but stays part of the expression tree - only the
 //! leading input argument is consumed
+template <SortKeyEncoding ENCODING>
 static void QuantileSortKeyUpdate(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count,
                                   Vector &states, idx_t count) {
 	D_ASSERT(input_count >= 1);
 	Vector sort_keys(LogicalType::BLOB);
 	const OrderModifiers modifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
-	CreateSortKeyHelpers::CreateSortKeyWithValidity(inputs[0], sort_keys, modifiers, count);
+	CreateSortKeyHelpers::CreateSortKeyWithValidity(inputs[0], sort_keys, modifiers, count, ENCODING);
 	ListUpdateFunction<true>(&sort_keys, aggr_input_data, 1, states, count);
 }
 
+template <SortKeyEncoding ENCODING>
 struct QuantileScalarFallback : QuantileOperation {
 	//! The fallback buffers sort keys instead of the input values
 	static LogicalType GetElementType(AggregateInputData &) {
@@ -269,7 +271,8 @@ struct QuantileScalarFallback : QuantileOperation {
 		QuantileInterpolator<true> interp(bind_data.quantiles[0], state.linked_list.total_capacity, bind_data.desc);
 		auto interpolation_result = interp.InterpolateInternal<string_t>(flattened.Data());
 		CreateSortKeyHelpers::DecodeSortKey(interpolation_result, finalize_data.result, finalize_data.result_idx,
-		                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST));
+		                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST),
+		                                    ENCODING);
 	}
 };
 
@@ -361,6 +364,7 @@ struct QuantileListOperation : QuantileOperation {
 	}
 };
 
+template <SortKeyEncoding ENCODING>
 struct QuantileListFallback : QuantileOperation {
 	//! The fallback buffers sort keys instead of the input values
 	static LogicalType GetElementType(AggregateInputData &) {
@@ -392,7 +396,8 @@ struct QuantileListFallback : QuantileOperation {
 			interp.begin = lower;
 			auto interpolation_result = interp.InterpolateInternal<string_t>(flattened.Data());
 			CreateSortKeyHelpers::DecodeSortKey(interpolation_result, result, ridx + q,
-			                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST));
+			                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST),
+			                                    ENCODING);
 			lower = interp.FRN;
 		}
 		entry.length = bind_data.quantiles.size();
@@ -450,18 +455,27 @@ struct ScalarDiscreteQuantile {
 		return fun;
 	}
 
+	template <SortKeyEncoding ENCODING>
 	static AggregateFunction GetFallback(const LogicalType &type) {
 		using STATE = QuantileState<string_t>;
-		using OP = QuantileScalarFallback;
+		using OP = QuantileScalarFallback<ENCODING>;
 
 		AggregateFunction fun({type}, type, AggregateFunction::StateSize<STATE>,
 		                      AggregateFunction::StateInitialize<STATE, OP, AggregateDestructorType::LEGACY>,
-		                      QuantileSortKeyUpdate, ListCombineFunction<OP>,
+		                      QuantileSortKeyUpdate<ENCODING>, ListCombineFunction<OP>,
 		                      AggregateFunction::StateVoidFinalize<STATE, OP>, nullptr, nullptr,
 		                      AggregateFunction::StateDestroy<STATE, OP>);
 		fun.SetInitLocalStateFinalizeCallback(FlattenedQuantileValues<string_t>::Init);
-		fun.SetStructStateExport(QuantileStateLayout<STATE, StateListType<StateSortKey<StateInputType<0>>>>);
+		fun.SetStructStateExport(
+		    QuantileStateLayout<STATE, StateListType<StateSortKey<StateInputType<0>, OrderType::ASCENDING, ENCODING>>>);
 		return fun;
+	}
+
+	static AggregateFunction GetFallback(const LogicalType &type) {
+		if (CreateSortKeyHelpers::GetValueEncoding(type) == SortKeyEncoding::SORT_KEY_WITH_VALUE) {
+			return GetFallback<SortKeyEncoding::SORT_KEY_WITH_VALUE>(type);
+		}
+		return GetFallback<SortKeyEncoding::SORT_KEY>(type);
 	}
 };
 
@@ -481,18 +495,27 @@ struct ListDiscreteQuantile {
 		return fun;
 	}
 
+	template <SortKeyEncoding ENCODING>
 	static AggregateFunction GetFallback(const LogicalType &type) {
 		using STATE = QuantileState<string_t>;
-		using OP = QuantileListFallback;
+		using OP = QuantileListFallback<ENCODING>;
 
 		AggregateFunction fun({type}, LogicalType::LIST(type), AggregateFunction::StateSize<STATE>,
 		                      AggregateFunction::StateInitialize<STATE, OP, AggregateDestructorType::LEGACY>,
-		                      QuantileSortKeyUpdate, ListCombineFunction<OP>,
+		                      QuantileSortKeyUpdate<ENCODING>, ListCombineFunction<OP>,
 		                      AggregateFunction::StateFinalize<STATE, list_entry_t, OP>, nullptr, nullptr,
 		                      AggregateFunction::StateDestroy<STATE, OP>);
 		fun.SetInitLocalStateFinalizeCallback(FlattenedQuantileValues<string_t>::Init);
-		fun.SetStructStateExport(QuantileStateLayout<STATE, StateListType<StateSortKey<StateInputType<0>>>>);
+		fun.SetStructStateExport(
+		    QuantileStateLayout<STATE, StateListType<StateSortKey<StateInputType<0>, OrderType::ASCENDING, ENCODING>>>);
 		return fun;
+	}
+
+	static AggregateFunction GetFallback(const LogicalType &type) {
+		if (CreateSortKeyHelpers::GetValueEncoding(type) == SortKeyEncoding::SORT_KEY_WITH_VALUE) {
+			return GetFallback<SortKeyEncoding::SORT_KEY_WITH_VALUE>(type);
+		}
+		return GetFallback<SortKeyEncoding::SORT_KEY>(type);
 	}
 };
 

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/enums/sort_key_encoding.hpp"
 #include "duckdb/function/function_set.hpp"
 
 namespace duckdb {
@@ -63,6 +64,29 @@ struct CreateSortKeyHelpers {
 	                                      idx_t count);
 	static void CreateSortKeyKeepZeroSignWithValidity(const Vector &input, Vector &result,
 	                                                  const OrderModifiers &modifiers);
+	static void CreateSortKey(const Vector &input, idx_t count, OrderModifiers modifiers, Vector &result,
+	                          SortKeyEncoding encoding);
+	static void CreateSortKeyWithValidity(const Vector &input, Vector &result, const OrderModifiers &modifiers,
+	                                      idx_t count, SortKeyEncoding encoding);
+	static idx_t DecodeSortKey(string_t sort_key, Vector &result, idx_t result_idx, OrderModifiers modifiers,
+	                           SortKeyEncoding encoding);
+	//! The encoding for a state that orders or groups values of the type and returns one of them: SORT_KEY_WITH_VALUE
+	//! where the sort key loses the sign of -0.0 (FLOAT and DOUBLE, also nested), SORT_KEY where it decodes exactly.
+	static SortKeyEncoding GetValueEncoding(const LogicalType &type);
+};
+
+//! Hash, equality and order of SORT_KEY_WITH_VALUE keys by their sort key half, so values that compare equal share a
+//! map entry and the entry keeps the value it was created with.
+struct SortKeyWithValueHash {
+	std::size_t operator()(const string_t &key_with_value) const;
+};
+
+struct SortKeyWithValueEquality {
+	bool operator()(const string_t &left, const string_t &right) const;
+};
+
+struct SortKeyWithValueLess {
+	bool operator()(const string_t &left, const string_t &right) const;
 };
 
 //! We don't add this function to the catalog, for internal use only

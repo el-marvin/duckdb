@@ -9,12 +9,16 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/map.hpp"
+#include "duckdb/common/owning_string_map.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 
 namespace duckdb {
 
 struct AggregateSortKeyHelpers {
-	template <class STATE, class OP, OrderType ORDER_TYPE = OrderType::ASCENDING, bool IGNORE_NULLS = true>
+	template <class STATE, class OP, OrderType ORDER_TYPE = OrderType::ASCENDING, bool IGNORE_NULLS = true,
+	          SortKeyEncoding ENCODING = SortKeyEncoding::SORT_KEY>
 	static void UnaryUpdate(Vector inputs[], AggregateInputData &input_data, idx_t input_count, Vector &state_vector,
 	                        idx_t count) {
 		D_ASSERT(input_count == 1);
@@ -22,7 +26,7 @@ struct AggregateSortKeyHelpers {
 
 		Vector sort_key(LogicalType::BLOB);
 		auto modifiers = OrderModifiers(ORDER_TYPE, OrderByNullType::NULLS_LAST);
-		CreateSortKeyHelpers::CreateSortKey(input, modifiers, sort_key);
+		CreateSortKeyHelpers::CreateSortKey(input, input.size(), modifiers, sort_key, ENCODING);
 
 		optional<VectorValidityIterator> input_validity;
 		if (IGNORE_NULLS) {
@@ -50,5 +54,12 @@ struct AggregateSortKeyHelpers {
 		}
 	}
 };
+
+//! Maps over SORT_KEY_WITH_VALUE keys: values that compare equal share an entry, which keeps the first one inserted.
+template <class T>
+using SortKeyWithValueMap =
+    OwningStringMap<T, unordered_map<string_t, T, SortKeyWithValueHash, SortKeyWithValueEquality>>;
+template <class T>
+using OrderedSortKeyWithValueMap = OwningStringMap<T, map<string_t, T, SortKeyWithValueLess>>;
 
 } // namespace duckdb

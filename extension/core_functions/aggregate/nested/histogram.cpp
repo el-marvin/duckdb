@@ -10,6 +10,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/function/aggregate/sort_key_helpers.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
 #include "duckdb/optimizer/aggregate_rewrite.hpp"
@@ -199,6 +200,18 @@ AggregateFunction GetStringMapType(const LogicalType &type) {
 	}
 }
 
+template <bool IS_ORDERED>
+AggregateFunction GetSortKeyMapType(const LogicalType &type) {
+	if (CreateSortKeyHelpers::GetValueEncoding(type) == SortKeyEncoding::SORT_KEY) {
+		return GetStringMapType<HistogramGenericFunctor, IS_ORDERED>(type);
+	}
+	using OP = HistogramSortKeyFunctor<SortKeyEncoding::SORT_KEY_WITH_VALUE>;
+	if (IS_ORDERED) {
+		return GetMapTypeInternal<OP, string_t, StringMapType<OrderedSortKeyWithValueMap<idx_t>>>(type);
+	}
+	return GetMapTypeInternal<OP, string_t, StringMapType<SortKeyWithValueMap<idx_t>>>(type);
+}
+
 template <bool IS_ORDERED = true>
 AggregateFunction GetHistogramFunction(const LogicalType &type) {
 	switch (type.InternalType()) {
@@ -229,7 +242,7 @@ AggregateFunction GetHistogramFunction(const LogicalType &type) {
 		return GetStringMapType<HistogramStringFunctor, IS_ORDERED>(type);
 #endif
 	default:
-		return GetStringMapType<HistogramGenericFunctor, IS_ORDERED>(type);
+		return GetSortKeyMapType<IS_ORDERED>(type);
 	}
 }
 

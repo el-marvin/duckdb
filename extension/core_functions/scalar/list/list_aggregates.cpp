@@ -1,3 +1,4 @@
+#include "core_functions/aggregate/histogram_helpers.hpp"
 #include "core_functions/aggregate/nested_functions.hpp"
 #include "core_functions/scalar/list_functions.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -6,6 +7,7 @@
 #include "duckdb/common/smaller_binary.hpp"
 #include "duckdb/common/types/sql_value_map.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/aggregate/sort_key_helpers.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/function/scalar/nested_functions.hpp"
@@ -147,14 +149,6 @@ struct FinalizeStringValueFunctor {
 	template <class T>
 	static void HistogramFinalize(T value, Vector &result, idx_t offset) {
 		FlatVector::GetDataMutable<string_t>(result)[offset] = StringVector::AddStringOrBlob(result, value);
-	}
-};
-
-struct FinalizeGenericValueFunctor {
-	template <class T>
-	static void HistogramFinalize(T value, Vector &result, idx_t offset) {
-		CreateSortKeyHelpers::DecodeSortKey(value, result, offset,
-		                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST));
 	}
 };
 
@@ -421,9 +415,16 @@ void ListAggregatesFunction(DataChunk &args, ExpressionState &state, Vector &res
 			break;
 #endif
 		default:
-			FUNCTION_FUNCTOR::template ListExecuteFunction<FinalizeGenericValueFunctor, string_t,
-			                                               OwningStringMap<idx_t>>(result, state_vector.state_vector,
-			                                                                       count);
+			// the states were built by GetSortKeyMapType in histogram.cpp, which picks the map by the same encoding
+			if (CreateSortKeyHelpers::GetValueEncoding(key_type) == SortKeyEncoding::SORT_KEY) {
+				FUNCTION_FUNCTOR::template ListExecuteFunction<HistogramGenericFunctor, string_t,
+				                                               OwningStringMap<idx_t>>(
+				    result, state_vector.state_vector, count);
+			} else {
+				FUNCTION_FUNCTOR::template ListExecuteFunction<
+				    HistogramSortKeyFunctor<SortKeyEncoding::SORT_KEY_WITH_VALUE>, string_t,
+				    SortKeyWithValueMap<idx_t>>(result, state_vector.state_vector, count);
+			}
 			break;
 		}
 	}

@@ -183,6 +183,19 @@ struct ModeString {
 	}
 };
 
+//! The map of the fallback over sort keys. With SORT_KEY_WITH_VALUE, values that compare equal count together and
+//! the mode comes back as one of the inputs.
+template <SortKeyEncoding ENCODING>
+struct ModeSortKey {
+	static constexpr SortKeyEncoding encoding = ENCODING;
+	using MAP_TYPE = typename std::conditional<ENCODING == SortKeyEncoding::SORT_KEY_WITH_VALUE,
+	                                           SortKeyWithValueMap<ModeAttr>, OwningStringMap<ModeAttr>>::type;
+
+	static MAP_TYPE *CreateEmpty(ArenaAllocator &allocator) {
+		return new MAP_TYPE(allocator);
+	}
+};
+
 template <class KEY_TYPE, class TYPE_OP>
 struct ModeState {
 	using Counts = typename TYPE_OP::MAP_TYPE;
@@ -544,26 +557,34 @@ struct ModeFallbackFunction : BaseModeFunction<TYPE_OP> {
 		}
 		auto highest_frequency = state.Scan();
 		if (highest_frequency != state.frequency_map->end()) {
-			CreateSortKeyHelpers::DecodeSortKey(highest_frequency->first, finalize_data.result,
-			                                    finalize_data.result_idx,
-			                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST));
+			CreateSortKeyHelpers::DecodeSortKey(
+			    highest_frequency->first, finalize_data.result, finalize_data.result_idx,
+			    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST), TYPE_OP::encoding);
 		} else {
 			finalize_data.ReturnNull();
 		}
 	}
 };
 
+template <SortKeyEncoding ENCODING>
 AggregateFunction GetFallbackModeFunction(const LogicalType &type) {
-	using STATE = ModeState<string_t, ModeString>;
-	using OP = ModeFallbackFunction<ModeString>;
+	using STATE = ModeState<string_t, ModeSortKey<ENCODING>>;
+	using OP = ModeFallbackFunction<ModeSortKey<ENCODING>>;
 	AggregateFunction aggr({type}, type, AggregateFunction::StateSize<STATE>,
 	                       AggregateFunction::StateInitialize<STATE, OP, AggregateDestructorType::LEGACY>,
-	                       AggregateSortKeyHelpers::UnaryUpdate<STATE, OP>, AggregateFunction::StateCombine<STATE, OP>,
-	                       AggregateFunction::StateVoidFinalize<STATE, OP>, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                       AggregateFunction::NoClusterUpdate());
+	                       AggregateSortKeyHelpers::UnaryUpdate<STATE, OP, OrderType::ASCENDING, true, ENCODING>,
+	                       AggregateFunction::StateCombine<STATE, OP>, AggregateFunction::StateVoidFinalize<STATE, OP>,
+	                       FunctionNullHandling::DEFAULT_NULL_HANDLING, AggregateFunction::NoClusterUpdate());
 	aggr.SetStateDestructorCallback(AggregateFunction::StateDestroy<STATE, OP>);
 	aggr.SetIsHolistic(true);
 	return aggr;
+}
+
+AggregateFunction GetFallbackModeFunction(const LogicalType &type) {
+	if (CreateSortKeyHelpers::GetValueEncoding(type) == SortKeyEncoding::SORT_KEY_WITH_VALUE) {
+		return GetFallbackModeFunction<SortKeyEncoding::SORT_KEY_WITH_VALUE>(type);
+	}
+	return GetFallbackModeFunction<SortKeyEncoding::SORT_KEY>(type);
 }
 
 template <typename INPUT_TYPE, typename TYPE_OP = ModeStandard<INPUT_TYPE>>

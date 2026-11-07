@@ -1,0 +1,347 @@
+# name: test/sql/aggregate/aggregates/test_negative_zero_nested_values.test
+# description: quantile_disc, least, greatest, list_distinct and mode over nested types return their input with the sign of -0.0
+# group: [aggregates]
+
+statement ok
+SET threads=1;
+
+# -0.0 is spelled '-0.0'::DOUBLE: a bare -0.0 is DECIMAL negation, and a DECIMAL zero has no sign
+statement ok
+CREATE TABLE zeros AS SELECT '-0.0'::DOUBLE AS d, '-0.0'::FLOAT AS f;
+
+query I
+SELECT quantile_disc([d], 0.5)::VARCHAR FROM zeros;
+----
+[-0.0]
+
+query III
+SELECT least([d], [1.0])::VARCHAR, greatest([d], [-1.0])::VARCHAR, list_distinct([[d]])::VARCHAR FROM zeros;
+----
+[-0.0]	[-0.0]	[[-0.0]]
+
+# quantile_disc and median: a list, a struct field, two deep, FLOAT, a list of quantiles
+query IIIII
+SELECT quantile_disc({'a': d}, 0.5)::VARCHAR, quantile_disc([{'b': [d]}], 0.5)::VARCHAR, quantile_disc([f], 0.5)::VARCHAR,
+	quantile_disc([d], [0.25, 0.75])::VARCHAR, median([f])::VARCHAR
+FROM zeros;
+----
+{'a': -0.0}	[{'b': [-0.0]}]	[-0.0]	[[-0.0], [-0.0]]	[-0.0]
+
+# NULL elements beside the zero, NULL rows skipped
+query II
+SELECT quantile_disc(l, 0.5)::VARCHAR, quantile_disc(l, [0.0, 1.0])::VARCHAR
+FROM (VALUES (NULL), (['-0.0'::DOUBLE, NULL]), (NULL)) t(l);
+----
+[-0.0, NULL]	[[-0.0, NULL], [-0.0, NULL]]
+
+# inputs equal but for the sign of a zero order -0.0 first, so the position picks one of them whatever the input order
+query IIII
+SELECT quantile_disc(l, 0)::VARCHAR, quantile_disc(l, 1)::VARCHAR, quantile_disc(l, 0.5)::VARCHAR,
+	quantile_disc(l, [0, 1])::VARCHAR
+FROM (VALUES ([0.0]), (['-0.0'::DOUBLE]), ([0.0])) t(l);
+----
+[-0.0]	[0.0]	[0.0]	[[-0.0], [0.0]]
+
+query III
+SELECT quantile_disc(l, 0)::VARCHAR, quantile_disc(l, 1)::VARCHAR, quantile_disc(l, 0.5)::VARCHAR
+FROM (VALUES (['-0.0'::DOUBLE]), ([0.0]), (['-0.0'::DOUBLE])) t(l);
+----
+[-0.0]	[0.0]	[-0.0]
+
+# with DISTINCT, a grouping below the aggregate keeps the first of the equal inputs, and the quantile sees only that one
+query II
+SELECT quantile_disc(DISTINCT l, 0)::VARCHAR, quantile_disc(DISTINCT l2, 0)::VARCHAR
+FROM (VALUES ([0.0], ['-0.0'::DOUBLE]), (['-0.0'::DOUBLE], [0.0])) t(l, l2);
+----
+[0.0]	[-0.0]
+
+# descending order reverses the tie too
+query II
+SELECT percentile_disc(0) WITHIN GROUP (ORDER BY l DESC)::VARCHAR, percentile_disc(1) WITHIN GROUP (ORDER BY l DESC)::VARCHAR
+FROM (VALUES (['-0.0'::DOUBLE]), ([0.0])) t(l);
+----
+[0.0]	[-0.0]
+
+# the order is the sort order, where -0.0 and 0.0 compare equal and the next element decides
+query II
+SELECT quantile_disc(l, 0)::VARCHAR, quantile_disc(l, 1)::VARCHAR
+FROM (VALUES (['-0.0'::DOUBLE, 5.0]), ([0.0, 1.0])) t(l);
+----
+[0.0, 1.0]	[-0.0, 5.0]
+
+query II
+SELECT quantile_disc(s, 0)::VARCHAR, quantile_disc(s, 1)::VARCHAR
+FROM (VALUES ({'a': 0.0::FLOAT, 'b': 2}), ({'a': '-0.0'::FLOAT, 'b': 1})) t(s);
+----
+{'a': -0.0, 'b': 1}	{'a': 0.0, 'b': 2}
+
+# groups
+query II
+SELECT g, quantile_disc([v], 0.5)::VARCHAR FROM (VALUES (1, '-0.0'::DOUBLE), (2, 0.0), (2, '-0.0'::DOUBLE), (2, 0.0))
+	t(g, v)
+GROUP BY g ORDER BY g;
+----
+1	[-0.0]
+2	[0.0]
+
+# window forms, over the whole partition and over a sliding frame
+statement ok
+CREATE TABLE framed AS SELECT * FROM (VALUES (1, ['-0.0'::DOUBLE]), (2, [1.0]), (3, [0.0]), (4, ['-0.0'::DOUBLE])) t(k, l);
+
+query IIII
+SELECT k, quantile_disc(l, 0) OVER ()::VARCHAR,
+	quantile_disc(l, 0) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)::VARCHAR,
+	quantile_disc(l, 1) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)::VARCHAR
+FROM framed ORDER BY k;
+----
+1	[-0.0]	[-0.0]	[-0.0]
+2	[-0.0]	[-0.0]	[1.0]
+3	[-0.0]	[0.0]	[1.0]
+4	[-0.0]	[-0.0]	[0.0]
+
+# the exported state and its import
+query II
+SELECT (quantile_disc([d], 0.5) EXPORT_STATE)::VARCHAR, finalize(quantile_disc([d], 0.5) EXPORT_STATE)::VARCHAR
+FROM zeros;
+----
+[[-0.0]]	[-0.0]
+
+query II
+SELECT finalize(to_aggregate_state([[0.0], ['-0.0'::DOUBLE], [0.0]], 'quantile_disc', ['DOUBLE[]', 'DOUBLE'], [NULL, 0]))::VARCHAR,
+	finalize(to_aggregate_state([{'a': '-0.0'::FLOAT}], 'quantile_disc', ['STRUCT(a FLOAT)', 'DOUBLE'], [NULL, 0.5]))::VARCHAR;
+----
+[-0.0]	{'a': -0.0}
+
+# least and greatest: a struct field, two deep, FLOAT, several arguments
+query IIII
+SELECT least({'a': d}, {'a': 1.0})::VARCHAR, greatest([{'b': [d]}], [{'b': [-1.0]}])::VARCHAR,
+	least([f], [1.0::FLOAT])::VARCHAR, greatest([-1.0], NULL, [d, 3.0], [d])::VARCHAR
+FROM zeros;
+----
+{'a': -0.0}	[{'b': [-0.0]}]	[-0.0]	[-0.0, 3.0]
+
+# equal arguments: the first one comes back
+query IIII
+SELECT least([d], [0.0])::VARCHAR, least([0.0], [d])::VARCHAR, greatest([d], [0.0])::VARCHAR,
+	greatest(NULL, [0.0], [d])::VARCHAR
+FROM zeros;
+----
+[-0.0]	[0.0]	[-0.0]	[0.0]
+
+query II
+SELECT least(NULL::DOUBLE[], NULL)::VARCHAR, greatest([d, NULL], [d, NULL])::VARCHAR FROM zeros;
+----
+NULL	[-0.0, NULL]
+
+# rows whose winner switches between the arguments, and NULL rows
+query II
+SELECT least(a, b)::VARCHAR, greatest(a, b)::VARCHAR
+FROM (VALUES (1, ['-0.0'::DOUBLE], [1.0]), (2, [2.0], [0.0]), (3, [0.0], ['-0.0'::DOUBLE]), (4, NULL, ['-0.0'::DOUBLE]),
+	(5, NULL, NULL)) t(k, a, b)
+ORDER BY k;
+----
+[-0.0]	[1.0]
+[0.0]	[2.0]
+[0.0]	[0.0]
+[-0.0]	[-0.0]
+NULL	NULL
+
+# more rows than a vector, with the winner alternating between the arguments
+query II
+SELECT count(*) FILTER (WHERE least(a, b)::VARCHAR = '[-0.0]'), count(*) FILTER (WHERE greatest(a, b)::VARCHAR = '[1.0]')
+FROM (SELECT CASE WHEN i % 2 = 0 THEN ['-0.0'::DOUBLE] ELSE [1.0] END a, CASE WHEN i % 2 = 0 THEN [1.0] ELSE ['-0.0'::DOUBLE] END b
+	FROM range(5000) t(i));
+----
+5000	5000
+
+# scalar DOUBLE is unchanged; scalar FLOAT keeps the sign now, with the same rule as DOUBLE
+query IIII
+SELECT least(d, 0.0)::VARCHAR, least(0.0, d)::VARCHAR, least(f, 0::FLOAT)::VARCHAR, least(0::FLOAT, f)::VARCHAR FROM zeros;
+----
+-0.0	0.0	-0.0	0.0
+
+query II
+SELECT greatest(f, -1::FLOAT)::VARCHAR, least(f, 'nan'::FLOAT)::VARCHAR FROM zeros;
+----
+-0.0	-0.0
+
+# list_distinct: a struct field, two deep, FLOAT, NULL elements
+query IIII
+SELECT list_distinct([{'a': d}])::VARCHAR, list_distinct([[{'b': [d]}]])::VARCHAR, list_distinct([[f]])::VARCHAR,
+	list_distinct([[d, NULL], NULL, [d, NULL]])::VARCHAR
+FROM zeros;
+----
+[{'a': -0.0}]	[[{'b': [-0.0]}]]	[[-0.0]]	[[-0.0, NULL]]
+
+# equal elements: the first in the list comes back, as for a flat list
+query IIII
+SELECT list_distinct([[d], [0.0]])::VARCHAR, list_distinct([[0.0], [d]])::VARCHAR, list_distinct([d, 0.0])::VARCHAR,
+	list_distinct([0.0, d])::VARCHAR
+FROM zeros;
+----
+[[-0.0]]	[[0.0]]	[-0.0]	[0.0]
+
+query II
+SELECT list_sort(list_distinct([[1.0], [d], [0.0], [1.0], [d, 1.0], [0.0, 1.0]]))::VARCHAR,
+	list_unique([[d], [0.0], [1.0]])
+FROM zeros;
+----
+[[-0.0], [-0.0, 1.0], [1.0]]	2
+
+query I
+SELECT list_distinct(l)::VARCHAR FROM (VALUES (1, [['-0.0'::DOUBLE]]), (2, [[0.0], ['-0.0'::DOUBLE]]), (3, NULL), (4, []))
+	t(k, l)
+ORDER BY k;
+----
+[[-0.0]]
+[[0.0]]
+NULL
+[]
+
+# histogram over a window and over a list shares the map of list_distinct
+query II
+SELECT (histogram([d]) OVER ())::VARCHAR, list_aggregate([[d], [0.0], [1.0]], 'histogram')::VARCHAR FROM zeros;
+----
+{[-0.0]=1}	{[-0.0]=2, [1.0]=1}
+
+query I
+SELECT list_aggregate([[0.0], [d], [1.0]], 'histogram')::VARCHAR FROM zeros;
+----
+{[0.0]=2, [1.0]=1}
+
+# list_aggregate over quantile_disc follows the aggregate
+query II
+SELECT list_aggregate([[d]], 'quantile_disc', 0.5)::VARCHAR, list_aggregate([[0.0], [d]], 'quantile_disc', 0)::VARCHAR
+FROM zeros;
+----
+[-0.0]	[-0.0]
+
+# mode as a window function and as a list aggregate (plain mode is planned as a GROUP BY and arg_max)
+query IIII
+SELECT (mode([d]) OVER ())::VARCHAR, (mode({'a': d}) OVER ())::VARCHAR, (mode([{'b': [d]}]) OVER ())::VARCHAR,
+	(mode([f]) OVER ())::VARCHAR
+FROM zeros;
+----
+[-0.0]	{'a': -0.0}	[{'b': [-0.0]}]	[-0.0]
+
+query III
+SELECT list_aggregate([[d]], 'mode')::VARCHAR, list_aggregate([{'a': f}], 'mode')::VARCHAR,
+	list_aggregate([NULL, [d, NULL], [d, NULL]], 'mode')::VARCHAR
+FROM zeros;
+----
+[-0.0]	{'a': -0.0}	[-0.0, NULL]
+
+# equal inputs count together, and the first input of the winning class that the state saw comes back
+query III
+SELECT list_aggregate([[d], [0.0], [1.0]], 'mode')::VARCHAR, list_aggregate([[0.0], [d], [1.0]], 'mode')::VARCHAR,
+	list_aggregate([[1.0], [d], [0.0], [1.0], [0.0]], 'mode')::VARCHAR
+FROM zeros;
+----
+[-0.0]	[0.0]	[-0.0]
+
+statement ok
+CREATE TABLE mode_framed AS SELECT * FROM (VALUES (1, ['-0.0'::DOUBLE]), (2, [1.0]), (3, [1.0]), (4, ['-0.0'::DOUBLE]), (5, NULL),
+	(6, ['-0.0'::DOUBLE, NULL])) t(k, l);
+
+query III
+SELECT k, (mode(l) OVER ())::VARCHAR, (mode(l) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))::VARCHAR
+FROM mode_framed ORDER BY k;
+----
+1	[-0.0]	[-0.0]
+2	[-0.0]	[-0.0]
+3	[-0.0]	[1.0]
+4	[-0.0]	[1.0]
+5	[-0.0]	[-0.0]
+6	[-0.0]	[-0.0, NULL]
+
+# a window over rows that mix the two zeros, single threaded: the first row the state saw
+query I
+SELECT DISTINCT (mode(l) OVER ())::VARCHAR FROM (VALUES ([0.0]), (['-0.0'::DOUBLE]), (['-0.0'::DOUBLE])) t(l);
+----
+[0.0]
+
+# more threads: the quantile order does not depend on the input order, and equal values still merge
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE many AS SELECT i, CASE WHEN i % 3 = 0 THEN ['-0.0'::DOUBLE] ELSE [0.0] END AS l FROM range(300000) t(i);
+
+query III
+SELECT quantile_disc(l, 0)::VARCHAR, quantile_disc(l, 1)::VARCHAR, quantile_disc(l, 0.3)::VARCHAR FROM many;
+----
+[-0.0]	[0.0]	[-0.0]
+
+query II
+SELECT count(DISTINCT l), len(list_distinct(list(l))) FROM many;
+----
+1	1
+
+statement ok
+SET threads=1;
+
+# list_distinct over a list longer than a vector
+query I
+SELECT list_distinct(list(l ORDER BY i))::VARCHAR FROM many;
+----
+[[-0.0]]
+
+# least and greatest over every vector encoding agree with CASE (these vectors hold no -0.0: a check of the copies)
+query I
+SELECT count(*) FROM test_vector_types(NULL::DOUBLE[], NULL::DOUBLE[], all_flat := false) t(a, b)
+WHERE least(a, b)::VARCHAR IS DISTINCT FROM (CASE WHEN a IS NULL THEN b WHEN b IS NULL THEN a WHEN b < a THEN b ELSE a END)::VARCHAR
+	OR greatest(a, b)::VARCHAR IS DISTINCT FROM (CASE WHEN a IS NULL THEN b WHEN b IS NULL THEN a WHEN b > a THEN b ELSE a END)::VARCHAR;
+----
+0
+
+query I
+SELECT count(*) FROM test_vector_types(NULL::STRUCT(x FLOAT, y VARCHAR)[], NULL::STRUCT(x FLOAT, y VARCHAR)[], all_flat := false) t(a, b)
+WHERE least(a, b)::VARCHAR IS DISTINCT FROM (CASE WHEN a IS NULL THEN b WHEN b IS NULL THEN a WHEN b < a THEN b ELSE a END)::VARCHAR;
+----
+0
+
+# ARRAY and MAP values
+query IIII
+SELECT quantile_disc([d, 1]::DOUBLE[2], 0.5)::VARCHAR, least([d, 1]::DOUBLE[2], [1, 1]::DOUBLE[2])::VARCHAR,
+	list_distinct([MAP {'k': d}])::VARCHAR, list_aggregate([[f, 1]::FLOAT[2]], 'mode')::VARCHAR
+FROM zeros GROUP BY ALL;
+----
+[-0.0, 1.0]	[-0.0, 1.0]	[{k=-0.0}]	[-0.0, 1.0]
+
+# histogram over a sliding frame
+query II
+SELECT k, (histogram(l) OVER (ORDER BY k ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))::VARCHAR FROM framed ORDER BY k;
+----
+1	{[-0.0]=1}
+2	{[-0.0]=1, [1.0]=1}
+3	{[0.0]=1, [1.0]=1}
+4	{[0.0]=2}
+
+# types whose sort key decodes exactly take the plain sort key and give the same results
+query II
+SELECT quantile_disc({'a': 'x', 'b': i}, 0.5)::VARCHAR, list_aggregate([[i], [2], [i]], 'mode')::VARCHAR
+FROM (VALUES (1)) t(i) GROUP BY ALL;
+----
+{'a': x, 'b': 1}	[1]
+
+query III
+SELECT (mode([i]) OVER ())::VARCHAR, list_distinct([[i], [i]])::VARCHAR, least({'a': 'x', 'b': i}, {'a': 'x', 'b': 2})::VARCHAR
+FROM (VALUES (1)) t(i);
+----
+[1]	[[1]]	{'a': x, 'b': 1}
+
+# the scalar forms are unchanged
+query III
+SELECT quantile_disc(d, 0.5)::VARCHAR, quantile_disc(f, 0.5)::VARCHAR, median(d)::VARCHAR FROM zeros;
+----
+-0.0	-0.0	-0.0
+
+query II
+SELECT list_distinct([d])::VARCHAR, (histogram(d) OVER ())::VARCHAR FROM zeros;
+----
+[-0.0]	{-0.0=1}
+
+query II
+SELECT (mode(d) OVER ())::VARCHAR, list_aggregate([d, 0.0], 'mode')::VARCHAR FROM zeros;
+----
+-0.0	-0.0

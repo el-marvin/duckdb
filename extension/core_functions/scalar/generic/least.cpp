@@ -1,5 +1,6 @@
 #include "core_functions/scalar/generic_functions.hpp"
 #include "duckdb/common/operator/comparison_operators.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/smaller_binary.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -68,7 +69,7 @@ struct StandardLeastGreatest {
 		return result;
 	}
 
-	static void FinalizeResult(idx_t rows, bool result_has_value[], Vector &result, ExpressionState &) {
+	static void FinalizeResult(DataChunk &, idx_t rows, bool result_has_value[], Vector &result, ExpressionState &) {
 		auto &result_mask = FlatVector::ValidityMutable(result);
 		for (idx_t i = 0; i < rows; i++) {
 			if (!result_has_value[i]) {
@@ -95,16 +96,35 @@ struct SortKeyLeastGreatest {
 		return lstate.intermediate;
 	}
 
-	static void FinalizeResult(idx_t rows, bool result_has_value[], Vector &result, ExpressionState &state) {
+	//! The first argument whose key equals the winning key is the one the strict comparison kept.
+	static idx_t WinningArgument(const DataChunk &sort_keys, const string_t &winning_key, idx_t row) {
+		for (idx_t c_idx = 0; c_idx < sort_keys.ColumnCount(); c_idx++) {
+			if (Equals::Operation(FlatVector::GetData<string_t>(sort_keys.data[c_idx])[row], winning_key)) {
+				return c_idx;
+			}
+		}
+		throw InternalException("least or greatest lost its winning sort key");
+	}
+
+	//! The result rows are copied from the winning arguments, since a decoded sort key turns -0.0 into 0.0.
+	static void FinalizeResult(DataChunk &args, idx_t rows, bool result_has_value[], Vector &result,
+	                           ExpressionState &state) {
 		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<LeastGreatestSortKeyState>();
 		auto result_keys = FlatVector::GetData<string_t>(lstate.intermediate);
-		auto &result_mask = FlatVector::ValidityMutable(result);
+		idx_t run_start = 0;
+		idx_t run_argument = 0;
 		for (idx_t i = 0; i < rows; i++) {
-			if (!result_has_value[i]) {
-				result_mask.SetInvalid(i);
-			} else {
-				CreateSortKeyHelpers::DecodeSortKey(result_keys[i], result, i, lstate.modifiers);
+			// a NULL argument has a valid sort key, so every row has a winner
+			D_ASSERT(result_has_value[i]);
+			const auto argument = WinningArgument(lstate.sort_keys, result_keys[i], i);
+			if (i > 0 && argument != run_argument) {
+				VectorOperations::Copy(args.data[run_argument], result, i, run_start, run_start);
+				run_start = i;
 			}
+			run_argument = argument;
+		}
+		if (rows > 0) {
+			VectorOperations::Copy(args.data[run_argument], result, rows, run_start, run_start);
 		}
 	}
 };
@@ -167,7 +187,7 @@ void LeastGreatestFunction(DataChunk &args, ExpressionState &state, Vector &resu
 			}
 		}
 	}
-	BASE_OP::FinalizeResult(input.size(), result_has_value, result, state);
+	BASE_OP::FinalizeResult(args, input.size(), result_has_value, result, state);
 	result.SetVectorType(result_type);
 }
 
@@ -281,6 +301,9 @@ void LeastGreatestResolveTypes(ResolveScalarFunctionTypesInput &input) {
 		break;
 	case PhysicalType::INT128:
 		bound_function.SetFunctionCallback(LeastGreatestFunction<hugeint_t, OP>);
+		break;
+	case PhysicalType::FLOAT:
+		bound_function.SetFunctionCallback(LeastGreatestFunction<float, OP>);
 		break;
 	case PhysicalType::DOUBLE:
 		bound_function.SetFunctionCallback(LeastGreatestFunction<double, OP>);

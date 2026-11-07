@@ -12,6 +12,9 @@
 #include "duckdb/common/enums/order_type.hpp"
 #include "duckdb/common/radix.hpp"
 #include "duckdb/common/swar.hpp"
+#include "duckdb/common/type_visitor.hpp"
+#include "duckdb/common/types/hash.hpp"
+#include "duckdb/common/operator/comparison_operators.hpp"
 #include "duckdb/function/scalar/generic_functions.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -894,7 +897,7 @@ void FinalizeSortData(Vector &result, idx_t size, const SortKeyLengthInfo &key_l
 
 void CreateSortKeyInternal(vector<unique_ptr<SortKeyVectorData>> &sort_key_data,
                            const vector<OrderModifiers> &modifiers, const bool &all_constant, Vector &result,
-                           idx_t row_count, bool keep_zero_sign) {
+                           idx_t row_count, SortKeyEncoding encoding) {
 	// two phases
 	// a) get the length of the final sorted key
 	// b) allocate the sorted key and construct
@@ -903,6 +906,14 @@ void CreateSortKeyInternal(vector<unique_ptr<SortKeyVectorData>> &sort_key_data,
 	for (auto &vector_data : sort_key_data) {
 		GetSortKeyLength(*vector_data, key_lengths);
 	}
+	const bool with_value = encoding == SortKeyEncoding::SORT_KEY_WITH_VALUE;
+	if (with_value) {
+		D_ASSERT(!all_constant);
+		key_lengths.constant_length *= 2;
+		for (auto &length : key_lengths.variable_lengths) {
+			length *= 2;
+		}
+	}
 	// allocate the empty sort keys
 	auto data_pointers = unique_ptr<data_ptr_t[]>(new data_ptr_t[row_count]);
 	PrepareSortData(result, row_count, key_lengths, data_pointers.get(), all_constant);
@@ -910,9 +921,15 @@ void CreateSortKeyInternal(vector<unique_ptr<SortKeyVectorData>> &sort_key_data,
 	unsafe_vector<idx_t> offsets;
 	offsets.resize(row_count, 0);
 	// now construct the sort keys
-	for (idx_t c = 0; c < sort_key_data.size(); c++) {
-		SortKeyConstructInfo info(modifiers[c], offsets, data_pointers.get(), keep_zero_sign);
-		ConstructSortKey(*sort_key_data[c], info);
+	auto construct = [&](bool keep_zero_sign) {
+		for (idx_t c = 0; c < sort_key_data.size(); c++) {
+			SortKeyConstructInfo info(modifiers[c], offsets, data_pointers.get(), keep_zero_sign);
+			ConstructSortKey(*sort_key_data[c], info);
+		}
+	};
+	construct(encoding == SortKeyEncoding::KEEP_ZERO_SIGN);
+	if (with_value) {
+		construct(true);
 	}
 	FinalizeSortData(result, row_count, key_lengths, offsets);
 }
@@ -983,11 +1000,11 @@ static void AssertSortKeyRoundTrip(vector<unique_ptr<SortKeyVectorData>> &sort_k
 } // namespace
 
 static void CreateSingleColumnSortKey(const Vector &input, idx_t input_count, OrderModifiers order_modifier,
-                                      Vector &result, bool keep_zero_sign) {
+                                      Vector &result, SortKeyEncoding encoding) {
 	vector<OrderModifiers> modifiers {order_modifier};
 	vector<unique_ptr<SortKeyVectorData>> sort_key_data;
 	sort_key_data.push_back(make_uniq<SortKeyVectorData>(input, input_count, order_modifier));
-	CreateSortKeyInternal(sort_key_data, modifiers, false, result, input_count, keep_zero_sign);
+	CreateSortKeyInternal(sort_key_data, modifiers, false, result, input_count, encoding);
 }
 
 static void SetNullSortKeys(const Vector &input, Vector &result, idx_t count) {
@@ -1003,7 +1020,7 @@ static void SetNullSortKeys(const Vector &input, Vector &result, idx_t count) {
 }
 
 void CreateSortKeyHelpers::CreateSortKey(const Vector &input, OrderModifiers order_modifier, Vector &result) {
-	CreateSingleColumnSortKey(input, input.size(), order_modifier, result, false);
+	CreateSingleColumnSortKey(input, input.size(), order_modifier, result, SortKeyEncoding::SORT_KEY);
 }
 
 void CreateSortKeyHelpers::CreateSortKey(DataChunk &input, const vector<OrderModifiers> &modifiers, Vector &result) {
@@ -1012,22 +1029,22 @@ void CreateSortKeyHelpers::CreateSortKey(DataChunk &input, const vector<OrderMod
 	for (idx_t r = 0; r < modifiers.size(); r++) {
 		sort_key_data.push_back(make_uniq<SortKeyVectorData>(input.data[r], input.size(), modifiers[r]));
 	}
-	CreateSortKeyInternal(sort_key_data, modifiers, false, result, input.size(), false);
+	CreateSortKeyInternal(sort_key_data, modifiers, false, result, input.size(), SortKeyEncoding::SORT_KEY);
 }
 
 void CreateSortKeyHelpers::CreateSortKey(const Vector &input, idx_t input_count, OrderModifiers order_modifier,
                                          Vector &result) {
-	CreateSingleColumnSortKey(input, input_count, order_modifier, result, false);
+	CreateSingleColumnSortKey(input, input_count, order_modifier, result, SortKeyEncoding::SORT_KEY);
 }
 
 void CreateSortKeyHelpers::CreateSortKeyKeepZeroSign(const Vector &input, OrderModifiers order_modifier,
                                                      Vector &result) {
-	CreateSingleColumnSortKey(input, input.size(), order_modifier, result, true);
+	CreateSingleColumnSortKey(input, input.size(), order_modifier, result, SortKeyEncoding::KEEP_ZERO_SIGN);
 }
 
 void CreateSortKeyHelpers::CreateSortKeyKeepZeroSign(const Vector &input, idx_t input_count,
                                                      OrderModifiers order_modifier, Vector &result) {
-	CreateSingleColumnSortKey(input, input_count, order_modifier, result, true);
+	CreateSingleColumnSortKey(input, input_count, order_modifier, result, SortKeyEncoding::KEEP_ZERO_SIGN);
 }
 
 void CreateSortKeyHelpers::CreateSortKeyWithValidity(const Vector &input, Vector &result,
@@ -1048,6 +1065,55 @@ void CreateSortKeyHelpers::CreateSortKeyKeepZeroSignWithValidity(const Vector &i
 	SetNullSortKeys(input, result, input.size());
 }
 
+void CreateSortKeyHelpers::CreateSortKey(const Vector &input, idx_t count, OrderModifiers modifiers, Vector &result,
+                                         SortKeyEncoding encoding) {
+	CreateSingleColumnSortKey(input, count, modifiers, result, encoding);
+}
+
+void CreateSortKeyHelpers::CreateSortKeyWithValidity(const Vector &input, Vector &result,
+                                                     const OrderModifiers &modifiers, idx_t count,
+                                                     SortKeyEncoding encoding) {
+	CreateSortKey(input, count, modifiers, result, encoding);
+	SetNullSortKeys(input, result, count);
+}
+
+SortKeyEncoding CreateSortKeyHelpers::GetValueEncoding(const LogicalType &type) {
+	const bool has_floating_point = TypeVisitor::Contains(type, [](const LogicalType &child) {
+		return child.InternalType() == PhysicalType::FLOAT || child.InternalType() == PhysicalType::DOUBLE;
+	});
+	return has_floating_point ? SortKeyEncoding::SORT_KEY_WITH_VALUE : SortKeyEncoding::SORT_KEY;
+}
+
+static idx_t SortKeyHalfSize(const string_t &key_with_value) {
+	D_ASSERT(key_with_value.GetSize() % 2 == 0);
+	return key_with_value.GetSize() / 2;
+}
+
+static string_t SortKeyHalf(const string_t &key_with_value, idx_t offset) {
+	return string_t(key_with_value.GetData() + offset, UnsafeNumericCast<uint32_t>(SortKeyHalfSize(key_with_value)));
+}
+
+idx_t CreateSortKeyHelpers::DecodeSortKey(string_t sort_key, Vector &result, idx_t result_idx, OrderModifiers modifiers,
+                                          SortKeyEncoding encoding) {
+	if (encoding != SortKeyEncoding::SORT_KEY_WITH_VALUE) {
+		return DecodeSortKey(sort_key, result, result_idx, modifiers);
+	}
+	const auto half = SortKeyHalfSize(sort_key);
+	return half + DecodeSortKey(SortKeyHalf(sort_key, half), result, result_idx, modifiers);
+}
+
+std::size_t SortKeyWithValueHash::operator()(const string_t &key_with_value) const {
+	return Hash(key_with_value.GetData(), SortKeyHalfSize(key_with_value));
+}
+
+bool SortKeyWithValueEquality::operator()(const string_t &left, const string_t &right) const {
+	return left.GetSize() == right.GetSize() && memcmp(left.GetData(), right.GetData(), SortKeyHalfSize(left)) == 0;
+}
+
+bool SortKeyWithValueLess::operator()(const string_t &left, const string_t &right) const {
+	return LessThan::Operation(SortKeyHalf(left, 0), SortKeyHalf(right, 0));
+}
+
 static void CreateSortKeyFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &bind_data = state.expr.Cast<BoundFunctionExpression>().BindInfo()->Cast<SortKeyBindData>();
 
@@ -1056,7 +1122,8 @@ static void CreateSortKeyFunction(DataChunk &args, ExpressionState &state, Vecto
 	for (idx_t c = 0; c < args.ColumnCount(); c += 2) {
 		sort_key_data.push_back(make_uniq<SortKeyVectorData>(args.data[c], args.size(), bind_data.modifiers[c / 2]));
 	}
-	CreateSortKeyInternal(sort_key_data, bind_data.modifiers, bind_data.all_constant, result, args.size(), false);
+	CreateSortKeyInternal(sort_key_data, bind_data.modifiers, bind_data.all_constant, result, args.size(),
+	                      SortKeyEncoding::SORT_KEY);
 #ifdef DEBUG
 	AssertSortKeyRoundTrip(sort_key_data, bind_data.modifiers, result, args.size());
 #endif

@@ -67,11 +67,14 @@ struct HistogramStringFunctor : HistogramStringFunctorBase {
 	}
 };
 
-struct HistogramGenericFunctor : HistogramStringFunctorBase {
+//! Keeps the sort key of each value. With SORT_KEY_WITH_VALUE, the map must hash and compare the sort key half only
+//! (SortKeyWithValueMap), and the values come back as given.
+template <SortKeyEncoding ENCODING>
+struct HistogramSortKeyFunctor : HistogramStringFunctorBase {
 	template <class T>
 	static void HistogramFinalize(T value, Vector &result, idx_t offset) {
-		CreateSortKeyHelpers::DecodeSortKey(value, result, offset,
-		                                    OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST));
+		CreateSortKeyHelpers::DecodeSortKey(
+		    value, result, offset, OrderModifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST), ENCODING);
 	}
 
 	static Vector CreateExtraState() {
@@ -81,12 +84,14 @@ struct HistogramGenericFunctor : HistogramStringFunctorBase {
 	static void PrepareData(const Vector &input, Vector &extra_state, UnifiedVectorFormat &result) {
 		OrderModifiers modifiers(OrderType::ASCENDING, OrderByNullType::NULLS_LAST);
 		extra_state.Reserve(input.size());
-		CreateSortKeyHelpers::CreateSortKey(input, modifiers, extra_state);
+		CreateSortKeyHelpers::CreateSortKey(input, input.size(), modifiers, extra_state, ENCODING);
 		input.Flatten();
 		extra_state.Flatten();
 		FlatVector::ValidityMutable(extra_state).Initialize(FlatVector::Validity(input));
 		extra_state.ToUnifiedFormat(result);
 	}
 };
+
+using HistogramGenericFunctor = HistogramSortKeyFunctor<SortKeyEncoding::SORT_KEY>;
 
 } // namespace duckdb

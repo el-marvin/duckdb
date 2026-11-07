@@ -113,8 +113,8 @@ struct FirstStringState : FirstStringStateBase {
 //! State for arbitrary types - the value is stored as a binary sort key, exported as the aggregate's return type.
 struct FirstSortKeyState : FirstStringStateBase {
 	static constexpr const char *STATE_NAMES[] = {"value"};
-	using STATE_TYPE = OptionalStateType<
-	    StructStateType<OptionalStateType<StateSortKey<StateReturnType, OrderType::ASCENDING, true>>>>;
+	using STATE_TYPE = OptionalStateType<StructStateType<
+	    OptionalStateType<StateSortKey<StateReturnType, OrderType::ASCENDING, SortKeyEncoding::KEEP_ZERO_SIGN>>>>;
 };
 
 struct FirstFunctionBase {

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "duckdb/common/enums/order_type.hpp"
+#include "duckdb/common/enums/sort_key_encoding.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/type_util.hpp"
@@ -82,19 +83,19 @@ LogicalType ResolveStateSourceType(const StateLayoutTypeInfo &info) {
 //! Signals that the field stores a binary sort key (string_t) that must be decoded/encoded
 //! via CreateSortKeyHelpers when exporting/importing aggregate state.
 //! SOURCE describes where the decoded logical type comes from; ORDER is the ordering used when creating the sort key.
-//! KEEP_ZERO_SIGN marks a key created with CreateSortKeyKeepZeroSign, so the import re-encodes it the same way.
-template <class SOURCE, OrderType ORDER = OrderType::ASCENDING, bool KEEP_ZERO_SIGN = false>
+//! ENCODING is the encoding the state made the key with, so export decodes it and import re-encodes it the same way.
+template <class SOURCE, OrderType ORDER = OrderType::ASCENDING, SortKeyEncoding ENCODING = SortKeyEncoding::SORT_KEY>
 struct StateSortKey {
 	using SOURCE_TYPE = SOURCE;
 	static constexpr OrderType order_type = ORDER;
-	static constexpr bool keep_zero_sign = KEEP_ZERO_SIGN;
+	static constexpr SortKeyEncoding encoding = ENCODING;
 };
 
-//! Detection trait: true when T is StateSortKey<SOURCE, ORDER, KEEP_ZERO_SIGN> for some SOURCE/ORDER/KEEP_ZERO_SIGN.
+//! Detection trait: true when T is StateSortKey<SOURCE, ORDER, ENCODING> for some SOURCE/ORDER/ENCODING.
 template <class T>
 struct IsStateSortKeyType : std::false_type {};
-template <class S, OrderType O, bool K>
-struct IsStateSortKeyType<StateSortKey<S, O, K>> : std::true_type {};
+template <class S, OrderType O, SortKeyEncoding E>
+struct IsStateSortKeyType<StateSortKey<S, O, E>> : std::true_type {};
 
 //! Phantom marker type for fields that are physically stored as T, while their exported logical type comes from
 //! the bound aggregate function as described by SOURCE - e.g. exporting a string_t as VARCHAR, BLOB or BIT, or
@@ -189,7 +190,7 @@ struct HasPrimitiveLogicalType<interval_t> : std::true_type {};
 //! info holds the runtime types of the bound function - used to resolve fields whose logical type cannot be
 //! expressed statically (sort keys and StateTypedValue fields).
 //! OptionalStateType<T> → the type of T (the optional encoding is captured in AggregateStateField::kind)
-//! StateSortKey<SOURCE, ORDER, KEEP_ZERO_SIGN> / StateTypedValue<T, SOURCE> → the resolved SOURCE type
+//! StateSortKey<SOURCE, ORDER, ENCODING> / StateTypedValue<T, SOURCE> → the resolved SOURCE type
 //! T with STATE_TYPE → nested struct type   otherwise → PrimitiveToLogicalType<T>()
 template <class T>
 LogicalType FieldToLogicalType(const StateLayoutTypeInfo &info) {
@@ -224,7 +225,7 @@ enum class AggregateFieldKind {
 	//! The value field's field_offset is relative to the same parent base as this field.
 	OPTIONAL_VALUE,
 	//! Binary sort key (stored as string_t). field_offset = byte offset of the string_t.
-	//! sort_key_order carries the ordering, sort_key_keeps_zero_sign the encoding of -0.0. Always appears as
+	//! sort_key_order carries the ordering, sort_key_encoding the encoding. Always appears as
 	//! children[0] of an OPTIONAL_VALUE field.
 	SORT_KEY,
 	//! Linked list of values (stored as a LinkedList, see list_segment.hpp). field_offset = byte offset of the
@@ -244,8 +245,8 @@ struct AggregateStateField {
 	//! 32-bit Windows), so it must be recorded from the actual C++ types rather than derived from the field size
 	idx_t field_alignment = 0;
 	AggregateFieldKind kind = AggregateFieldKind::PRIMITIVE;
-	OrderType sort_key_order = OrderType::ASCENDING; // only meaningful when kind == SORT_KEY
-	bool sort_key_keeps_zero_sign = false;           // only meaningful when kind == SORT_KEY
+	OrderType sort_key_order = OrderType::ASCENDING;               // only meaningful when kind == SORT_KEY
+	SortKeyEncoding sort_key_encoding = SortKeyEncoding::SORT_KEY; // only meaningful when kind == SORT_KEY
 	//! For LIST: always holds a single element descriptor (children[0]). A SORT_KEY element means the linked list
 	//! physically stores binary sort keys; any other kind means the elements are stored directly.
 	vector<AggregateStateField> children;
@@ -429,7 +430,7 @@ struct IsStructStateType<StructStateType<Ts...>> : std::true_type {};
 //!
 //! Composable rules:
 //!   - OptionalStateType<V>  → OPTIONAL_VALUE: is_set at field_offset=V.field_size, wraps BuildStateField<V>()
-//!   - StateSortKey<SOURCE, ORDER, KEEP_ZERO_SIGN> → SORT_KEY: field_size=sizeof(string_t)
+//!   - StateSortKey<SOURCE, ORDER, ENCODING> → SORT_KEY: field_size=sizeof(string_t)
 //!   - StructStateType<Ts…>  → STRUCT: children built via AppendChildren, field_size=total child data size
 //!   - anything else         → PRIMITIVE: field_size=sizeof(T)
 template <class T>
@@ -446,7 +447,7 @@ AggregateStateField BuildStateField() {
 	} else if constexpr (IsStateSortKeyType<T>::value) {
 		field.kind = AggregateFieldKind::SORT_KEY;
 		field.sort_key_order = T::order_type;
-		field.sort_key_keeps_zero_sign = T::keep_zero_sign;
+		field.sort_key_encoding = T::encoding;
 		field.field_size = sizeof(string_t);
 		field.field_alignment = alignof(string_t);
 	} else if constexpr (IsStateTypedValueType<T>::value) {

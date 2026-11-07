@@ -588,6 +588,8 @@ enum class SinkNextBatchType : uint8_t;
 
 enum class SinkResultType : uint8_t;
 
+enum class SortKeyEncoding : uint8_t;
+
 enum class SortKeyType : uint8_t;
 
 enum class SourceBatchIndexState : uint8_t;
@@ -1538,6 +1540,9 @@ const char* EnumUtil::ToChars<SinkNextBatchType>(SinkNextBatchType value);
 
 template<>
 const char* EnumUtil::ToChars<SinkResultType>(SinkResultType value);
+
+template<>
+const char* EnumUtil::ToChars<SortKeyEncoding>(SortKeyEncoding value);
 
 template<>
 const char* EnumUtil::ToChars<SortKeyType>(SortKeyType value);
@@ -2547,6 +2552,9 @@ SinkNextBatchType EnumUtil::FromString<SinkNextBatchType>(const char *value);
 
 template<>
 SinkResultType EnumUtil::FromString<SinkResultType>(const char *value);
+
+template<>
+SortKeyEncoding EnumUtil::FromString<SortKeyEncoding>(const char *value);
 
 template<>
 SortKeyType EnumUtil::FromString<SortKeyType>(const char *value);

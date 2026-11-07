@@ -79,6 +79,7 @@
 #include "duckdb/common/enums/set_scope.hpp"
 #include "duckdb/common/enums/set_type.hpp"
 #include "duckdb/common/enums/show_behavior.hpp"
+#include "duckdb/common/enums/sort_key_encoding.hpp"
 #include "duckdb/common/enums/statement_type.hpp"
 #include "duckdb/common/enums/storage_block_prefetch.hpp"
 #include "duckdb/common/enums/subquery_type.hpp"
@@ -6406,6 +6407,25 @@ const char* EnumUtil::ToChars<SinkResultType>(SinkResultType value) {
 template<>
 SinkResultType EnumUtil::FromString<SinkResultType>(const char *value) {
 	return static_cast<SinkResultType>(StringUtil::StringToEnum(GetSinkResultTypeValues(), 3, "SinkResultType", value));
+}
+
+const StringUtil::EnumStringLiteral *GetSortKeyEncodingValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(SortKeyEncoding::SORT_KEY), "SORT_KEY" },
+		{ static_cast<uint32_t>(SortKeyEncoding::KEEP_ZERO_SIGN), "KEEP_ZERO_SIGN" },
+		{ static_cast<uint32_t>(SortKeyEncoding::SORT_KEY_WITH_VALUE), "SORT_KEY_WITH_VALUE" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<SortKeyEncoding>(SortKeyEncoding value) {
+	return StringUtil::EnumToString(GetSortKeyEncodingValues(), 3, "SortKeyEncoding", static_cast<uint32_t>(value));
+}
+
+template<>
+SortKeyEncoding EnumUtil::FromString<SortKeyEncoding>(const char *value) {
+	return static_cast<SortKeyEncoding>(StringUtil::StringToEnum(GetSortKeyEncodingValues(), 3, "SortKeyEncoding", value));
 }
 
 const StringUtil::EnumStringLiteral *GetSortKeyTypeValues() {

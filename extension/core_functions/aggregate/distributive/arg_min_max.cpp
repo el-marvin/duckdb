@@ -99,16 +99,18 @@ struct ArgMinMaxState {
 //! value is typed - exported with the return type and the second argument type of the bound function respectively.
 template <OrderType ORDER, class B>
 struct ArgMinMaxVectorState : ArgMinMaxState<string_t, B> {
-	using STATE_TYPE = OptionalStateType<StructStateType<OptionalStateType<StateSortKey<StateReturnType, ORDER, true>>,
-	                                                     OptionalStateType<StateTypedValue<B, StateInputType<1>>>>>;
+	using STATE_TYPE = OptionalStateType<
+	    StructStateType<OptionalStateType<StateSortKey<StateReturnType, ORDER, SortKeyEncoding::KEEP_ZERO_SIGN>>,
+	                    OptionalStateType<StateTypedValue<B, StateInputType<1>>>>>;
 };
 
 //! State for the generic arg_min/arg_max variants: both the argument and the "by" value are stored as binary
 //! sort keys.
 template <OrderType ORDER>
 struct ArgMinMaxSortKeyState : ArgMinMaxState<string_t, string_t> {
-	using STATE_TYPE = OptionalStateType<StructStateType<OptionalStateType<StateSortKey<StateReturnType, ORDER, true>>,
-	                                                     OptionalStateType<StateSortKey<StateInputType<1>, ORDER>>>>;
+	using STATE_TYPE = OptionalStateType<
+	    StructStateType<OptionalStateType<StateSortKey<StateReturnType, ORDER, SortKeyEncoding::KEEP_ZERO_SIGN>>,
+	                    OptionalStateType<StateSortKey<StateInputType<1>, ORDER>>>>;
 };
 
 template <class COMPARATOR>

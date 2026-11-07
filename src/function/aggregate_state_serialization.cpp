@@ -115,7 +115,8 @@ static void SerializeField(const LogicalType &type, const AggregateStateField &f
 			}
 			const string_t sort_key = Load<string_t>(addresses[i] + base + field.field_offset);
 			CreateSortKeyHelpers::DecodeSortKey(sort_key, result, offset + i,
-			                                    OrderModifiers(field.sort_key_order, OrderByNullType::NULLS_LAST));
+			                                    OrderModifiers(field.sort_key_order, OrderByNullType::NULLS_LAST),
+			                                    field.sort_key_encoding);
 		}
 		break;
 	case AggregateFieldKind::STRUCT: {
@@ -183,7 +184,8 @@ static void SerializeField(const LogicalType &type, const AggregateStateField &f
 			}
 			result_entries[row] = {child_offset, list_entry.GetListLength()};
 			for (const auto sort_key : list_entry.GetChildValues()) {
-				CreateSortKeyHelpers::DecodeSortKey(sort_key.GetValueUnsafe(), result_child, child_offset++, modifiers);
+				CreateSortKeyHelpers::DecodeSortKey(sort_key.GetValueUnsafe(), result_child, child_offset++, modifiers,
+				                                    element.sort_key_encoding);
 			}
 		}
 		ListVector::SetListSize(result, child_offset);
@@ -193,12 +195,8 @@ static void SerializeField(const LogicalType &type, const AggregateStateField &f
 }
 
 static void CreateStateSortKeys(const AggregateStateField &field, const Vector &input, idx_t count, Vector &result) {
-	const OrderModifiers modifiers(field.sort_key_order, OrderByNullType::NULLS_LAST);
-	if (field.sort_key_keeps_zero_sign) {
-		CreateSortKeyHelpers::CreateSortKeyKeepZeroSign(input, count, modifiers, result);
-	} else {
-		CreateSortKeyHelpers::CreateSortKey(input, count, modifiers, result);
-	}
+	CreateSortKeyHelpers::CreateSortKey(input, count, OrderModifiers(field.sort_key_order, OrderByNullType::NULLS_LAST),
+	                                    result, field.sort_key_encoding);
 }
 
 // Recursively deserialize an input vector into a packed state buffer.
