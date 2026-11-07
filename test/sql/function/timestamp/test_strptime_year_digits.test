@@ -1,0 +1,328 @@
+# name: test/sql/function/timestamp/test_strptime_year_digits.test
+# description: strptime reads %Y and %G as exactly four digits and %y as exactly two
+# group: [timestamp]
+
+# %Y needs four digits
+
+statement error
+SELECT strptime('01-02-24', '%d-%m-%Y');
+----
+Year must have four digits
+
+statement error
+SELECT strptime('1-01-01', '%Y-%m-%d');
+----
+Year must have four digits
+
+query IIIIII
+SELECT try_strptime('01-02-24', '%d-%m-%Y'),
+	try_strptime('1-01-01', '%Y-%m-%d'),
+	try_strptime('12-01-01', '%Y-%m-%d'),
+	try_strptime('123-01-01', '%Y-%m-%d'),
+	try_strptime('24', '%Y'),
+	TRY(strptime('202', '%Y'));
+----
+NULL	NULL	NULL	NULL	NULL	NULL
+
+query IIIIII
+SELECT strptime('13-02-2024', '%d-%m-%Y'),
+	strptime('1-2-2024', '%d-%m-%Y'),
+	strptime('0024-01-01', '%Y-%m-%d'),
+	strptime('0001-01-01', '%Y-%m-%d'),
+	strptime('20240131', '%Y%m%d'),
+	strptime('2024', '%Y');
+----
+2024-02-13 00:00:00	2024-02-01 00:00:00	0024-01-01 00:00:00	0001-01-01 00:00:00	2024-01-31 00:00:00	2024-01-01 00:00:00
+
+# %Y reads at most four digits and no sign
+
+query III
+SELECT try_strptime('12345-01-01', '%Y-%m-%d'),
+	try_strptime('-0044-03-15', '%Y-%m-%d'),
+	try_strptime('20245', '%Y');
+----
+NULL	NULL	NULL
+
+# a column fails at the first short year
+
+statement error
+SELECT strptime(s, '%Y-%m-%d') FROM (VALUES ('2024-01-31'), (NULL), ('24-01-31')) t(s);
+----
+Year must have four digits
+
+query I
+SELECT try_strptime(s, '%Y-%m-%d') FROM (VALUES ('2024-01-31'), (NULL), ('24-01-31')) t(s);
+----
+2024-01-31 00:00:00
+NULL
+NULL
+
+# the other result types of strptime
+
+query III
+SELECT try_strptime('24-01-31 10:00:00.123456789', '%Y-%m-%d %H:%M:%S.%n'),
+	try_strptime('24-01-31 +0100', '%Y-%m-%d %z'),
+	try_strptime('24-01-31 10:00:00.123456789 +0100', '%Y-%m-%d %H:%M:%S.%n %z');
+----
+NULL	NULL	NULL
+
+query II
+SELECT strptime('2024-01-31 10:00:00.123456789', '%Y-%m-%d %H:%M:%S.%n'), strptime('2024-01-31 +0100', '%Y-%m-%d %z');
+----
+2024-01-31 10:00:00.123456789	2024-01-30 23:00:00+00
+
+# a variable width field before %Y takes its digits greedily and gives none back, unlike Python's strptime
+
+query III
+SELECT try_strptime('12024', '%m%Y'), try_strptime('12024', '%-d%Y'), strptime('012024', '%m%Y');
+----
+NULL	NULL	2024-01-01 00:00:00
+
+# the plain cast to DATE is not a format and keeps reading short years
+
+query I
+SELECT CAST('24-01-31' AS DATE);
+----
+0024-01-31
+
+statement error
+SELECT strptime('24-01-31', '%Y-%m-%d');
+----
+Year must have four digits
+
+# a format list takes %y for a two digit year and %Y for a four digit one
+
+query II
+SELECT strptime('01-02-24', ['%d-%m-%Y', '%d-%m-%y']), strptime('01-02-2024', ['%d-%m-%y', '%d-%m-%Y']);
+----
+2024-02-01 00:00:00	2024-02-01 00:00:00
+
+statement error
+SELECT strptime('01-02-024', ['%d-%m-%Y', '%d-%m-%y']);
+----
+Could not parse string
+
+# %G needs four digits
+
+statement error
+SELECT strptime('24-W01-1', '%G-W%V-%u');
+----
+ISO Year must have four digits
+
+query III
+SELECT try_strptime('024-W01-1', '%G-W%V-%u'),
+	strptime('2024-W01-1', '%G-W%V-%u'),
+	strptime('0024-W01-1', '%G-W%V-%u');
+----
+NULL	2024-01-01 00:00:00	0024-01-01 00:00:00
+
+# %y needs two digits; %-y takes one or two
+
+statement error
+SELECT strptime('4-01-01', '%y-%m-%d');
+----
+Year without century must have two digits
+
+query IIIIII
+SELECT try_strptime('4-01-01', '%y-%m-%d'),
+	strptime('04-01-01', '%y-%m-%d'),
+	strptime('68-01-01', '%y-%m-%d'),
+	strptime('69-01-01', '%y-%m-%d'),
+	strptime('4-01-01', '%-y-%m-%d'),
+	strptime('69-01-01', '%-y-%m-%d');
+----
+NULL	2004-01-01 00:00:00	2068-01-01 00:00:00	1969-01-01 00:00:00	2004-01-01 00:00:00	1969-01-01 00:00:00
+
+query II
+SELECT try_strptime('2024-01-01', '%y-%m-%d'), try_strptime('2024', '%-y');
+----
+NULL	NULL
+
+# every year strftime writes in [0, 9999] reads back
+
+query I
+SELECT bool_and(strptime(strftime(d, '%Y-%m-%d'), '%Y-%m-%d')::DATE = d)
+FROM (VALUES (DATE '0001-01-01'), (DATE '0024-02-29'), (DATE '0999-12-31'), (DATE '2024-01-31'), (DATE '9999-12-31')) t(d);
+----
+true
+
+query II
+SELECT bool_and(strptime(strftime(d, '%d/%m/%y'), '%d/%m/%y')::DATE = d), bool_and(strptime(strftime(d, '%d/%m/%-y'), '%d/%m/%-y')::DATE = d)
+FROM (VALUES (DATE '1969-01-01'), (DATE '2004-07-08'), (DATE '2068-12-31')) t(d);
+----
+true	true
+
+query II
+SELECT strftime(DATE '0001-01-01' - 1, '%Y-%m-%d'), strptime(strftime(DATE '0001-01-01' - 1, '%Y-%m-%d'), '%Y-%m-%d')::DATE = DATE '0001-01-01' - 1;
+----
+0000-12-31	true
+
+# readers with a user format
+
+statement ok
+COPY (SELECT * FROM (VALUES ('31-12-24'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_dmy2.csv' (HEADER);
+
+statement error
+SELECT d FROM read_csv('{TEST_DIR}/year_digits_dmy2.csv', dateformat = '%d-%m-%Y', columns = {'d': 'DATE'});
+----
+Could not convert string "31-12-24" to 'DATE'
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/year_digits_dmy2.csv', dateformat = '%d-%m-%y', columns = {'d': 'DATE'});
+----
+2024-12-31
+2024-02-01
+
+# without declared types, a user date format that fails on the sample is dropped and the column falls back to the
+# plain TIMESTAMP cast, which reads the fields as year, month and day
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_dmy2.csv', dateformat = '%d-%m-%Y');
+----
+TIMESTAMP	0031-12-24 00:00:00
+TIMESTAMP	0001-02-24 00:00:00
+
+# readers detecting a format: files of two digit years detect a %y format
+
+statement ok
+COPY (SELECT * FROM (VALUES ('12-31-24'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_mdy2.csv' (HEADER);
+
+statement ok
+COPY (SELECT * FROM (VALUES ('12-31-24 10:11:12 PM'), ('01-02-24 01:02:03 AM')) t(d)) TO '{TEST_DIR}/year_digits_ts_mdy2.csv' (HEADER);
+
+query II
+SELECT DateFormat, TimestampFormat FROM sniff_csv('{TEST_DIR}/year_digits_mdy2.csv');
+----
+%m-%d-%y	NULL
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_mdy2.csv');
+----
+DATE	2024-12-31
+DATE	2024-01-02
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_ts_mdy2.csv');
+----
+TIMESTAMP	2024-12-31 22:11:12
+TIMESTAMP	2024-01-02 01:02:03
+
+# read_csv leaves ISO text to the plain cast, which keeps reading short years
+
+statement ok
+COPY (SELECT '24-01-31T10:11:12' AS d) TO '{TEST_DIR}/year_digits_iso_ts.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_iso_ts.csv');
+----
+TIMESTAMP	0024-01-31 10:11:12
+
+# a column mixing two and four digit years reads no year 24; the outcome depends on the order of the values, because
+# the sniffer narrows its candidates one value at a time and never checks an earlier value again
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-24'), ('13-02-2024')) t(d)) TO '{TEST_DIR}/year_digits_mixed.csv' (HEADER);
+
+statement error
+SELECT d FROM read_csv('{TEST_DIR}/year_digits_mixed.csv');
+----
+Could not convert string "01-02-24" to 'DATE'
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-2024'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_mixed_four_first.csv' (HEADER);
+
+statement error
+SELECT d FROM read_csv('{TEST_DIR}/year_digits_mixed_four_first.csv');
+----
+Could not convert string "01-02-2024" to 'DATE'
+
+statement ok
+COPY (SELECT * FROM (VALUES ('12-31-2024'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_mixed_varchar.csv' (HEADER);
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/year_digits_mixed_varchar.csv');
+----
+VARCHAR	12-31-2024
+VARCHAR	01-02-24
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/year_digits_mixed.csv', dateformat = '%d-%m-%Y', columns = {'d': 'DATE'}, ignore_errors = true);
+----
+2024-02-13
+
+# read_json with a user format and detecting one
+
+require json
+
+statement ok
+COPY (SELECT * FROM (VALUES ('31-12-24'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_dmy2.json';
+
+statement error
+SELECT d FROM read_json('{TEST_DIR}/year_digits_dmy2.json', dateformat = '%d-%m-%Y', columns = {'d': 'DATE'});
+----
+JSON transform error in file
+
+query I
+SELECT d FROM read_json('{TEST_DIR}/year_digits_dmy2.json', dateformat = '%d-%m-%y', columns = {'d': 'DATE'});
+----
+2024-12-31
+2024-02-01
+
+query II
+SELECT typeof(d), d FROM read_json('{TEST_DIR}/year_digits_dmy2.json', dateformat = '%d-%m-%Y');
+----
+VARCHAR	31-12-24
+VARCHAR	01-02-24
+
+statement ok
+COPY (SELECT '24-01-31' AS d) TO '{TEST_DIR}/year_digits_iso.json';
+
+statement error
+SELECT d FROM read_json('{TEST_DIR}/year_digits_iso.json', dateformat = 'iso', columns = {'d': 'DATE'});
+----
+JSON transform error in file
+
+query I
+SELECT d FROM read_json('{TEST_DIR}/year_digits_iso.json', columns = {'d': 'DATE'});
+----
+0024-01-31
+
+statement ok
+COPY (SELECT * FROM (VALUES ('12-31-24'), ('01-02-24')) t(d)) TO '{TEST_DIR}/year_digits_mdy2.json';
+
+statement ok
+COPY (SELECT * FROM (VALUES ('12-31-24 10:11:12 PM'), ('01-02-24 01:02:03 AM')) t(d)) TO '{TEST_DIR}/year_digits_ts_mdy2.json';
+
+query II
+SELECT typeof(d), d FROM read_json('{TEST_DIR}/year_digits_mdy2.json');
+----
+DATE	2024-12-31
+DATE	2024-01-02
+
+query II
+SELECT typeof(d), d FROM read_json('{TEST_DIR}/year_digits_ts_mdy2.json');
+----
+TIMESTAMP	2024-12-31 22:11:12
+TIMESTAMP	2024-01-02 01:02:03
+
+# read_json detects ISO timestamps through %Y formats that have no %y counterpart, so a short year stays text
+
+statement ok
+COPY (SELECT '24-01-31T10:11:12' AS d UNION ALL SELECT '24-01-31 10:11:12.123') TO '{TEST_DIR}/year_digits_iso_ts.json';
+
+query II
+SELECT typeof(d), d FROM read_json('{TEST_DIR}/year_digits_iso_ts.json') ORDER BY d;
+----
+VARCHAR	24-01-31 10:11:12.123
+VARCHAR	24-01-31T10:11:12
+
+# a column mixing two and four digit years has no common format and stays text
+
+statement ok
+COPY (SELECT * FROM (VALUES ('01-02-24'), ('13-02-2024')) t(d)) TO '{TEST_DIR}/year_digits_mixed.json';
+
+query II
+SELECT typeof(d), d FROM read_json('{TEST_DIR}/year_digits_mixed.json');
+----
+VARCHAR	01-02-24
+VARCHAR	13-02-2024
