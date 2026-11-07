@@ -28,8 +28,10 @@
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
+#include "duckdb/parser/query_node/insert_query_node.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
@@ -689,6 +691,27 @@ void Binder::BindLogicalType(LogicalType &type) {
 
 bool BoundBodyContainsTrigger(const LogicalOperator &op);
 
+// All firings of a statement run as one batch against one snapshot, so a write that reads the rows it changes (an
+// UPDATE, or a MERGE, which an upsert is rewritten into) would not see what other firings of the statement wrote.
+static string UnsupportedRowTriggerBodyForm(const QueryNode &body) {
+	switch (body.type) {
+	case QueryNodeType::UPDATE_QUERY_NODE:
+		return "UPDATE";
+	case QueryNodeType::MERGE_QUERY_NODE:
+		return "MERGE INTO";
+	case QueryNodeType::INSERT_QUERY_NODE: {
+		auto &on_conflict_info = body.Cast<InsertQueryNode>().on_conflict_info;
+		if (!on_conflict_info) {
+			return string();
+		}
+		return on_conflict_info->action_type == OnConflictAction::REPLACE ? "INSERT OR REPLACE"
+		                                                                  : "INSERT ... ON CONFLICT";
+	}
+	default:
+		return string();
+	}
+}
+
 SchemaCatalogEntry &Binder::BindCreateTriggerInfo(CreateTriggerInfo &create_trigger_info) {
 	if (create_trigger_info.temporary) {
 		// unsupported - a trigger is temporary iff its base table is (see below)
@@ -831,8 +854,10 @@ SchemaCatalogEntry &Binder::BindCreateTriggerInfo(CreateTriggerInfo &create_trig
 			throw NotImplementedException(
 			    "FOR EACH ROW triggers on tables with generated columns are not yet supported");
 		}
-		if (create_trigger_info.trigger_action->type == QueryNodeType::UPDATE_QUERY_NODE) {
-			throw NotImplementedException("UPDATE trigger bodies in FOR EACH ROW triggers are not yet supported");
+		auto unsupported_form = UnsupportedRowTriggerBodyForm(*create_trigger_info.trigger_action);
+		if (!unsupported_form.empty()) {
+			throw NotImplementedException("%s trigger bodies in FOR EACH ROW triggers are not yet supported",
+			                              unsupported_form);
 		}
 		vector<Identifier> col_names;
 		vector<LogicalType> col_types;

@@ -1,0 +1,295 @@
+# name: test/sql/trigger/trigger_row_body_upsert.test
+# description: A FOR EACH ROW body that is an upsert or a MERGE INTO is refused at CREATE TRIGGER, since all firings of a statement run against one snapshot and one firing's conflict check cannot see another firing's insert
+# group: [trigger]
+
+require noforcestorage
+
+statement ok
+CREATE TABLE a(id INTEGER PRIMARY KEY, n INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER);
+
+# two firing rows of one key would need the second to see the first one's insert
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1) ON CONFLICT DO UPDATE SET n = n + 1;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement ok
+INSERT INTO b VALUES (1), (1);
+
+query II
+SELECT * FROM a;
+----
+
+# NEW where the upsert binds it itself: the SET list, the DO UPDATE WHERE, a WITH clause of the body
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1) ON CONFLICT DO UPDATE SET n = NEW.id;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (1, 1) ON CONFLICT DO UPDATE SET n = n + 1 WHERE NEW.id > 0;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    WITH x AS (SELECT NEW.id AS v) INSERT INTO a SELECT v, 1 FROM x ON CONFLICT DO NOTHING;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# a body that references no NEW column is refused for its form first
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (1, 1) ON CONFLICT DO UPDATE SET n = n + 1;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# an explicit conflict target over a composite key
+statement ok
+CREATE TABLE c(id INTEGER, k INTEGER, n INTEGER, PRIMARY KEY (id, k));
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO c VALUES (NEW.id, 1, 0), (NEW.id, 2, 0) ON CONFLICT (id, k) DO UPDATE SET n = excluded.n + NEW.id;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# DO NOTHING, in VALUES and in SELECT form, and its shorthand INSERT OR IGNORE
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1) ON CONFLICT DO NOTHING;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a SELECT NEW.id, 1 ON CONFLICT DO NOTHING;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT OR IGNORE INTO a VALUES (NEW.id, 1);
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# INSERT OR REPLACE
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT OR REPLACE INTO a VALUES (NEW.id, NEW.id);
+----
+Not implemented Error: INSERT OR REPLACE trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT OR REPLACE INTO a SELECT NEW.id, 1;
+----
+Not implemented Error: INSERT OR REPLACE trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# MERGE INTO, NEW in an action and in the source
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    MERGE INTO a USING (SELECT 1 AS id) s ON a.id = s.id
+    WHEN MATCHED THEN UPDATE SET n = NEW.id
+    WHEN NOT MATCHED THEN INSERT VALUES (s.id, 0);
+----
+Not implemented Error: MERGE INTO trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    MERGE INTO a USING (SELECT NEW.id AS id) s ON a.id = s.id
+    WHEN NOT MATCHED THEN INSERT VALUES (s.id, 0);
+----
+Not implemented Error: MERGE INTO trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# MERGE INTO with only a matched action, in a WITH clause body
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    MERGE INTO a USING (SELECT 1 AS id) s ON a.id = s.id
+    WHEN MATCHED AND NEW.id > 0 THEN DELETE;
+----
+Not implemented Error: MERGE INTO trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    WITH x AS (SELECT NEW.id AS id) MERGE INTO a USING x ON a.id = x.id
+    WHEN NOT MATCHED THEN INSERT VALUES (x.id, 0);
+----
+Not implemented Error: MERGE INTO trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# an AFTER DELETE row trigger with OLD
+statement ok
+CREATE TABLE d(id INTEGER);
+
+statement ok
+INSERT INTO d VALUES (1);
+
+statement error
+CREATE TRIGGER td AFTER DELETE ON d FOR EACH ROW
+    INSERT INTO a VALUES (OLD.id, 0) ON CONFLICT DO UPDATE SET n = OLD.id;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement error
+CREATE TRIGGER td AFTER DELETE ON d FOR EACH ROW
+    MERGE INTO a USING (SELECT OLD.id AS id) s ON a.id = s.id
+    WHEN MATCHED THEN DELETE;
+----
+Not implemented Error: MERGE INTO trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement ok
+DELETE FROM d;
+
+query I
+SELECT count(*) FROM a;
+----
+0
+
+# the BEFORE refusal comes first
+statement error
+CREATE TRIGGER t BEFORE INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1) ON CONFLICT DO UPDATE SET n = n + 1;
+----
+Not implemented Error: BEFORE FOR EACH ROW triggers are not yet supported
+
+# CREATE OR REPLACE with an upsert body leaves the plain body in place
+statement ok
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1);
+
+statement error
+CREATE OR REPLACE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1) ON CONFLICT DO UPDATE SET n = NEW.id;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+# the plain INSERT body: distinct keys insert; two firing rows of one key, or a key a holds, fail with the constraint error
+statement ok
+INSERT INTO b VALUES (1), (2);
+
+query II
+SELECT * FROM a ORDER BY id;
+----
+1	1
+2	1
+
+statement error
+INSERT INTO b VALUES (3), (3);
+----
+Constraint Error: PRIMARY KEY or UNIQUE constraint violation: duplicate key "3"
+
+statement error
+INSERT INTO b VALUES (1);
+----
+Constraint Error: Duplicate key "id: 1" violates primary key constraint.
+
+statement ok
+DROP TRIGGER t ON b;
+
+# a DELETE body still runs per firing row
+statement ok
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    DELETE FROM a WHERE id = NEW.id;
+
+statement ok
+INSERT INTO b VALUES (1), (1);
+
+query II
+SELECT * FROM a ORDER BY id;
+----
+2	1
+
+statement ok
+DROP TRIGGER t ON b;
+
+# an upsert into a table with a statement trigger is refused the same way
+statement ok
+CREATE TABLE log(k VARCHAR, v INTEGER);
+
+statement ok
+CREATE TRIGGER s_a AFTER INSERT ON a FOR EACH STATEMENT
+    INSERT INTO log VALUES ('st', 0);
+
+statement error
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO a VALUES (NEW.id, 1) ON CONFLICT DO UPDATE SET n = NEW.id;
+----
+Not implemented Error: INSERT ... ON CONFLICT trigger bodies in FOR EACH ROW triggers are not yet supported
+
+statement ok
+DROP TRIGGER s_a ON a;
+
+# a row body whose write fires a statement trigger with an upsert body is not a row upsert body
+statement ok
+CREATE TABLE s(id INTEGER);
+
+statement ok
+CREATE TRIGGER s_upsert AFTER INSERT ON s FOR EACH STATEMENT
+    INSERT INTO a VALUES (2, 0) ON CONFLICT DO UPDATE SET n = n + 10;
+
+statement ok
+CREATE TRIGGER t AFTER INSERT ON b FOR EACH ROW
+    INSERT INTO s VALUES (NEW.id + 100);
+
+statement ok
+INSERT INTO b VALUES (5);
+
+query II
+SELECT * FROM a ORDER BY id;
+----
+2	11
+
+query I
+SELECT * FROM s;
+----
+105
+
+statement ok
+DROP TRIGGER s_upsert ON s;
+
+# an upsert or MERGE in a statement trigger that reads the rows a row body wrote is refused when it fires
+statement ok
+CREATE TRIGGER s_upsert AFTER INSERT ON s REFERENCING NEW TABLE AS nt FOR EACH STATEMENT
+    INSERT INTO a SELECT id, 0 FROM nt ON CONFLICT DO UPDATE SET n = n + 1;
+
+statement error
+INSERT INTO b VALUES (6);
+----
+Not implemented Error: MERGE INTO and INSERT ... ON CONFLICT are not yet supported over the rows of a FOR EACH ROW trigger
+
+statement ok
+CREATE OR REPLACE TRIGGER s_upsert AFTER INSERT ON s REFERENCING NEW TABLE AS nt FOR EACH STATEMENT
+    MERGE INTO a USING nt ON a.id = nt.id
+    WHEN MATCHED THEN UPDATE SET n = a.n + 1
+    WHEN NOT MATCHED THEN INSERT VALUES (nt.id, 0);
+
+statement error
+INSERT INTO b VALUES (6);
+----
+Not implemented Error: MERGE INTO and INSERT ... ON CONFLICT are not yet supported over the rows of a FOR EACH ROW trigger
+
+# so is one with a volatile function, which the dependent join evaluates per firing row
+statement ok
+CREATE OR REPLACE TRIGGER s_upsert AFTER INSERT ON s FOR EACH STATEMENT
+    INSERT INTO a VALUES (2, (random() * 0)::INTEGER) ON CONFLICT DO UPDATE SET n = n + 1;
+
+statement error
+INSERT INTO b VALUES (6);
+----
+Not implemented Error: MERGE INTO and INSERT ... ON CONFLICT are not yet supported over the rows of a FOR EACH ROW trigger
+
+query II
+SELECT * FROM a ORDER BY id;
+----
+2	11
+
+query I
+SELECT * FROM s;
+----
+105
