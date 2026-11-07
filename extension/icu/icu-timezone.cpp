@@ -94,8 +94,8 @@ struct ICUFromNaiveTimestamp : public ICUDateFunc {
 			result = timestamp_tz_t(naive);
 			return true;
 		}
-		SetTimeParts(calendar, naive);
-		if (!TryGetTime(calendar, GetMicrosPart(naive), result)) {
+		const auto micros = SetTimeParts(calendar, naive);
+		if (!TryGetTime(calendar, micros, result)) {
 			error = "ICU date overflows timestamp range";
 			return false;
 		}
@@ -125,34 +125,15 @@ struct ICUFromNaiveTimestamp : public ICUDateFunc {
 	}
 
 	//! Shared by both forms: push the naive parts into the calendar, and recover the sub-millisecond remainder.
-	static void SetTimeParts(Calendar *calendar, timestamp_t naive) {
+	static uint64_t SetTimeParts(Calendar *calendar, timestamp_t naive) {
 		date_t local_date;
 		dtime_t local_time;
 		Timestamp::Convert(naive, local_date, local_time);
 
-		int32_t year, mm, dd;
-		Date::Convert(local_date, year, mm, dd);
-
-		int32_t hr, mn, secs, frac;
-		Time::Convert(local_time, hr, mn, secs, frac);
-		const int32_t millis = frac / int32_t(Interval::MICROS_PER_MSEC);
-
-		calendar->Set(CAL_YEAR, year);
-		calendar->Set(CAL_MONTH, int32_t(mm - 1));
-		calendar->Set(CAL_DATE, dd);
-		calendar->Set(CAL_HOUR_OF_DAY, hr);
-		calendar->Set(CAL_MINUTE, mn);
-		calendar->Set(CAL_SECOND, secs);
-		calendar->Set(CAL_MILLISECOND, millis);
-	}
-
-	static uint64_t GetMicrosPart(timestamp_t naive) {
-		date_t local_date;
-		dtime_t local_time;
-		Timestamp::Convert(naive, local_date, local_time);
-		int32_t hr, mn, secs, frac;
-		Time::Convert(local_time, hr, mn, secs, frac);
-		return uint64_t(frac % Interval::MICROS_PER_MSEC);
+		// A naive value counts proleptic Gregorian days, which the session calendar may number differently.
+		calendar->Set(CAL_JULIAN_DAY, local_date.days + JULIAN_1970_CE);
+		calendar->Set(CAL_MILLISECONDS_IN_DAY, int32_t(local_time.value / Interval::MICROS_PER_MSEC));
+		return uint64_t(local_time.value % Interval::MICROS_PER_MSEC);
 	}
 
 	static inline timestamp_tz_t Operation(Calendar *calendar, timestamp_t naive) {
@@ -160,33 +141,7 @@ struct ICUFromNaiveTimestamp : public ICUDateFunc {
 			return timestamp_tz_t(naive);
 		}
 
-		// Extract the parts from the "instant"
-		date_t local_date;
-		dtime_t local_time;
-		Timestamp::Convert(naive, local_date, local_time);
-
-		int32_t year;
-		int32_t mm;
-		int32_t dd;
-		Date::Convert(local_date, year, mm, dd);
-
-		int32_t hr;
-		int32_t mn;
-		int32_t secs;
-		int32_t frac;
-		Time::Convert(local_time, hr, mn, secs, frac);
-		int32_t millis = frac / int32_t(Interval::MICROS_PER_MSEC);
-		uint64_t micros = frac % Interval::MICROS_PER_MSEC;
-
-		// Use them to set the time in the time zone
-		calendar->Set(CAL_YEAR, year);
-		calendar->Set(CAL_MONTH, int32_t(mm - 1));
-		calendar->Set(CAL_DATE, dd);
-		calendar->Set(CAL_HOUR_OF_DAY, hr);
-		calendar->Set(CAL_MINUTE, mn);
-		calendar->Set(CAL_SECOND, secs);
-		calendar->Set(CAL_MILLISECOND, millis);
-
+		const auto micros = SetTimeParts(calendar, naive);
 		return GetTime(calendar, micros);
 	}
 
@@ -298,27 +253,9 @@ struct ICUToNaiveTimestamp : public ICUDateFunc {
 			return true;
 		}
 
-		// Extract the time zone parts
-		auto micros = int32_t(SetTime(calendar, instant));
-		const auto era = ExtractField(calendar, CAL_ERA);
-		const auto year = ExtractField(calendar, CAL_YEAR);
-		const auto mm = ExtractField(calendar, CAL_MONTH) + 1;
-		const auto dd = ExtractField(calendar, CAL_DATE);
-
-		const auto yyyy = era ? year : (-year + 1);
 		date_t local_date;
-		if (!Date::TryFromDate(yyyy, mm, dd, local_date)) {
-			error = "Unable to convert TIMESTAMPTZ to local date";
-			return false;
-		}
-
-		const auto hr = ExtractField(calendar, CAL_HOUR_OF_DAY);
-		const auto mn = ExtractField(calendar, CAL_MINUTE);
-		const auto secs = ExtractField(calendar, CAL_SECOND);
-		const auto millis = ExtractField(calendar, CAL_MILLISECOND);
-
-		micros += millis * int32_t(Interval::MICROS_PER_MSEC);
-		dtime_t local_time = Time::FromTime(hr, mn, secs, micros);
+		dtime_t local_time;
+		GetLocalTime(calendar, instant, local_date, local_time);
 
 		if (!Timestamp::TryFromDatetime(local_date, local_time, naive)) {
 			error = "Unable to convert TIMESTAMPTZ to local TIMESTAMP";

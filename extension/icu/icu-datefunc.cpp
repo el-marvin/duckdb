@@ -211,6 +211,27 @@ uint64_t ICUDateFunc::SetTimeNS(Calendar *calendar, timestamp_tz_ns_t date) {
 	return uint64_t(nanos);
 }
 
+void ICUDateFunc::GetLocalTime(Calendar *calendar, timestamp_tz_t instant, date_t &local_date, dtime_t &local_time) {
+	// Not FloorDiv: multiplying its quotient back overflows at the lower end of the timestamp range.
+	int64_t millis = instant.value / Interval::MICROS_PER_MSEC;
+	int64_t micros = instant.value % Interval::MICROS_PER_MSEC;
+	if (micros < 0) {
+		millis -= 1;
+		micros += Interval::MICROS_PER_MSEC;
+	}
+
+	// Naive values count proleptic Gregorian days, so only the zone is consulted, not the calendar's own fields.
+	int32_t raw_offset;
+	int32_t dst_offset;
+	calendar->GetTimeZone().GetOffset(millis, raw_offset, dst_offset);
+
+	int32_t millis_in_day;
+	const auto days =
+	    datetime::FloorDiv::Divide(millis + raw_offset + dst_offset, int32_t(datetime::MILLIS_PER_DAY), millis_in_day);
+	local_date = date_t(UnsafeNumericCast<int32_t>(days));
+	local_time = dtime_t(int64_t(millis_in_day) * Interval::MICROS_PER_MSEC + micros);
+}
+
 int32_t ICUDateFunc::ExtractField(Calendar *calendar, CalendarField field) {
 	const auto result = calendar->Get(field);
 	// a date the calendar cannot represent is something the query asked for, not a defect
