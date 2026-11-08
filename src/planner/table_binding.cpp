@@ -359,13 +359,13 @@ BindResult DummyBinding::Bind(LambdaRefExpression &lambdaref, idx_t depth) {
 	                                                      lambdaref.LambdaIndex(), depth));
 }
 
-unique_ptr<ParsedExpression> DummyBinding::ParamToArg(ColumnRefExpression &colref) {
+unique_ptr<ParsedExpression> DummyBinding::ParamToArg(const Identifier &parameter) {
 	column_t column_index;
-	if (!TryGetBindingIndex(colref.GetColumnName(), column_index)) {
-		throw InternalException("Column %s not found in macro", colref.GetColumnName());
+	if (!TryGetBindingIndex(parameter, column_index)) {
+		throw InternalException("Column %s not found in macro", parameter);
 	}
 	auto arg = (*arguments)[column_index]->Copy();
-	arg->SetAlias(colref.GetAlias());
+	arg->ClearAlias();
 	return arg;
 }
 

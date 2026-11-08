@@ -170,8 +170,8 @@ public:
 	//! Binding lambdas
 	BindResult Bind(LambdaRefExpression &lambda_ref, idx_t depth);
 
-	//! Returns a copy of the col_ref parameter as a parsed expression
-	unique_ptr<ParsedExpression> ParamToArg(ColumnRefExpression &col_ref);
+	//! Returns a copy of the argument of the parameter, without an alias
+	unique_ptr<ParsedExpression> ParamToArg(const Identifier &parameter);
 };
 
 enum class CTEType { CAN_BE_REFERENCED, CANNOT_BE_REFERENCED };

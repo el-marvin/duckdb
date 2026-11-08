@@ -26,7 +26,11 @@ public:
 	static Identifier SQLValueFunctionName(const Identifier &column_name);
 
 	//! Returns the STRUCT_EXTRACT operator expression
-	unique_ptr<ParsedExpression> CreateStructExtract(unique_ptr<ParsedExpression> base, const Identifier &field_name);
+	static unique_ptr<ParsedExpression> CreateStructExtract(unique_ptr<ParsedExpression> base,
+	                                                        const Identifier &field_name);
+	//! Reads the name parts from first_field on as field accesses of base, as in "base.f.g"
+	static unique_ptr<ParsedExpression> ExtractFields(unique_ptr<ParsedExpression> base,
+	                                                  const vector<Identifier> &names, idx_t first_field);
 	//! Returns a STRUCT_PACK function expression
 	unique_ptr<ParsedExpression> CreateStructPack(ColumnRefExpression &col_ref);
 

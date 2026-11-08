@@ -1,0 +1,408 @@
+# name: test/sql/catalog/function/macro_parameter_fields.test
+# description: Inside a macro body a name whose first part is a parameter is that parameter with the other parts as field accesses, in every part of the body
+# group: [function]
+
+# a field of a parameter in a body subquery, its dot call form, the plain spelling and the expression level
+
+statement ok
+CREATE MACRO sub_field(p) AS (SELECT lower(p.f));
+
+statement ok
+CREATE MACRO sub_field_dot(p) AS (SELECT p.f.lower());
+
+statement ok
+CREATE MACRO sub_field_plain(p) AS (SELECT lower(struct_extract(p, 'f')));
+
+statement ok
+CREATE MACRO top_field(p) AS lower(p.f);
+
+query TTTT
+SELECT sub_field({'f': 'A'}), sub_field_dot({'f': 'A'}), sub_field_plain({'f': 'A'}), top_field({'f': 'A'});
+----
+a	a	a	a
+
+query TTT
+SELECT sub_field(NULL::STRUCT(f VARCHAR)), sub_field({'f': NULL::VARCHAR}), sub_field_dot({'f': NULL::VARCHAR});
+----
+NULL	NULL	NULL
+
+statement error
+SELECT sub_field('x');
+----
+Cannot extract field 'f'
+
+# one, two and three field parts at the expression level, in a subquery and in a nested subquery
+
+statement ok
+CREATE MACRO parts(p) AS [p.a, p.b.c, p.d.e.g];
+
+statement ok
+CREATE MACRO parts_sub(p) AS (SELECT [p.a, p.b.c, p.d.e.g]);
+
+statement ok
+CREATE MACRO parts_nested(p) AS (SELECT (SELECT [p.a, p.b.c, p.d.e.g]));
+
+statement ok
+CREATE MACRO parts_plain(p) AS (SELECT (SELECT [struct_extract(p, 'a'), struct_extract(struct_extract(p, 'b'), 'c'), struct_extract(struct_extract(struct_extract(p, 'd'), 'e'), 'g')]));
+
+query TTTT
+SELECT parts(s), parts_sub(s), parts_nested(s), parts_plain(s) FROM (SELECT {'a': 1, 'b': {'c': 2}, 'd': {'e': {'g': 3}}} AS s);
+----
+[1, 2, 3]	[1, 2, 3]	[1, 2, 3]	[1, 2, 3]
+
+# names fold case as they do at the expression level, and a quoted field may hold a dot or look like an internal name
+
+statement ok
+CREATE MACRO folded(p) AS (SELECT [P.F, p."a.b"]);
+
+statement ok
+CREATE MACRO folded_top(p) AS [P.F, p."a.b"];
+
+query TT
+SELECT folded({'f': 1, 'a.b': 2}), folded_top({'f': 1, 'a.b': 2});
+----
+[1, 2]	[1, 2]
+
+statement ok
+CREATE MACRO internal_like_field(p, f) AS (SELECT p."0_macro_parameters_x".f);
+
+query I
+SELECT internal_like_field({'0_macro_parameters_x': {'f': 1}}, 99);
+----
+1
+
+# the parameter bare and with a field in one subquery
+
+statement ok
+CREATE MACRO bare_and_field(p) AS (SELECT p.a::VARCHAR || ' ' || p::VARCHAR);
+
+statement ok
+CREATE MACRO bare_and_field_plain(p) AS (SELECT struct_extract(p, 'a')::VARCHAR || ' ' || p::VARCHAR);
+
+query TT
+SELECT bare_and_field({'a': 1}), bare_and_field_plain({'a': 1});
+----
+1 {'a': 1}	1 {'a': 1}
+
+# a LIST field, a MAP field, a MAP parameter and a LIST parameter
+
+statement ok
+CREATE MACRO list_field(p) AS (SELECT p.f[2] + p.g[1].h);
+
+statement ok
+CREATE MACRO list_field_plain(p) AS (SELECT struct_extract(p, 'f')[2] + struct_extract(struct_extract(p, 'g')[1], 'h'));
+
+statement ok
+CREATE MACRO map_field(p) AS (SELECT p.f['k']);
+
+statement ok
+CREATE MACRO map_field_plain(p) AS (SELECT struct_extract(p, 'f')['k']);
+
+statement ok
+CREATE MACRO map_param(p) AS (SELECT p.k);
+
+statement ok
+CREATE MACRO map_param_plain(p) AS (SELECT p['k']);
+
+statement ok
+CREATE MACRO map_param_top(p) AS p.k;
+
+query IIIIIIII
+SELECT list_field({'f': [10, 20], 'g': [{'h': 1}]}), list_field_plain({'f': [10, 20], 'g': [{'h': 1}]}), map_field({'f': MAP {'k': 3}}), map_field_plain({'f': MAP {'k': 3}}), map_param(MAP {'k': 4}), map_param_plain(MAP {'k': 4}), map_param_top(MAP {'k': 4}), map_param(MAP {'j': 4});
+----
+21	21	3	3	4	4	4	NULL
+
+statement error
+SELECT map_param([{'k': 1}]);
+----
+Cannot extract field 'k'
+
+# a dot call on a field, on a deeper field, and a chain
+
+statement ok
+CREATE MACRO dot_fields(p) AS (SELECT [p.f.lower(), p.g.h.upper(), p.f.lower().upper()]);
+
+statement ok
+CREATE MACRO dot_fields_plain(p) AS (SELECT [lower(struct_extract(p, 'f')), upper(struct_extract(struct_extract(p, 'g'), 'h')), upper(lower(struct_extract(p, 'f')))]);
+
+statement ok
+CREATE MACRO dot_fields_top(p) AS [p.f.lower(), p.g.h.upper(), p.f.lower().upper()];
+
+query TTT
+SELECT dot_fields({'f': 'Ab', 'g': {'h': 'cD'}}), dot_fields_plain({'f': 'Ab', 'g': {'h': 'cD'}}), dot_fields_top({'f': 'Ab', 'g': {'h': 'cD'}});
+----
+[ab, CD, AB]	[ab, CD, AB]	[ab, CD, AB]
+
+# table macros: the field in SELECT, WHERE, ORDER BY, a table function argument and a subquery
+
+statement ok
+CREATE MACRO tm_fields(p) AS TABLE
+SELECT i + p.add AS v, (SELECT p.s.lower()) AS w FROM range(p.n) r(i) WHERE i < p.lim ORDER BY i * p.dir;
+
+statement ok
+CREATE MACRO tm_fields_plain(p) AS TABLE
+SELECT i + struct_extract(p, 'add') AS v, (SELECT lower(struct_extract(p, 's'))) AS w FROM range(struct_extract(p, 'n')) r(i)
+WHERE i < struct_extract(p, 'lim') ORDER BY i * struct_extract(p, 'dir');
+
+query IT
+SELECT * FROM tm_fields({'add': 100, 'n': 5, 'lim': 3, 'dir': -1, 's': 'X'});
+----
+102	x
+101	x
+100	x
+
+query IT
+SELECT * FROM tm_fields_plain({'add': 100, 'n': 5, 'lim': 3, 'dir': -1, 's': 'X'});
+----
+102	x
+101	x
+100	x
+
+# table macros: GROUP BY and HAVING, a PIVOT aggregate, a table macro passing a field to a table macro
+
+statement ok
+CREATE MACRO tm_groups(p) AS TABLE SELECT i % p.m AS g, count(*) AS c FROM range(6) r(i) GROUP BY i % p.m HAVING count(*) > p.h ORDER BY g;
+
+statement ok
+CREATE MACRO tm_groups_outer(p) AS TABLE SELECT * FROM tm_groups(p.inner);
+
+query II
+FROM tm_groups({'m': 3, 'h': 1});
+----
+0	2
+1	2
+2	2
+
+query II
+FROM tm_groups_outer({'inner': {'m': 2, 'h': 0}});
+----
+0	3
+1	3
+
+statement ok
+CREATE TABLE pivot_src AS SELECT * FROM (VALUES (1, 'x'), (2, 'y')) v(a, k);
+
+statement ok
+CREATE MACRO tm_pivot(p) AS TABLE PIVOT pivot_src ON k IN ('x', 'y') USING sum(a * p.m);
+
+query II
+FROM tm_pivot({'m': 10});
+----
+10	20
+
+# subqueries of a scalar body: EXISTS, IN and a recursive CTE
+
+statement ok
+CREATE MACRO sub_kinds(p) AS [(SELECT EXISTS (SELECT 1 FROM range(3) r(i) WHERE i = p.f))::INTEGER, (SELECT p.f IN (SELECT i FROM range(2) r(i)))::INTEGER, (WITH RECURSIVE r(i) AS (SELECT p.s UNION ALL SELECT i + 1 FROM r WHERE i < p.e) SELECT sum(i) FROM r)::INTEGER];
+
+query T
+SELECT sub_kinds({'f': 1, 's': 1, 'e': 4});
+----
+[1, 1, 10]
+
+# table macros: an unaliased field read is named after the argument text, as the bare parameter is
+
+statement ok
+CREATE MACRO tm_unaliased(p) AS TABLE SELECT p.f, p.f.lower(), p FROM range(1);
+
+query T
+SELECT column_name FROM (DESCRIBE FROM tm_unaliased({'f': 'Z'}));
+----
+(struct_pack(f := 'Z')).f
+lower((struct_pack(f := 'Z')).f)
+struct_pack(f := 'Z')
+
+# table macros: a field as a named table function argument and in COLUMNS
+
+statement ok
+CREATE MACRO tm_named(p) AS TABLE FROM repeat_row(p.v, num_rows := p.n);
+
+query I
+FROM tm_named({'v': 7, 'n': 2});
+----
+7
+7
+
+statement ok
+CREATE MACRO tm_columns(p) AS TABLE SELECT COLUMNS(p.re) FROM (SELECT 1 AS ab, 2 AS ac, 3 AS b);
+
+query II
+FROM tm_columns({'re': 'a.*'});
+----
+1	2
+
+# window macros: the body's parameters are replaced, the caller's OVER and FILTER clauses keep the caller's names
+
+statement ok
+CREATE TABLE wt AS SELECT * FROM (VALUES (2, 10, 2), (1, 20, 1)) v(f, x, c);
+
+statement ok
+CREATE MACRO wsum(wt, v) AS sum(v * wt.k);
+
+statement ok
+CREATE MACRO wcount(c) AS count(c);
+
+statement ok
+CREATE MACRO wfilter(c, v) AS sum(v) FILTER (WHERE v > c.min);
+
+query III
+SELECT f, wsum({'k': 1}, x) OVER (ORDER BY (SELECT wt.f)), wsum({'k': 1}, x) FILTER (WHERE (SELECT wt.f) > 1) OVER () FROM wt ORDER BY f;
+----
+1	20	10
+2	30	10
+
+query III
+SELECT f, wcount(x) OVER (ORDER BY (SELECT c)), wfilter({'min': 5}, x) FILTER (WHERE (SELECT c) < 2) OVER () FROM wt ORDER BY f;
+----
+1	1	20
+2	2	20
+
+# the aggregate of a window macro body is found after the body is qualified, also when written as a dot call
+
+statement ok
+CREATE MACRO wdot(v) AS v.sum();
+
+query I
+SELECT wdot(x) OVER () FROM wt ORDER BY f;
+----
+30
+30
+
+# lambdas: reading a field, a lambda parameter named like the field, and a lambda parameter named like the macro parameter
+
+statement ok
+CREATE MACRO lam(p) AS [list_transform([1, 2], lambda x: p.f + x), list_transform([1, 2], lambda f: p.f + f)];
+
+statement ok
+CREATE MACRO lam_sub(p) AS (SELECT [list_transform([1, 2], lambda x: p.f + x), list_transform([1, 2], lambda f: p.f + f), list_transform([{'f': 7}], lambda p: p.f)]);
+
+statement ok
+CREATE MACRO lam_plain(p) AS (SELECT [list_transform([1, 2], lambda x: struct_extract(p, 'f') + x), list_transform([1, 2], lambda f: struct_extract(p, 'f') + f), list_transform([{'f': 7}], lambda p: struct_extract(p, 'f'))]);
+
+statement ok
+CREATE MACRO tm_lam(p) AS TABLE SELECT list_transform([1, 2], lambda f: p.f + f) AS l;
+
+query TTTT
+SELECT lam({'f': 10}), lam_sub({'f': 10}), lam_plain({'f': 10}), (SELECT l FROM tm_lam({'f': 10}));
+----
+[[11, 12], [11, 12]]	[[11, 12], [11, 12], [7]]	[[11, 12], [11, 12], [7]]	[11, 12]
+
+# a CTE of the body, in a scalar and a table macro
+
+statement ok
+CREATE MACRO cte(p) AS (WITH c AS (SELECT p.f AS v) SELECT v * 2 FROM c WHERE v > p.g);
+
+statement ok
+CREATE MACRO cte_plain(p) AS (WITH c AS (SELECT struct_extract(p, 'f') AS v) SELECT v * 2 FROM c WHERE v > struct_extract(p, 'g'));
+
+statement ok
+CREATE MACRO tm_cte(p) AS TABLE WITH c AS (SELECT p.f AS v) SELECT v * 2 AS w FROM c WHERE v > p.g;
+
+query III
+SELECT cte({'f': 4, 'g': 1}), cte_plain({'f': 4, 'g': 1}), (SELECT w FROM tm_cte({'f': 4, 'g': 1}));
+----
+8	8	8
+
+# a macro passing a field to a macro, and a parameter to a macro that reads its field
+
+statement ok
+CREATE MACRO pass_field(p) AS (SELECT sub_field(p.g) || sub_field_dot(p.g));
+
+query T
+SELECT pass_field({'g': {'f': 'Q'}});
+----
+qq
+
+# a parameter named like a caller table is the parameter, in a scalar and in a table macro
+
+statement ok
+CREATE TABLE p AS SELECT -7 AS f;
+
+statement ok
+CREATE MACRO abs_field(p) AS (SELECT abs(p.f));
+
+statement ok
+CREATE MACRO abs_field_plain(p) AS (SELECT abs(struct_extract(p, 'f')));
+
+statement ok
+CREATE MACRO tm_abs_field(p) AS TABLE SELECT abs(p.f) AS v, p.f.abs() AS w;
+
+query IIII
+SELECT abs_field({'f': -3}), abs_field_plain({'f': -3}), (SELECT v FROM tm_abs_field({'f': -3})), (SELECT w FROM tm_abs_field({'f': -3})) FROM p;
+----
+3	3	3	3
+
+statement error
+SELECT abs_field({'g': -3}) FROM p;
+----
+<REGEX>:.*not find key.*f.*
+
+# a table of the body's own FROM named like the parameter does not win either, as for the bare name
+
+statement ok
+CREATE MACRO own_from(p) AS (SELECT [p.f, struct_extract(p, 'f')] FROM (SELECT 5 AS f) p);
+
+statement ok
+CREATE MACRO own_from_bare(p) AS (SELECT p FROM (SELECT 5 AS f) p);
+
+statement ok
+CREATE MACRO tm_own_from(p) AS TABLE SELECT p.f AS v FROM (SELECT 5 AS f) p;
+
+query TTI
+SELECT own_from({'f': 1}), own_from_bare({'f': 1}), (SELECT v FROM tm_own_from({'f': 1}));
+----
+[1, 1]	{'f': 1}	1
+
+# so a body CTE named like the parameter does not, nor a schema qualifier equal to a parameter name
+
+statement ok
+CREATE MACRO cte_named(p) AS (WITH p AS (SELECT 1 AS x) SELECT p.x FROM p);
+
+statement ok
+CREATE TABLE qt AS SELECT 42 AS c;
+
+statement ok
+CREATE MACRO schema_named(main) AS (SELECT main.qt.c FROM qt);
+
+query II
+SELECT cte_named({'x': 5}), schema_named({'qt': {'c': 55}});
+----
+5	55
+
+# a qualified name whose first part is no parameter reads the body's table, also when its last part is one
+
+statement ok
+CREATE MACRO other_table(p) AS (SELECT [t.f, t.p] FROM (SELECT 5 AS f, 6 AS p) t);
+
+query T
+SELECT other_table({'f': 1});
+----
+[5, 6]
+
+# DEFAULT: a defaulted parameter read with a field, and a DEFAULT that reads a field is refused
+
+statement ok
+CREATE MACRO def_field(x, p := {'f': 'D'}) AS (SELECT x || p.f);
+
+statement ok
+CREATE MACRO def_field_plain(x, p := {'f': 'D'}) AS (SELECT x || struct_extract(p, 'f'));
+
+query TTTT
+SELECT def_field('a'), def_field_plain('a'), def_field('a', p := {'f': 'E'}), def_field_plain('a', p := {'f': 'E'});
+----
+aD	aD	aE	aE
+
+statement error
+CREATE MACRO def_reads(p, q := p.f) AS q;
+----
+cannot contain column names
+
+# a view over a macro whose subquery reads a field
+
+statement ok
+CREATE VIEW v AS SELECT sub_field({'f': 'V'}) AS r, (SELECT v FROM tm_own_from({'f': 2})) AS s;
+
+query TI
+FROM v;
+----
+v	2

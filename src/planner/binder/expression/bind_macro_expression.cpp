@@ -35,17 +35,21 @@ void ExpressionBinder::ReplaceMacroParametersInLambda(FunctionExpression &functi
 	    });
 }
 
-static bool IsMacroParameter(DummyBinding &macro_binding, const ColumnRefExpression &col_ref,
-                             const vector<identifier_set_t> &lambda_params) {
-	if (LambdaExpression::IsLambdaParameter(lambda_params, col_ref.GetColumnName())) {
-		return false;
+//! The name part of col_ref that is a macro parameter, whose later parts are its fields, or invalid if it names none
+static optional_idx GetMacroParameterPart(DummyBinding &macro_binding, const ColumnRefExpression &col_ref,
+                                          const vector<identifier_set_t> &lambda_params) {
+	auto &names = col_ref.ColumnNames();
+	if (names.size() == 2 && names[0].StartsWith(DummyBinding::DUMMY_NAME)) {
+		// written by the dummy qualification, which makes any fields struct extracts around it
+		if (LambdaExpression::IsLambdaParameter(lambda_params, names[1])) {
+			return optional_idx();
+		}
+		return 1;
 	}
-	if (col_ref.IsQualified()) {
-		// the table qualifier is the component directly before the column name
-		auto &names = col_ref.ColumnNames();
-		return names[names.size() - 2].StartsWith(DummyBinding::DUMMY_NAME);
+	if (LambdaExpression::IsLambdaParameter(lambda_params, names[0]) || !macro_binding.HasMatchingBinding(names[0])) {
+		return optional_idx();
 	}
-	return macro_binding.HasMatchingBinding(col_ref.GetColumnName());
+	return 0;
 }
 
 void ExpressionBinder::ReplaceMacroParameters(unique_ptr<ParsedExpression> &expr,
@@ -54,9 +58,13 @@ void ExpressionBinder::ReplaceMacroParameters(unique_ptr<ParsedExpression> &expr
 	case ExpressionClass::COLUMN_REF: {
 		// If the expression is a column reference, we replace it with its argument.
 		auto &col_ref = expr->Cast<ColumnRefExpression>();
-		if (IsMacroParameter(*macro_binding, col_ref, lambda_params)) {
-			D_ASSERT(macro_binding->HasMatchingBinding(col_ref.GetColumnName()));
-			expr = macro_binding->ParamToArg(col_ref);
+		auto part = GetMacroParameterPart(*macro_binding, col_ref, lambda_params);
+		if (part.IsValid()) {
+			auto &names = col_ref.ColumnNames();
+			auto arg = macro_binding->ParamToArg(names[part.GetIndex()]);
+			arg = ColumnQualifier::ExtractFields(std::move(arg), names, part.GetIndex() + 1);
+			arg->SetAlias(col_ref.GetAlias());
+			expr = std::move(arg);
 		}
 		return;
 	}
@@ -66,7 +74,7 @@ void ExpressionBinder::ReplaceMacroParameters(unique_ptr<ParsedExpression> &expr
 		// table macro bodies; the catalog lookup comes last, as it can fail on a call no bind reads (an unused CTE)
 		if (!function.GetQualifiedName().Schema().empty()) {
 			auto receiver = ColumnQualifier::CreateDotCallReceiver(function.GetQualifiedName());
-			if (IsMacroParameter(*macro_binding, *receiver, lambda_params) &&
+			if (GetMacroParameterPart(*macro_binding, *receiver, lambda_params).IsValid() &&
 			    ColumnQualifier::IsDotCall(binder, function)) {
 				ColumnQualifier::MakePlainCall(function, std::move(receiver));
 			}
@@ -135,8 +143,22 @@ void ExpressionBinder::FindAggregateExprs(unique_ptr<ParsedExpression> &expr,
 	    *expr, [&](unique_ptr<ParsedExpression> &child_expr) { FindAggregateExprs(child_expr, exprs); });
 }
 
-void ExpressionBinder::UnfoldWindowMacroExpression(unique_ptr<ParsedExpression> &expr, ScalarMacroFunction &macro_def) {
-	auto macro_copy = macro_def.expression->Copy();
+static optional_ptr<unique_ptr<ParsedExpression>> FindExpressionSlot(unique_ptr<ParsedExpression> &expr,
+                                                                     const ParsedExpression &target) {
+	if (expr.get() == &target) {
+		return &expr;
+	}
+	optional_ptr<unique_ptr<ParsedExpression>> result;
+	ParsedExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<ParsedExpression> &child) {
+		if (!result) {
+			result = FindExpressionSlot(child, target);
+		}
+	});
+	return result;
+}
+
+void ExpressionBinder::UnfoldWindowMacroExpression(unique_ptr<ParsedExpression> &expr,
+                                                   unique_ptr<ParsedExpression> macro_copy) {
 	vector<reference<unique_ptr<ParsedExpression>>> aggregate_exprs;
 	FindAggregateExprs(macro_copy, aggregate_exprs);
 
@@ -145,8 +167,18 @@ void ExpressionBinder::UnfoldWindowMacroExpression(unique_ptr<ParsedExpression> 
 		throw BinderException("Window function macro bodies must contain exactly one aggregate function");
 	}
 
+	// the caller's window clause is caller text, so the parameters are replaced before it goes in; the replacement
+	// replaces only column references, so the aggregate node survives it, though possibly in a moved slot
+	auto &aggregate = *aggregate_exprs[0].get();
+	vector<identifier_set_t> lambda_params;
+	ReplaceMacroParameters(macro_copy, lambda_params);
+	auto agg_slot = FindExpressionSlot(macro_copy, aggregate);
+	if (!agg_slot) {
+		throw InternalException("Window function macro aggregate not found after replacing its parameters");
+	}
+
 	// The window spec is pushed down to the aggregate function target within the macro body
-	unique_ptr<ParsedExpression> &agg_expr_ref = aggregate_exprs[0];
+	unique_ptr<ParsedExpression> &agg_expr_ref = *agg_slot;
 	auto &agg_fn_expr = agg_expr_ref->Cast<FunctionExpression>();
 
 	// Transfer the macro function attributes
@@ -197,22 +229,21 @@ MacroFunction &ExpressionBinder::UnfoldMacroExpression(FunctionExpression &funct
 	    MacroFunction::CreateDummyBinding(macro_def, macro_func.name, positional_arguments, named_arguments);
 	macro_binding = new_macro_binding.get();
 
+	// qualify only the macro parameters with a new empty binder that only knows the macro binding
+	auto body = macro_def.expression->Copy();
+	auto dummy_binder = Binder::CreateBinder(context);
+	dummy_binder->macro_binding = new_macro_binding.get();
+	ExpressionBinder::QualifyColumnNames(*dummy_binder, body);
+
 	// replace current expression with stored macro expression
 	// special case: If this is a window function, then we need to return a window expression
 	if (expr->GetExpressionClass() == ExpressionClass::WINDOW) {
-		UnfoldWindowMacroExpression(expr, macro_def);
+		UnfoldWindowMacroExpression(expr, std::move(body));
 	} else {
-		expr = macro_def.expression->Copy();
+		vector<identifier_set_t> lambda_params;
+		ReplaceMacroParameters(body, lambda_params);
+		expr = std::move(body);
 	}
-
-	// qualify only the macro parameters with a new empty binder that only knows the macro binding
-	auto dummy_binder = Binder::CreateBinder(context);
-	dummy_binder->macro_binding = new_macro_binding.get();
-	ExpressionBinder::QualifyColumnNames(*dummy_binder, expr);
-
-	// now replace the parameters
-	vector<identifier_set_t> lambda_params;
-	ReplaceMacroParameters(expr, lambda_params);
 	return macro_def;
 }
 

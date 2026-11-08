@@ -279,7 +279,7 @@ SELECT l_dot(-2), l_plain(-2), ls_dot(-2), ls_plain(-2), lt_dot([1, 2]), lt_plai
 ----
 [3, 4]	[3, 4]	[3, 4]	[3, 4]	[2, 3]	[2, 3]	[5]	[5]
 
-# a parameter named like a caller table is the parameter; a qualified receiver reads the table as lower(p.c) does
+# a parameter named like a caller table is the parameter, also as a receiver with a field, as for lower(p.c)
 
 statement ok
 CREATE TABLE p AS SELECT -7 AS c;
@@ -291,9 +291,9 @@ statement ok
 CREATE MACRO sq_plain(p) AS (SELECT abs(p.c));
 
 query IIIIIIII
-SELECT s_dot(-2), s_plain(-2), e_dot(-2), e_plain(-2), s_dot(c), s_plain(c), sq_dot(-2), sq_plain(-2) FROM p;
+SELECT s_dot(-2), s_plain(-2), e_dot(-2), e_plain(-2), s_dot(c), s_plain(c), sq_dot({'c': -3}), sq_plain({'c': -3}) FROM p;
 ----
-2	2	2	2	7	7	7	7
+2	2	2	2	7	7	3	3
 
 # a parameter named like a caller column or a column of the body's own FROM is the parameter, as for the plain call
 

@@ -24,8 +24,7 @@ unique_ptr<ParsedExpression> ExpressionBinder::GetSQLValueFunction(const Identif
 
 unique_ptr<ParsedExpression> ExpressionBinder::CreateStructExtract(unique_ptr<ParsedExpression> base,
                                                                    const Identifier &field_name) {
-	ColumnQualifier qualifier(binder);
-	return qualifier.CreateStructExtract(std::move(base), field_name);
+	return ColumnQualifier::CreateStructExtract(std::move(base), field_name);
 }
 
 unique_ptr<ParsedExpression> ExpressionBinder::CreateStructPack(ColumnRefExpression &col_ref) {

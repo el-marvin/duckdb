@@ -10,10 +10,6 @@ SELECT my_extract({'a': {'b': 42}})
 ----
 42
 
-mode skip instable
-# FIXME: this does not work yet due to the way in which macro functions are bound
-# as it is not trivial to fix, for now we leave it as is
-
 statement ok
 CREATE MACRO my_subquery_extract(x) AS (SELECT x.a.b);
 
@@ -21,5 +17,3 @@ query I
 SELECT my_subquery_extract({'a': {'b': 42}})
 ----
 42
-
-mode unskip

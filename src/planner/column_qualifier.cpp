@@ -88,6 +88,14 @@ unique_ptr<ParsedExpression> ColumnQualifier::CreateStructExtract(unique_ptr<Par
 	return std::move(extract_fun);
 }
 
+unique_ptr<ParsedExpression> ColumnQualifier::ExtractFields(unique_ptr<ParsedExpression> base,
+                                                            const vector<Identifier> &names, idx_t first_field) {
+	for (idx_t i = first_field; i < names.size(); i++) {
+		base = CreateStructExtract(std::move(base), names[i]);
+	}
+	return base;
+}
+
 // Build the candidate table-qualification interpretations for a reference "[qualifiers...].table", in precedence
 // order (most top-level first): "catalog + schema path" before "schema path only".
 static vector<BindingAlias> GetTableQualifications(const vector<Identifier> &names, idx_t table_index) {
@@ -516,12 +524,7 @@ unique_ptr<ParsedExpression> ColumnQualifier::QualifyColumnNameWithManyDots(Colu
 		return nullptr;
 	}
 
-	// create a struct extract with all remaining column names
-	for (idx_t i = struct_extract_start; i < col_ref.ColumnNames().size(); i++) {
-		result_expr = CreateStructExtract(std::move(result_expr), col_ref.ColumnNames()[i]);
-	}
-
-	return result_expr;
+	return ExtractFields(std::move(result_expr), col_ref.ColumnNames(), struct_extract_start);
 }
 
 unique_ptr<ParsedExpression> ColumnQualifier::QualifyColumnName(ColumnRefExpression &colref, ErrorData &error) {
@@ -590,7 +593,7 @@ unique_ptr<ParsedExpression> ColumnQualifier::QualifyColumnNameInternal(ColumnRe
 		auto qualified_col_ref = QualifyColumnName(col_ref, col_ref.ColumnNames()[0], other_error);
 		if (qualified_col_ref) {
 			// we could: create a struct extract
-			return CreateStructExtract(std::move(qualified_col_ref), col_ref.ColumnNames()[1]);
+			return ExtractFields(std::move(qualified_col_ref), col_ref.ColumnNames(), 1);
 		}
 		// we could not! Try creating an implicit struct_pack
 		return CreateStructPack(col_ref);
