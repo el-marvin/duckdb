@@ -18,6 +18,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_binder.hpp"
 #include "duckdb/planner/column_qualifier.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
 
 #include <functional>
@@ -103,8 +104,6 @@ struct ListReduceRebindResult {
 	vector<LogicalType> capture_child_types;
 	bind_lambda_function_t override_bind_lambda = nullptr;
 	unique_ptr<BindLambdaContext> override_bind_lambda_context;
-	LogicalType override_accumulator_type_storage;
-	bool override_has_accumulator_type = false;
 };
 
 //! Avoid repeated rebinds for DECIMAL type widening by forcing the lambda return type to the chosen accumulator type
@@ -126,6 +125,9 @@ static void CastDecimalLambdaToAccumulatorType(ClientContext &context, BindResul
 	rebound_lambda_expr.LambdaExprMutable() = std::move(cast_expr);
 }
 
+//! Lets a chain of seven struct fields that feed each other settle and stops a body whose type never settles
+static constexpr idx_t MAX_LIST_REDUCE_LAMBDA_BINDS = 8;
+
 ListReduceRebindResult MaybeRebindListReduceLambda(ClientContext &context, idx_t depth,
                                                    const vector<LogicalType> &function_child_types,
                                                    bind_lambda_function_t bind_lambda_function,
@@ -137,8 +139,6 @@ ListReduceRebindResult MaybeRebindListReduceLambda(ClientContext &context, idx_t
 	result.capture_child_types = function_child_types;
 
 	const bool has_initial = function_child_types.size() == 3;
-	auto &bound_lambda_expr = bind_lambda_result.expression->Cast<BoundLambdaExpression>();
-	const auto &lambda_return_type = bound_lambda_expr.LambdaExpr()->GetReturnType();
 
 	auto list_child_type = function_child_types[0];
 	if (list_child_type.id() != LogicalTypeId::SQLNULL && list_child_type.id() != LogicalTypeId::UNKNOWN) {
@@ -151,61 +151,63 @@ ListReduceRebindResult MaybeRebindListReduceLambda(ClientContext &context, idx_t
 		}
 	}
 
-	LogicalType accumulator_type;
-	if (has_initial) {
-		const auto &initial_type = function_child_types[2];
-		if (!LogicalType::TryGetMaxLogicalType(context, initial_type, lambda_return_type, accumulator_type)) {
-			throw BinderException("No common super type between initial value type %s and lambda return type %s",
-			                      initial_type.ToString(), lambda_return_type.ToString());
-		}
-	} else {
-		if (!LogicalType::TryGetMaxLogicalType(context, list_child_type, lambda_return_type, accumulator_type)) {
-			throw BinderException("No common super type between list element type %s and lambda return type %s",
-			                      list_child_type.ToString(), lambda_return_type.ToString());
-		}
-	}
-
-	// operator== ignores collations, but a collated accumulator changes how the body compares strings
+	// the first bind gives acc this type, and ListReduceBind combines it with the body's result type
 	const auto &first_bind_accumulator_type = has_initial ? function_child_types[2] : list_child_type;
-	if (accumulator_type.EqualsIncludingCollation(first_bind_accumulator_type)) {
-		return result;
-	}
+	auto bound_accumulator_type = first_bind_accumulator_type;
+	for (idx_t bind_count = 1;; bind_count++) {
+		// each bind rebinds every nested list_reduce, which runs its own loop, so a deep nest can bind for long
+		context.InterruptCheck();
+		auto &bound_lambda_expr = bind_lambda_result.expression->Cast<BoundLambdaExpression>();
+		const auto lambda_return_type = bound_lambda_expr.LambdaExpr()->GetReturnType();
 
-	if (has_initial) {
-		D_ASSERT(lambda_expr_copy);
-		auto rebind_child_types = function_child_types;
-		rebind_child_types[2] = accumulator_type;
-
-		auto lambda_expr_rebind_copy = lambda_expr_copy->Copy();
-		auto &lambda_expr_rebind = lambda_expr_rebind_copy->Cast<LambdaExpression>();
-		bind_lambda_result = bind_lambda_expression(lambda_expr_rebind, depth, rebind_child_types,
-		                                            &bind_lambda_function, bind_lambda_context);
-		if (bind_lambda_result.HasError()) {
-			bind_lambda_result.error.Throw();
+		LogicalType accumulator_type;
+		if (!LogicalType::TryGetMaxLogicalType(context, first_bind_accumulator_type, lambda_return_type,
+		                                       accumulator_type)) {
+			if (has_initial) {
+				throw BinderException("No common super type between initial value type %s and lambda return type %s",
+				                      first_bind_accumulator_type.ToString(), lambda_return_type.ToString());
+			}
+			throw BinderException("No common super type between list element type %s and lambda return type %s",
+			                      first_bind_accumulator_type.ToString(), lambda_return_type.ToString());
 		}
 
-		CastDecimalLambdaToAccumulatorType(context, bind_lambda_result, accumulator_type);
-		result.did_rebind = true;
-		result.capture_child_types = std::move(rebind_child_types);
-	} else {
+		// operator== ignores collations, but a collated accumulator changes how the body compares strings
+		if (accumulator_type.EqualsIncludingCollation(bound_accumulator_type)) {
+			return result;
+		}
+		if (bind_count == MAX_LIST_REDUCE_LAMBDA_BINDS) {
+			throw BinderException("The accumulator type of list_reduce did not settle in %d binds of its lambda: with "
+			                      "accumulator type %s the lambda returns %s. Cast the lambda result to the type the "
+			                      "accumulator should have, or give an initial value of that type",
+			                      MAX_LIST_REDUCE_LAMBDA_BINDS, bound_accumulator_type.ToString(),
+			                      lambda_return_type.ToString());
+		}
+
 		if (!lambda_expr_copy) {
 			throw InternalException("list_reduce lambda copy is missing for rebind");
 		}
-		auto &lambda_expr_rebind = lambda_expr_copy->Cast<LambdaExpression>();
-		result.override_bind_lambda = &ListReduceBindLambdaOverride;
-		result.override_bind_lambda_context = make_uniq<ListReduceBindLambdaContext>(accumulator_type);
-		bind_lambda_result = bind_lambda_expression(lambda_expr_rebind, depth, function_child_types,
-		                                            &result.override_bind_lambda, *result.override_bind_lambda_context);
+		auto lambda_expr_rebind_copy = lambda_expr_copy->Copy();
+		auto &lambda_expr_rebind = lambda_expr_rebind_copy->Cast<LambdaExpression>();
+		if (has_initial) {
+			auto rebind_child_types = function_child_types;
+			rebind_child_types[2] = accumulator_type;
+			bind_lambda_result = bind_lambda_expression(lambda_expr_rebind, depth, rebind_child_types,
+			                                            &bind_lambda_function, bind_lambda_context);
+			result.capture_child_types = std::move(rebind_child_types);
+		} else {
+			result.override_bind_lambda = &ListReduceBindLambdaOverride;
+			auto override_bind_lambda_context = make_uniq<ListReduceBindLambdaContext>(accumulator_type);
+			bind_lambda_result = bind_lambda_expression(lambda_expr_rebind, depth, function_child_types,
+			                                            &result.override_bind_lambda, *override_bind_lambda_context);
+			result.override_bind_lambda_context = std::move(override_bind_lambda_context);
+		}
 		if (bind_lambda_result.HasError()) {
 			bind_lambda_result.error.Throw();
 		}
 		CastDecimalLambdaToAccumulatorType(context, bind_lambda_result, accumulator_type);
 		result.did_rebind = true;
-		result.override_accumulator_type_storage = accumulator_type;
-		result.override_has_accumulator_type = true;
+		bound_accumulator_type = std::move(accumulator_type);
 	}
-
-	return result;
 }
 
 } // namespace
@@ -520,7 +522,7 @@ BindResult ExpressionBinder::BindLambdaFunction(FunctionExpression &function, Sc
 	// the aliases of list_reduce (e.g. reduce) are separate catalog entries
 	const bool is_list_reduce = func.name == "list_reduce" || func.alias_of == "list_reduce";
 	if (is_list_reduce) {
-		// We have to make this copy before binding in case we have to double-bind
+		// binding consumes the parsed lambda, and list_reduce may bind it again
 		lambda_expr_copy = lambda_expr.Copy();
 	}
 
@@ -541,9 +543,8 @@ BindResult ExpressionBinder::BindLambdaFunction(FunctionExpression &function, Sc
 	};
 
 	if (is_list_reduce) {
-		// list_reduce requires binding the lambda function a second time as there is a cyclical dependency between its
-		// acc parameter type and its return type. This is resolved by initially binding it with acc = initial, and then
-		// rebinding it with acc = return type
+		// the type of acc depends on the type the lambda returns, so list_reduce binds the lambda again until the
+		// accumulator type no longer changes
 		auto rebind_result =
 		    MaybeRebindListReduceLambda(context, depth, function_child_types, bind_lambda_function, bind_lambda_result,
 		                                bind_lambda_expression, nullptr, lambda_expr_copy);

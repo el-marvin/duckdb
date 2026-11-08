@@ -1,5 +1,5 @@
 # name: test/sql/function/list/lambdas/reduce_nested_rebind.test
-# description: list_reduce binds its lambda a second time only when the accumulator type changes, nested calls included
+# description: list_reduce binds its lambda again only while the accumulator type changes, nested calls included
 # group: [lambdas]
 
 statement ok
@@ -412,6 +412,205 @@ SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: list_reduce(
 ----
 24.0	DOUBLE
 
+# a body whose fields feed each other widens the accumulator over several binds, until the type settles
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 2, 'b': 20}, {'a': 3, 'b': 30}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}) AS r);
+----
+{'a': 1.5, 'b': 12.0}	STRUCT(a DOUBLE, b DOUBLE)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}) AS r);
+----
+{'a': 2.5, 'b': 12.5}	STRUCT(a DOUBLE, b DOUBLE)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}, {'a': 1, 'b': 10}) AS r);
+----
+{'a': 2.5, 'b': 12.5}	STRUCT(a DOUBLE, b DOUBLE)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a, 't': typeof(acc.b)}) AS r);
+----
+{'a': 2.5, 'b': 12.5, 't': DOUBLE}	STRUCT(a DOUBLE, b DOUBLE, t VARCHAR)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 'q', 'b': 'x'}, {'a': 'r', 'b': 'y'}, {'a': 's', 'b': 'z'}], lambda acc, x: {'a': x.a COLLATE nocase, 'b': CASE WHEN acc.b = 'Q' THEN 'hit' ELSE acc.a END}) AS r);
+----
+{'a': s, 'b': hit}	STRUCT(a VARCHAR('nocase'), b VARCHAR('nocase'))
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 'r', 'b': 'y'}, {'a': 's', 'b': 'z'}], lambda acc, x: {'a': x.a COLLATE nocase, 'b': CASE WHEN acc.b = 'Q' THEN 'hit' ELSE acc.a END}, {'a': 'q', 'b': 'x'}) AS r);
+----
+{'a': s, 'b': hit}	STRUCT(a VARCHAR('nocase'), b VARCHAR('nocase'))
+
+# INTEGER and UHUGEINT combine to BIGINT, BIGINT and UHUGEINT to HUGEINT, and HUGEINT and UHUGEINT to DOUBLE, so these
+# bodies widen the accumulator again on each bind until it is DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1::UHUGEINT, 2::UHUGEINT], lambda acc, x: CASE WHEN acc > 5 THEN acc ELSE x END, 0::INTEGER) AS r);
+----
+2.0	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda acc, x: greatest(acc, 1::UHUGEINT)) AS r);
+----
+1.0	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1::INTEGER, 'b': 2::UHUGEINT}, {'a': 3::INTEGER, 'b': 4::UHUGEINT}], lambda acc, x: {'a': acc.b, 'b': acc.a}) AS r);
+----
+{'a': 2.0, 'b': 1.0}	STRUCT(a DOUBLE, b DOUBLE)
+
+# field a widens from INTEGER to BIGINT on the second bind and to DOUBLE on the third
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 2::BIGINT, 'c': 0.5::DOUBLE, 't': ''}, {'a': 10, 'b': 20::BIGINT, 'c': 1.5::DOUBLE, 't': ''}, {'a': 100, 'b': 200::BIGINT, 'c': 2.5::DOUBLE, 't': ''}], lambda acc, x: {'a': acc.b, 'b': acc.c, 'c': x.c, 't': typeof(acc.a)}) AS r);
+----
+{'a': 0.5, 'b': 1.5, 'c': 2.5, 't': DOUBLE}	STRUCT(a DOUBLE, b DOUBLE, c DOUBLE, t VARCHAR)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'c': 1.5::DOUBLE, 't': ''}, {'c': 2.5::DOUBLE, 't': ''}], lambda acc, x: {'a': acc.b, 'b': acc.c, 'c': x.c, 't': typeof(acc.a)}, {'a': 1, 'b': 2::BIGINT, 'c': 0.5::DOUBLE, 't': ''}) AS r);
+----
+{'a': 0.5, 'b': 1.5, 'c': 2.5, 't': DOUBLE}	STRUCT(a DOUBLE, b DOUBLE, c DOUBLE, t VARCHAR)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'p': {'a': 1, 'b': 10}}, {'p': {'a': 3, 'b': 30}}, {'p': {'a': 5, 'b': 50}}], lambda acc, x: {'p': {'a': x.p.a * 0.5::DOUBLE, 'b': acc.p.b + acc.p.a}}) AS r);
+----
+{'p': {'a': 2.5, 'b': 12.5}}	STRUCT(p STRUCT(a DOUBLE, b DOUBLE))
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([[{'a': 1, 'b': 10}], [{'a': 3, 'b': 30}], [{'a': 5, 'b': 50}]], lambda acc, x: [{'a': x[1].a * 0.5::DOUBLE, 'b': acc[1].b + acc[1].a}]) AS r);
+----
+[{'a': 2.5, 'b': 12.5}]	STRUCT(a DOUBLE, b DOUBLE)[]
+
+query II
+SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x, i: {'a': x.a * c, 'b': acc.b + acc.a + i}), list_reduce([{'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x, i: {'a': x.a * c, 'b': acc.b + acc.a + i}, {'a': 1, 'b': 10}) FROM (SELECT 0.5::DOUBLE AS c);
+----
+{'a': 2.5, 'b': 17.5}	{'a': 2.5, 'b': 15.5}
+
+query III
+SELECT reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}), array_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}), list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}]::STRUCT(a INTEGER, b INTEGER)[3], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a});
+----
+{'a': 2.5, 'b': 12.5}	{'a': 2.5, 'b': 12.5}	{'a': 2.5, 'b': 12.5}
+
+statement ok
+CREATE TABLE ts AS SELECT * FROM (VALUES (1, [{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}]), (2, [{'a': 1, 'b': 10}]), (3, [{'a': 1, 'b': NULL}, {'a': 3, 'b': 30}]), (4, NULL), (5, [])) t(k, l);
+
+query II
+SELECT k, list_reduce(l, lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}) FROM ts WHERE k < 5 ORDER BY k;
+----
+1	{'a': 2.5, 'b': 12.5}
+2	{'a': 1.0, 'b': 10.0}
+3	{'a': 1.5, 'b': NULL}
+4	NULL
+
+query II
+SELECT k, list_reduce(l, lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}, {'a': 0, 'b': 1}) FROM ts ORDER BY k;
+----
+1	{'a': 2.5, 'b': 3.0}
+2	{'a': 0.5, 'b': 1.0}
+3	{'a': 1.5, 'b': 1.5}
+4	NULL
+5	{'a': 0.0, 'b': 1.0}
+
+# a later bind can fail where the first binds bound, because acc has the wider type there
+
+statement error
+SELECT list_reduce([{'a': 1, 'b': 10, 'c': 0}, {'a': 3, 'b': 30, 'c': 0}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.a, 'c': acc.b << 1});
+----
+No function matches the given name and argument types '<<(DOUBLE, INTEGER_LITERAL)'
+
+# prepared parameters in the body, as the list and as the initial value
+
+statement ok
+PREPARE p1 AS SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * ?::DOUBLE, 'b': acc.b + acc.a});
+
+query I
+EXECUTE p1(0.5);
+----
+{'a': 2.5, 'b': 12.5}
+
+statement ok
+PREPARE p2 AS SELECT list_reduce(?::STRUCT(a INTEGER, b INTEGER)[], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a});
+
+query I
+EXECUTE p2([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}]);
+----
+{'a': 2.5, 'b': 12.5}
+
+statement ok
+PREPARE p3 AS SELECT list_reduce([1::UHUGEINT, 2::UHUGEINT], lambda acc, x: CASE WHEN acc > 5 THEN acc ELSE x END, ?::INTEGER);
+
+query I
+EXECUTE p3(0);
+----
+2.0
+
+# when a rebind returns a type that differs beyond collation and holds a DECIMAL, the result is cast to the accumulator
+# type of that bind; a DECIMAL field that keeps its type leaves the loop to settle the collation of another field
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 'q', 'b': 'x', 'd': 1.5}, {'a': 'r', 'b': 'y', 'd': 2.5}, {'a': 's', 'b': 'z', 'd': 3.5}], lambda acc, x: {'a': x.a COLLATE nocase, 'b': CASE WHEN acc.b = 'Q' THEN 'hit' ELSE acc.a END, 'd': x.d}) AS r);
+----
+{'a': s, 'b': hit, 'd': 3.5}	STRUCT(a VARCHAR('nocase'), b VARCHAR('nocase'), d DECIMAL(2,1))
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'd': 1.5}, {'a': 3, 'd': 2.5}, {'a': 5, 'd': 3.5}], lambda acc, x: {'a': acc.a + x.a * 0.5::DOUBLE, 'd': acc.d + x.d}) AS r);
+----
+{'a': 5.0, 'd': 7.5}	STRUCT(a DOUBLE, d DECIMAL(3,1))
+
+# nested calls that each settle over several binds
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([1, 2], lambda o, y: o + list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}).b) AS r);
+----
+13.5	DOUBLE
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}, {'a': 5, 'b': 50}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': list_reduce([acc.b, acc.a], lambda s, y: s + y)}) AS r);
+----
+{'a': 2.5, 'b': 12.5}	STRUCT(a DOUBLE, b DOUBLE)
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 10}, {'a': 3, 'b': 30}], lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': list_reduce([{'a': acc.a, 'b': acc.b}, {'a': x.a, 'b': x.b}], lambda acc2, y: {'a': y.a * 0.5::DOUBLE, 'b': acc2.b + acc2.a}).b}) AS r);
+----
+{'a': 1.5, 'b': 11.0}	STRUCT(a DOUBLE, b DOUBLE)
+
+# list_reduce binds its lambda at most eight times: a chain of seven fields settles, a chain of eight does not
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 1, 'c': 1, 'd': 1, 'e': 1, 'f': 1, 'g': 3}, {'a': 2, 'b': 2, 'c': 2, 'd': 2, 'e': 2, 'f': 2, 'g': 5}], lambda acc, x: {'a': acc.b, 'b': acc.c, 'c': acc.d, 'd': acc.e, 'e': acc.f, 'f': acc.g, 'g': x.g * 0.5::DOUBLE}) AS r);
+----
+{'a': 1.0, 'b': 1.0, 'c': 1.0, 'd': 1.0, 'e': 1.0, 'f': 3.0, 'g': 2.5}	STRUCT(a DOUBLE, b DOUBLE, c DOUBLE, d DOUBLE, e DOUBLE, f DOUBLE, g DOUBLE)
+
+statement error
+SELECT list_reduce([{'a': 1, 'b': 1, 'c': 1, 'd': 1, 'e': 1, 'f': 1, 'g': 1, 'h': 1}], lambda acc, x: {'a': acc.b, 'b': acc.c, 'c': acc.d, 'd': acc.e, 'e': acc.f, 'f': acc.g, 'g': acc.h, 'h': x.h * 0.5::DOUBLE});
+----
+The accumulator type of list_reduce did not settle in 8 binds of its lambda: with accumulator type STRUCT(a INTEGER, b DOUBLE, c DOUBLE, d DOUBLE, e DOUBLE, f DOUBLE, g DOUBLE, h DOUBLE) the lambda returns STRUCT(a DOUBLE, b DOUBLE, c DOUBLE, d DOUBLE, e DOUBLE, f DOUBLE, g DOUBLE, h DOUBLE). Cast the lambda result to the type the accumulator should have, or give an initial value of that type
+
+statement error
+SELECT list_reduce([{'h': 1}], lambda acc, x: {'a': acc.b, 'b': acc.c, 'c': acc.d, 'd': acc.e, 'e': acc.f, 'f': acc.g, 'g': acc.h, 'h': x.h * 0.5::DOUBLE}, {'a': 1, 'b': 1, 'c': 1, 'd': 1, 'e': 1, 'f': 1, 'g': 1, 'h': 1});
+----
+The accumulator type of list_reduce did not settle in 8 binds of its lambda
+
+# wrapping acc in a union nests the accumulator type one level deeper on every bind, so it never settles
+
+statement error
+SELECT list_reduce([1, 2], lambda acc, x: union_value(k := acc));
+----
+The accumulator type of list_reduce did not settle in 8 binds of its lambda: with accumulator type UNION(k UNION(k UNION(k UNION(k UNION(k UNION(k UNION(k INTEGER))))))) the lambda returns UNION(k UNION(k UNION(k UNION(k UNION(k UNION(k UNION(k UNION(k INTEGER))))))))
+
+statement error
+SELECT list_reduce([1, 2], lambda acc, x: union_value(k := acc), 0);
+----
+The accumulator type of list_reduce did not settle in 8 binds of its lambda
+
+query I
+SELECT list_reduce([{'h': 1}], lambda acc, x: {'a': acc.b, 'b': acc.c, 'c': acc.d, 'd': acc.e, 'e': acc.f, 'f': acc.g, 'g': acc.h, 'h': x.h * 0.5::DOUBLE}, {'a': 1, 'b': 1, 'c': 1, 'd': 1, 'e': 1, 'f': 1, 'g': 1, 'h': 1}::STRUCT(a DOUBLE, b DOUBLE, c DOUBLE, d DOUBLE, e DOUBLE, f DOUBLE, g DOUBLE, h DOUBLE));
+----
+{'a': 1.0, 'b': 1.0, 'c': 1.0, 'd': 1.0, 'e': 1.0, 'f': 1.0, 'g': 1.0, 'h': 0.5}
+
 # the bound expressions match the bind that settles the accumulator type
 
 query II
@@ -433,3 +632,8 @@ query II
 EXPLAIN SELECT list_reduce(l, lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase) FROM (VALUES (['x', 'A'])) t(l);
 ----
 physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: CASE  WHEN \(\(lower\(acc\) = lower\('X'\)\)\).*
+
+query II
+EXPLAIN SELECT list_reduce(l, lambda acc, x: {'a': x.a * 0.5::DOUBLE, 'b': acc.b + acc.a}) FROM ts;
+----
+physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: struct_pack\(\(CAST\(struct_extract\(x, 'a'\) AS DOUBLE\) \* 0\.5\), \(struct_extract\(acc, 'b'\) \+ struct_extract\(acc, 'a'\)\)\)\).*
