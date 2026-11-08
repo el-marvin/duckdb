@@ -1,0 +1,516 @@
+# name: test/sql/aggregate/group/group_by_all_alias.test
+# description: The alias of a GROUP BY ALL group names the group in later clauses, as under GROUP BY of the alias
+# group: [group]
+
+statement ok
+CREATE TABLE u AS SELECT * FROM (VALUES (1, 0), (2, 0), (2, 1), (3, 1), (NULL, 1)) t(s, g);
+
+# a volatile group: random() * 0 keeps the value deterministic
+query I
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY 10 - r;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY 1 ORDER BY 10 - r;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY r ORDER BY 10 - r;
+----
+3
+2
+1
+NULL
+
+query II
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY ALL HAVING 10 - r > 7 ORDER BY r;
+----
+1	1
+2	2
+
+query II
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY 1 HAVING 10 - r > 7 ORDER BY r;
+----
+1	1
+2	2
+
+query I
+SELECT DISTINCT ON (r % 2) s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY r % 2, 10 - r;
+----
+2
+3
+NULL
+
+query I
+SELECT DISTINCT ON (r % 2) s + (random() * 0)::INT AS r FROM u GROUP BY 1 ORDER BY r % 2, 10 - r;
+----
+2
+3
+NULL
+
+# the alias reads the group: evaluating nextval again in HAVING would give values above 5
+statement ok
+CREATE SEQUENCE seq_all;
+
+statement ok
+CREATE SEQUENCE seq_pos;
+
+query I
+SELECT coalesce(s, 0) * 0 + nextval('seq_all') AS r FROM u GROUP BY ALL HAVING r <= 2 ORDER BY r;
+----
+1
+2
+
+query I
+SELECT coalesce(s, 0) * 0 + nextval('seq_pos') AS r FROM u GROUP BY 1 HAVING r <= 2 ORDER BY r;
+----
+1
+2
+
+# two equal volatile entries are two groups, and each alias names its own
+statement ok
+CREATE SEQUENCE seq_pair;
+
+query I
+SELECT count(*) FROM (SELECT coalesce(s, 0) + nextval('seq_pair') AS r, coalesce(s, 0) + nextval('seq_pair') AS r2 FROM u GROUP BY ALL HAVING r = r2);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s + random() AS r, s + random() AS r2 FROM u GROUP BY r, r2 HAVING r = r2);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s + random() AS r, s + random() AS r2 FROM u GROUP BY ALL HAVING r = r2);
+----
+0
+
+# a group that holds a correlated subquery
+query I
+SELECT (SELECT s) AS q FROM u GROUP BY ALL ORDER BY 10 - q;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT (SELECT s) AS q FROM u GROUP BY 1 ORDER BY 10 - q;
+----
+3
+2
+1
+NULL
+
+query II
+SELECT (SELECT s) AS q, count(*) FROM u GROUP BY ALL HAVING q > 1 ORDER BY q;
+----
+2	2
+3	1
+
+query I
+SELECT DISTINCT ON (q % 2) (SELECT s) AS q FROM u GROUP BY ALL ORDER BY q % 2, 10 - q;
+----
+2
+3
+NULL
+
+query I
+SELECT DISTINCT ON (q % 2) (SELECT s) AS q FROM u GROUP BY q ORDER BY q % 2, 10 - q;
+----
+2
+3
+NULL
+
+# inside an aggregate the alias expands to its expression, next to the alias as a group
+query II
+SELECT s AS r, count(*) FROM u GROUP BY ALL ORDER BY sum(r) - r, r;
+----
+1	1
+3	1
+2	2
+NULL	1
+
+query II
+SELECT s AS r, count(*) FROM u GROUP BY r ORDER BY sum(r) - r, r;
+----
+1	1
+3	1
+2	2
+NULL	1
+
+# expanding a volatile or subquery alias inside an aggregate would evaluate it a second time, so it stays rejected
+statement error
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY ALL ORDER BY sum(r) - r, r;
+----
+the expression has side effects
+
+statement error
+SELECT (SELECT s) AS q FROM u GROUP BY ALL ORDER BY sum(q) - q, q;
+----
+the expression has a subquery
+
+# HAVING does not expand an alias inside an aggregate, under any form of GROUP BY
+statement error
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL HAVING sum(r) > r;
+----
+Referenced column "r" not found
+
+statement error
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY r HAVING sum(r) > r;
+----
+Referenced column "r" not found
+
+# a correlated subquery in HAVING and GROUPING name the group by its alias, as under GROUP BY of the alias
+query II
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY ALL HAVING (SELECT r) > 1 ORDER BY r;
+----
+2	2
+3	1
+
+query II
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY r HAVING (SELECT r) > 1 ORDER BY r;
+----
+2	2
+3	1
+
+query II
+SELECT s AS k, count(*) FROM u GROUP BY ALL HAVING (SELECT k) > 1 ORDER BY k;
+----
+2	2
+3	1
+
+statement error
+SELECT s AS k, count(*) FROM u GROUP BY 1 HAVING (SELECT k) > 1 ORDER BY k;
+----
+Having clause cannot reference alias "k" in correlated subquery
+
+query I
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY grouping(r), 10 - r;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s AS k FROM u GROUP BY ALL HAVING grouping(k) = 0 ORDER BY k;
+----
+1
+2
+3
+NULL
+
+query I
+SELECT s AS k FROM u GROUP BY k HAVING grouping(k) = 0 ORDER BY k;
+----
+1
+2
+3
+NULL
+
+# a duplicate alias names the last entry, as GROUP BY of the alias does
+query II
+SELECT s + (random() * 0)::INT AS r, 10 - s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY 10 - r;
+----
+1	9
+2	8
+3	7
+NULL	NULL
+
+query II
+SELECT s AS r, 10 - s AS r FROM u GROUP BY ALL HAVING r > 8;
+----
+1	9
+
+# the last entry of a duplicate alias is an aggregate, so the alias names no group
+query II
+SELECT s AS r, sum(s) * 0 + 7 AS r FROM u GROUP BY ALL ORDER BY 10 - r, 1;
+----
+1	7
+2	7
+3	7
+NULL	NULL
+
+# the alias.name form reaches the entry by expanding it, so a volatile one stays rejected
+statement error
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY 10 - alias.r;
+----
+the expression has side effects
+
+query I
+SELECT s AS r FROM u GROUP BY ALL ORDER BY 10 - alias.r;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY (SELECT 10 - r);
+----
+3
+2
+1
+NULL
+
+# an alias that is also a column, a table or a macro parameter does not name the group, as in GROUP BY of the name
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES (1, 10), (2, 20)) t(a, b);
+
+query I
+SELECT a + 1 AS b FROM t GROUP BY ALL HAVING b > 2;
+----
+3
+
+statement error
+SELECT a + (random() * 0)::INT AS b FROM t GROUP BY ALL HAVING b > 1;
+----
+the expression has side effects
+
+statement error
+SELECT a + (random() * 0)::INT AS b FROM t GROUP BY ALL ORDER BY b * 2;
+----
+GROUP BY ALL will only group entries in the SELECT list
+
+statement error
+SELECT a + (random() * 0)::INT AS t FROM t GROUP BY ALL ORDER BY 10 - t;
+----
+No function matches the given name and argument types
+
+statement error
+SELECT a + (random() * 0)::INT AS t FROM t GROUP BY ALL HAVING t > 1;
+----
+the expression has side effects
+
+# an alias named like two tables binds as before, though GROUP BY of the alias is ambiguous
+statement ok
+CREATE SCHEMA sa;
+
+statement ok
+CREATE SCHEMA sb;
+
+statement ok
+CREATE TABLE sa.tt AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE sb.tt AS SELECT 2 AS y;
+
+query I
+SELECT sa.tt.x + 1 AS tt FROM sa.tt, sb.tt GROUP BY ALL;
+----
+2
+
+statement error
+SELECT sa.tt.x + 1 AS tt FROM sa.tt, sb.tt GROUP BY tt;
+----
+Ambiguous reference to table
+
+statement ok
+CREATE MACRO m_alias(r) AS TABLE SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL ORDER BY 10 - r, 1;
+
+query I
+SELECT * FROM m_alias(5);
+----
+1
+2
+3
+NULL
+
+# a scalar macro body is bound when the macro is created, and there the parameter wins over the alias
+statement error
+CREATE MACRO m_scalar_volatile(r) AS (SELECT s + (random() * 0)::INT AS r FROM u WHERE s = 1 GROUP BY ALL HAVING r = 5);
+----
+the expression has side effects
+
+statement ok
+CREATE MACRO m_scalar(r) AS (SELECT s + 0 AS r FROM u WHERE s = 1 GROUP BY ALL HAVING r = 5);
+
+query II
+SELECT m_scalar(5), m_scalar(1);
+----
+1	NULL
+
+# an alias that names an ambiguous column is not a group alias, and the query binds as before
+statement ok
+CREATE TABLE l AS SELECT 1 AS x, 5 AS y;
+
+statement ok
+CREATE TABLE r AS SELECT 2 AS x, 6 AS z;
+
+query II
+SELECT l.x + 1 AS x, count(*) FROM l, r GROUP BY ALL;
+----
+2	1
+
+query II
+SELECT l.x + (random() * 0)::INT AS x, count(*) FROM l, r GROUP BY ALL;
+----
+1	1
+
+statement error
+SELECT l.x + 1 AS x, count(*) FROM l, r GROUP BY x;
+----
+Ambiguous reference to column name
+
+# an aggregate is not a group, so its volatile alias is still rejected
+query II
+SELECT g, sum(s) AS k FROM u GROUP BY ALL ORDER BY 10 - k;
+----
+1	5
+0	3
+
+query II
+SELECT g, sum(s) AS k FROM u GROUP BY ALL HAVING k > 3;
+----
+1	5
+
+statement error
+SELECT g, sum(s) + (random() * 0)::INT AS k FROM u GROUP BY ALL ORDER BY 10 - k;
+----
+the expression has side effects
+
+statement error
+SELECT g, sum(s) + (random() * 0)::INT AS k FROM u GROUP BY ALL HAVING k > 3;
+----
+the expression has side effects
+
+# an entry without a column reference is not a GROUP BY ALL group, so its alias is rejected as without GROUP BY
+statement error
+SELECT random() AS r FROM u GROUP BY ALL ORDER BY 10 - r;
+----
+the expression has side effects
+
+statement error
+SELECT random() AS r FROM u ORDER BY 10 - r;
+----
+the expression has side effects
+
+statement error
+SELECT (SELECT 1) AS r FROM u GROUP BY ALL ORDER BY 10 - r;
+----
+the expression has a subquery
+
+# the select list binds before GROUP BY ALL decides its groups, so a volatile alias is rejected there
+statement error
+SELECT s + (random() * 0)::INT AS r, r + 1 FROM u GROUP BY ALL;
+----
+the expression has side effects
+
+statement error
+SELECT s + (random() * 0)::INT AS r FROM u GROUP BY ALL QUALIFY row_number() OVER (ORDER BY r) = 1;
+----
+Combining QUALIFY with GROUP BY ALL is not supported yet
+
+# GROUP BY ALL in a subquery, also correlated with the outer query
+statement ok
+CREATE TABLE o AS SELECT * FROM (VALUES (2), (3)) t(s);
+
+query I
+SELECT (SELECT max(y) FROM (SELECT x.s + (random() * 0)::INT AS y FROM u x GROUP BY ALL HAVING 10 - y > 7) z);
+----
+2
+
+query II
+SELECT o.s, (SELECT count(*) FROM (SELECT i.s + (random() * 0)::INT AS r FROM u i GROUP BY ALL HAVING r < o.s)) FROM o ORDER BY 1;
+----
+2	1
+3	2
+
+query II
+SELECT o.s, (SELECT count(*) FROM (SELECT i.s + (random() * 0)::INT AS r FROM u i GROUP BY r HAVING r < o.s)) FROM o ORDER BY 1;
+----
+2	1
+3	2
+
+# an alias named like a column of the outer query names the inner group
+statement ok
+CREATE TABLE ow AS SELECT * FROM (VALUES (2), (3)) t(w);
+
+query II
+SELECT o.w, (SELECT count(*) FROM (SELECT i.s + (random() * 0)::INT AS w FROM u i GROUP BY ALL HAVING w > 1)) FROM ow o ORDER BY 1;
+----
+2	2
+3	2
+
+# a window over the alias in ORDER BY reads the group
+query II
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY ALL ORDER BY sum(r) OVER (PARTITION BY r % 2) DESC, r;
+----
+1	1
+3	1
+2	2
+NULL	1
+
+query II
+SELECT s + (random() * 0)::INT AS r, count(*) FROM u GROUP BY r ORDER BY sum(r) OVER (PARTITION BY r % 2) DESC, r;
+----
+1	1
+3	1
+2	2
+NULL	1
+
+# in HAVING the group alias wins over a SQL value function of the same name, as under GROUP BY of the alias
+statement ok
+CREATE TABLE sv AS SELECT * FROM (VALUES ('a'), ('b')) t(v);
+
+query I
+SELECT v || 'x' AS current_schema FROM sv GROUP BY ALL HAVING current_schema = 'ax';
+----
+ax
+
+query I
+SELECT v || 'x' AS current_schema FROM sv GROUP BY current_schema HAVING current_schema = 'ax';
+----
+ax
+
+# a collated group with a subquery
+statement ok
+CREATE TABLE c AS SELECT * FROM (VALUES ('a'), ('B'), ('b')) t(v);
+
+statement ok
+SET default_collation='nocase';
+
+query II
+SELECT lower(w), n FROM (SELECT (SELECT v) AS w, count(*) AS n FROM c GROUP BY ALL ORDER BY n - length(w)) ORDER BY ALL;
+----
+a	1
+b	2
+
+query II
+SELECT lower(w), n FROM (SELECT (SELECT v) AS w, count(*) AS n FROM c GROUP BY 1 ORDER BY n - length(w)) ORDER BY ALL;
+----
+a	1
+b	2
+
+# a lambda parameter named like a group alias is the parameter, and a lambda body reads the group by its alias
+query II
+SELECT s AS p_, count(*) FROM u GROUP BY ALL HAVING list_transform([1], lambda p_: p_)[1] = 1 ORDER BY p_;
+----
+1	1
+2	2
+3	1
+NULL	1
+
+query I
+SELECT s + (random() * 0)::INT AS p_ FROM u GROUP BY ALL ORDER BY list_transform([10], lambda p_: p_)[1] - p_;
+----
+3
+2
+1
+NULL
+
+query I
+SELECT s + (random() * 0)::INT AS p_ FROM u GROUP BY ALL HAVING list_transform([1], lambda x: x + p_)[1] > 2 ORDER BY p_;
+----
+2
+3
