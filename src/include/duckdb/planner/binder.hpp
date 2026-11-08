@@ -638,7 +638,6 @@ private:
 	                                   unique_ptr<ParsedExpression> &where_clause);
 	BoundStatement BindBoundPivot(PivotRef &expr);
 	void ExtractUnpivotEntries(Binder &child_binder, PivotColumnEntry &entry, vector<UnpivotEntry> &unpivot_entries);
-	void ExtractUnpivotColumnName(ParsedExpression &expr, vector<Identifier> &result);
 
 	unique_ptr<BoundAtClause> BindAtClause(optional_ptr<AtClause> at_clause);
 

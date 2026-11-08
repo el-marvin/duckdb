@@ -1,0 +1,415 @@
+# name: test/sql/pivot/unpivot_outer_columns.test
+# description: UNPIVOT counts only the source columns an ON expression reads; outer columns and lambda parameters are not source columns
+# group: [pivot]
+
+statement ok
+CREATE TABLE wide(id INT, a INT, b INT);
+
+statement ok
+INSERT INTO wide VALUES (1, 10, 20);
+
+# an outer column named like a source column is a value, so the expression reads no source column and nothing is dropped
+statement error
+SELECT u.* FROM (SELECT 9 AS a) s, LATERAL (UNPIVOT wide ON (s.a * 2) INTO NAME n VALUE v) u;
+----
+UNPIVOT clause must contain exactly one column - expression "(s.a * 2)" does not contain any
+
+statement error
+SELECT (SELECT list(u) FROM (UNPIVOT wide ON (s.a * 2) INTO NAME n VALUE v) u) FROM (SELECT 9 AS a) s;
+----
+UNPIVOT clause must contain exactly one column - expression "(s.a * 2)" does not contain any
+
+statement ok
+CREATE MACRO only_arg(p) AS TABLE (UNPIVOT wide ON (p * 2) INTO NAME n VALUE v);
+
+statement error
+SELECT u.* FROM (SELECT 9 AS a) s, LATERAL only_arg(s.a) u;
+----
+UNPIVOT clause must contain exactly one column - expression "(s.a * 2)" does not contain any
+
+statement error
+FROM only_arg(9);
+----
+UNPIVOT clause must contain exactly one column - expression "(9 * 2)" does not contain any
+
+# the qualified outer column is read as the outer value while the source column of the same name stays in the output
+query IIII
+SELECT u.* FROM (SELECT 9 AS a) s, LATERAL (UNPIVOT wide ON (b + s.a) INTO NAME n VALUE v) u;
+----
+1	10	b	29
+
+# bare, the name is the source column
+query IIII
+SELECT u.* FROM (SELECT 9 AS a) s, LATERAL (UNPIVOT wide ON (a * 2) INTO NAME n VALUE v) u;
+----
+1	20	a	20
+
+# a caller column beside a source column is an outer value
+query IIII
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v) u;
+----
+1	20	a	12
+
+query IIII
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON (a + k) INTO NAME n VALUE v) u;
+----
+1	20	a	12
+
+query I
+SELECT (SELECT sum(v) FROM (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v)) FROM (SELECT 2 AS k) s;
+----
+12
+
+query III
+SELECT s.k, u.n, u.v FROM (VALUES (1), (2), (2), (NULL)) s(k), LATERAL (UNPIVOT wide ON (a + s.k), (b * s.k) INTO NAME n VALUE v) u ORDER BY ALL;
+----
+1	a	11
+1	b	20
+2	a	12
+2	a	12
+2	b	40
+2	b	40
+
+query IIII
+SELECT u.* FROM (SELECT NULL::INT AS k) s, LATERAL (SELECT * FROM wide UNPIVOT INCLUDE NULLS (v FOR n IN ((a + s.k)))) u;
+----
+1	20	a	NULL
+
+# an outer column two levels up, an outer struct field, and a view over a correlated UNPIVOT
+query I
+SELECT (SELECT (SELECT sum(v) FROM (UNPIVOT wide ON (a + o.k) INTO NAME n VALUE v)) FROM (SELECT 1) i) FROM (SELECT 2 AS k) o;
+----
+12
+
+query IIII
+SELECT u.* FROM (SELECT {'f': 4} AS r) s, LATERAL (UNPIVOT wide ON (a + s.r.f) INTO NAME n VALUE v) u;
+----
+1	20	a	14
+
+statement ok
+CREATE VIEW outer_view AS SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v) u;
+
+query IIII
+FROM outer_view;
+----
+1	20	a	12
+
+# an outer column from a CTE, a grouped outer column, an expanded star, a prepared statement
+query IIII
+WITH c AS (SELECT 2 AS k) SELECT u.* FROM c, LATERAL (UNPIVOT wide ON (a + c.k) INTO NAME n VALUE v) u;
+----
+1	20	a	12
+
+query II
+SELECT s.k, (SELECT sum(v) FROM (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v)) FROM (VALUES (1), (2), (2)) s(k) GROUP BY s.k ORDER BY 1;
+----
+1	11
+2	12
+
+query III
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON COLUMNS('a|b') + s.k INTO NAME n VALUE v) u ORDER BY n;
+----
+1	a	12
+1	b	22
+
+statement ok
+PREPARE outer_prepared AS SELECT u.* FROM (SELECT $1::INT AS k) s, LATERAL (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v) u;
+
+query IIII
+EXECUTE outer_prepared(7);
+----
+1	20	a	17
+
+# an outer name that two outer tables have is ambiguous, as anywhere else
+statement error
+SELECT u.* FROM (SELECT 1 AS k) s1, (SELECT 2 AS k) s2, LATERAL (UNPIVOT wide ON (a + k) INTO NAME n VALUE v) u;
+----
+Ambiguous reference to column name "k"
+
+# a bare name of the source table is its whole row, also when an outer column has that name
+statement error
+SELECT u.* FROM (SELECT 1 AS wide) s, LATERAL (UNPIVOT wide ON (a + len(wide::VARCHAR)) INTO NAME n VALUE v) u;
+----
+contains multiple (a, id, a, b)
+
+# a bare outer name binds as the outer column, never as a name of the generated projection
+query IIII
+SELECT u.* FROM (SELECT 'abcdef' AS unpivot_names) s, LATERAL (UNPIVOT wide ON (a + len(unpivot_names)) INTO NAME n VALUE v) u;
+----
+1	20	a	16
+
+query II
+SELECT 'abcdef' AS unpivot_names, (SELECT v FROM (UNPIVOT (SELECT 10 AS a) t ON (a + len(unpivot_names)) INTO NAME n VALUE v));
+----
+abcdef	16
+
+query III
+SELECT u.* FROM (SELECT 'abcdef' AS unpivot_names) s, LATERAL (UNPIVOT (SELECT 10 AS a, 'z' AS unpivot_names_1) t ON (a + len(unpivot_names)) INTO NAME n VALUE v) u;
+----
+z	a	16
+
+# the passthrough columns keep their names whatever outer names the expression reads
+query III
+SELECT u.* FROM (SELECT 2 AS k, 'wrong' AS k_1_1) s, LATERAL (UNPIVOT (SELECT 10 AS a, 'z' AS k_1) t ON (a + k + k) INTO NAME n VALUE v) u;
+----
+z	a	14
+
+query IIII
+SELECT u.* FROM (SELECT 2 AS a_1) s, LATERAL (UNPIVOT (SELECT 1 AS a, 10 AS b) t1 CROSS JOIN (SELECT 3 AS a) t2 ON (b + a_1) INTO NAME n VALUE v) u;
+----
+1	3	b	12
+
+# the outer name is read where it stands, not respelled for a source with a struct column named like the outer alias
+query III
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT (SELECT 10 AS a, {'k': 100} AS s) t ON (a + k) INTO NAME n VALUE v) u;
+----
+{'k': 100}	a	12
+
+query IIII
+SELECT u.* FROM (SELECT 2 AS K) s, LATERAL (UNPIVOT wide ON (a + k) INTO NAME n VALUE v) u;
+----
+1	20	a	12
+
+# every reference to a source column counts, also two to the same name
+statement error
+UNPIVOT wide ON (a + wide.a) INTO NAME n VALUE v;
+----
+contains multiple (a, a)
+
+statement error
+UNPIVOT wide ON (wide.a + a) INTO NAME n VALUE v;
+----
+contains multiple (a, a)
+
+statement error
+UNPIVOT (SELECT 10 AS a) t1 CROSS JOIN (SELECT 20 AS a) t2 ON (t1.a + t2.a) INTO NAME n VALUE v;
+----
+contains multiple (a, a)
+
+# a SQL value function is not a column
+query IIII
+UNPIVOT wide ON (a + length(current_schema)) INTO NAME n VALUE v;
+----
+1	20	a	14
+
+statement ok
+CREATE MACRO add_arg(p) AS TABLE (UNPIVOT wide ON (a + p) INTO NAME n VALUE v);
+
+query IIII
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL add_arg(s.k) u;
+----
+1	20	a	12
+
+query IIII
+SELECT u.* FROM (SELECT 9 AS a) s, LATERAL add_arg(s.a) u;
+----
+1	20	a	19
+
+# qualified source columns are still source columns
+query IIII
+UNPIVOT wide ON (wide.a * 2) INTO NAME n VALUE v;
+----
+1	20	a	20
+
+query IIII
+SELECT u.* FROM (SELECT 9 AS a) s, LATERAL (UNPIVOT wide AS t ON (t.a * 2) INTO NAME n VALUE v) u;
+----
+1	20	a	20
+
+# the source alias shadows an outer alias of the same name
+query IIII
+SELECT u.* FROM (SELECT 9 AS a) wide, LATERAL (UNPIVOT wide ON (wide.a * 2) INTO NAME n VALUE v) u;
+----
+1	20	a	20
+
+query IIII
+UNPIVOT (SELECT 1 AS k, 10 AS a) t1 JOIN (SELECT 1 AS k, 20 AS b) t2 USING (k) ON (t1.a + 1) INTO NAME n VALUE v;
+----
+1	20	a	11
+
+# two source columns are still refused
+statement error
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON (a + b + s.k) INTO NAME n VALUE v) u;
+----
+UNPIVOT clause must contain exactly one column - expression "((a + b) + s.k)" contains multiple (a, b)
+
+# a lambda parameter is not a column
+statement ok
+CREATE TABLE lists(id INT, l INT[], b INT, x INT, sl STRUCT(f INT)[]);
+
+statement ok
+INSERT INTO lists VALUES (1, [1, 2], 20, 30, [{'f': 3}]);
+
+query IIIIII
+UNPIVOT lists ON list_transform(l, lambda x: x + 1) INTO NAME n VALUE v;
+----
+1	20	30	[{'f': 3}]	l	[2, 3]
+
+query IIIIII
+UNPIVOT lists ON list_transform(l, lambda b: b * 10) INTO NAME n VALUE v;
+----
+1	20	30	[{'f': 3}]	l	[10, 20]
+
+query IIIIII
+UNPIVOT lists ON list_transform(sl, lambda y: y.f) INTO NAME n VALUE v;
+----
+1	[1, 2]	20	30	sl	[3]
+
+query IIIIII
+UNPIVOT lists ON list_transform([l], lambda x: list_transform(x, lambda b: b + 1)) INTO NAME n VALUE v;
+----
+1	20	30	[{'f': 3}]	l	[[2, 3]]
+
+query III
+SELECT u.* FROM (SELECT 5 AS k) s, LATERAL (UNPIVOT (SELECT id, l FROM lists) ON list_transform(l, lambda x: x + s.k) INTO NAME n VALUE v) u;
+----
+1	l	[6, 7]
+
+# a table of the source takes precedence over a lambda parameter of the same name
+statement error
+UNPIVOT lists AS x ON list_transform(l, lambda x: x.b) INTO NAME n VALUE v;
+----
+contains multiple (l, b)
+
+statement error
+UNPIVOT lists ON list_transform(l, lambda main: main.lists.b) INTO NAME n VALUE v;
+----
+contains multiple (l, b)
+
+statement error
+SELECT list_transform([1], lambda x: (SELECT v FROM (UNPIVOT wide ON (a + x) INTO NAME n VALUE v)));
+----
+subqueries in lambda expressions are not supported
+
+# a keyword lambda parameter is never looked up in the source, so two source tables of its name do not matter
+statement ok
+CREATE SCHEMA s1;
+
+statement ok
+CREATE SCHEMA s2;
+
+statement ok
+CREATE TABLE s1.x AS SELECT [1, 2] AS l;
+
+statement ok
+CREATE TABLE s2.x AS SELECT 9 AS b;
+
+query III
+UNPIVOT s1.x CROSS JOIN s2.x ON list_transform(l, lambda x: x + 1) INTO NAME n VALUE v;
+----
+9	l	[2, 3]
+
+statement error
+UNPIVOT lists ON list_transform(l, lambda y: y + b) INTO NAME n VALUE v;
+----
+UNPIVOT clause must contain exactly one column - expression "list_transform(l, (lambda y: (y + b)))" contains multiple (l, b)
+
+# a single arrow on a source column may be the JSON operator, so there its left side counts as a column
+statement ok
+SET lambda_syntax='ENABLE_SINGLE_ARROW';
+
+query IIIIII
+UNPIVOT lists ON list_transform(l, y -> y + 1) INTO NAME n VALUE v;
+----
+1	20	30	[{'f': 3}]	l	[2, 3]
+
+statement error
+UNPIVOT lists ON list_transform(l, b -> b + 1) INTO NAME n VALUE v;
+----
+contains multiple (l, b, b)
+
+statement ok
+CREATE TABLE json_src(id INT, r STRUCT(j VARCHAR), b INT);
+
+statement ok
+INSERT INTO json_src VALUES (1, {'j': '{"x": 5}'}, 20);
+
+statement error
+UNPIVOT json_src ON (b + (r.j -> '$.x')::INT) INTO NAME n VALUE v;
+----
+contains multiple (b, r)
+
+statement error
+UNPIVOT wide ON (a + (wide -> 'b')::INT) INTO NAME n VALUE v;
+----
+contains multiple (a, id, a, b)
+
+statement ok
+RESET lambda_syntax;
+
+# a struct field counts as the source column it is read from
+statement ok
+CREATE TABLE structs(id INT, a STRUCT(f INT), f INT);
+
+statement ok
+INSERT INTO structs VALUES (1, {'f': 3}, 100);
+
+query IIII
+UNPIVOT structs ON (a.f * 2) INTO NAME n VALUE v;
+----
+1	100	a	6
+
+query IIII
+UNPIVOT structs ON (structs.a.f * 2) INTO NAME n VALUE v;
+----
+1	100	a	6
+
+# a generated column counts under its own name
+statement ok
+CREATE TABLE gen(id INT, a INT, g INT AS (a * 2));
+
+statement ok
+INSERT INTO gen (id, a) VALUES (1, 10);
+
+query IIII
+UNPIVOT gen ON (g + 1) INTO NAME n VALUE v;
+----
+1	10	g	21
+
+query IIII
+UNPIVOT gen ON (gen.g + 1) INTO NAME n VALUE v;
+----
+1	10	g	21
+
+statement ok
+CREATE TABLE gen_struct(id INT, x INT, f INT, g STRUCT(f INT) AS ({'f': x * 2}));
+
+statement ok
+INSERT INTO gen_struct (id, x, f) VALUES (1, 10, 100);
+
+query IIIII
+UNPIVOT gen_struct ON (g.f + 1) INTO NAME n VALUE v;
+----
+1	10	100	g	21
+
+query IIIII
+UNPIVOT gen_struct ON (gen_struct.g.f + 1) INTO NAME n VALUE v;
+----
+1	10	100	g	21
+
+# a name that resolves nowhere keeps the error of a missing source column
+statement error
+UNPIVOT wide ON (aa * 2) INTO NAME n VALUE v;
+----
+Column "aa" referenced in UNPIVOT but no matching entry was found in the table
+
+statement error
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON (zz.a * 2) INTO NAME n VALUE v) u;
+----
+Referenced table "zz" not found
+
+statement error
+UNPIVOT wide ON (a + zz) INTO NAME n VALUE v;
+----
+contains multiple (a, zz)
+
+# a bare name lists a column of the source, not the outer column of that name
+statement error
+SELECT u.* FROM (SELECT 2 AS k) s, LATERAL (UNPIVOT wide ON k INTO NAME n VALUE v) u;
+----
+Column "k" referenced in UNPIVOT but no matching entry was found in the table
+
+statement error
+UNPIVOT wide ON (1 + 2) INTO NAME n VALUE v;
+----
+UNPIVOT clause must contain exactly one column - expression "(1 + 2)" does not contain any

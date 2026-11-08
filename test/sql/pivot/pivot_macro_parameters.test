@@ -95,16 +95,16 @@ FROM unpivot_only(1);
 ----
 UNPIVOT clause must contain exactly one column - expression "(1 * 2)" does not contain any
 
-# a caller column as the argument is a second column, as it is when written by hand
-statement error
+# a caller column as the argument is an outer value, as it is when written by hand
+query I
 SELECT unpivot_sum(k) FROM (SELECT 2 AS k) s;
 ----
-contains multiple
+52
 
-statement error
+query I
 SELECT (SELECT sum(v) FROM (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v)) FROM (SELECT 2 AS k) s;
 ----
-contains multiple
+12
 
 # ON lists columns: a bare name is a column of the source, never a parameter
 statement error

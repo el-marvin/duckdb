@@ -9,6 +9,7 @@
 #include "duckdb/parser/expression/conjunction_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/lambda_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
@@ -25,6 +26,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression_binder/constant_binder.hpp"
 #include "duckdb/planner/column_qualifier.hpp"
+#include "duckdb/planner/expression_binder.hpp"
 
 namespace duckdb {
 
@@ -73,12 +75,12 @@ static bool IsMacroParameter(const ColumnRefExpression &colref, optional_ptr<Dum
 	return !colref.IsQualified() || colref.ColumnNames()[0].StartsWith(DummyBinding::DUMMY_NAME);
 }
 
-static bool ReadsSourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding,
-                              Binder &source_binder) {
+static unique_ptr<ParsedExpression>
+QualifySourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding, Binder &source_binder) {
 	ErrorData error;
 	auto qualified = ColumnQualifier(source_binder).QualifyColumnName(colref, error);
 	if (!qualified) {
-		return false;
+		return nullptr;
 	}
 	// the source binder also knows the macro's parameters; a generated source column may resolve to no column at all
 	bool reads_parameter = false;
@@ -90,7 +92,15 @@ static bool ReadsSourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBin
 			reads_other = true;
 		}
 	});
-	return reads_other || !reads_parameter;
+	if (reads_parameter && !reads_other) {
+		return nullptr;
+	}
+	return qualified;
+}
+
+static bool ReadsSourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding,
+                              Binder &source_binder) {
+	return QualifySourceColumn(colref, macro_binding, source_binder) != nullptr;
 }
 
 static void ExtractPivotExpressions(ParsedExpression &root_expr, identifier_set_t &handled_columns,
@@ -851,18 +861,146 @@ void Binder::ExtractUnpivotEntries(Binder &child_binder, PivotColumnEntry &entry
 	}
 }
 
-void Binder::ExtractUnpivotColumnName(ParsedExpression &expr, vector<Identifier> &result) {
-	if (expr.GetExpressionType() == ExpressionType::COLUMN_REF) {
-		auto &colref = expr.Cast<ColumnRefExpression>();
-		result.push_back(colref.GetColumnName());
+//! Adds the names under which the source lists the columns a qualified reference reads
+static void AddSourceColumns(ParsedExpression &qualified, vector<Identifier> &result) {
+	if (qualified.GetExpressionType() == ExpressionType::STRUCT_EXTRACT) {
+		AddSourceColumns(*qualified.Cast<OperatorExpression>().GetChildrenMutable()[0], result);
 		return;
 	}
-	if (expr.GetExpressionType() == ExpressionType::SUBQUERY) {
-		throw BinderException(expr, "UNPIVOT list cannot contain subqueries");
+	Identifier column_name;
+	if (qualified.GetExpressionType() == ExpressionType::COLUMN_REF) {
+		column_name = qualified.Cast<ColumnRefExpression>().GetColumnName();
+	} else if (!qualified.GetAlias().empty()) {
+		// a generated column expands to its expression, aliased with its own name
+		column_name = qualified.GetAlias();
+	} else {
+		// the whole row of a source table, or a USING column read from several tables
+		ParsedExpressionIterator::EnumerateChildren(qualified,
+		                                            [&](ParsedExpression &child) { AddSourceColumns(child, result); });
+		return;
 	}
-	ParsedExpressionIterator::EnumerateChildren(
-	    expr, [&](ParsedExpression &child) { ExtractUnpivotColumnName(child, result); });
+	if (std::find(result.begin(), result.end(), column_name) == result.end()) {
+		result.push_back(std::move(column_name));
+	}
 }
+
+static idx_t StructExtractDepth(const ParsedExpression &qualified) {
+	idx_t depth = 0;
+	reference<const ParsedExpression> current = qualified;
+	while (current.get().GetExpressionType() == ExpressionType::STRUCT_EXTRACT) {
+		current = *current.get().Cast<OperatorExpression>().GetChildren()[0];
+		depth++;
+	}
+	return depth;
+}
+
+//! Collects the source columns an UNPIVOT ON expression reads, resolving each name in the order the binder does
+struct UnpivotColumnCollector {
+	UnpivotColumnCollector(Binder &source_binder, optional_ptr<DummyBinding> macro_binding, ClientContext &context)
+	    : source_binder(source_binder), macro_binding(macro_binding), scopes(source_binder, context) {
+	}
+
+	void Collect(ParsedExpression &expr, vector<Identifier> &result) {
+		switch (expr.GetExpressionClass()) {
+		case ExpressionClass::COLUMN_REF:
+			CollectColumn(expr.Cast<ColumnRefExpression>(), result);
+			return;
+		case ExpressionClass::SUBQUERY:
+			throw BinderException(expr, "UNPIVOT list cannot contain subqueries");
+		case ExpressionClass::LAMBDA: {
+			auto &lambda = expr.Cast<LambdaExpression>();
+			string error_message;
+			auto parameters = lambda.ExtractColumnRefExpressions(error_message);
+			if (!error_message.empty()) {
+				break;
+			}
+			identifier_set_t names;
+			bool may_be_json = false;
+			for (auto &parameter : parameters) {
+				auto parameter_copy = parameter.get().Copy();
+				auto &colref = parameter_copy->Cast<ColumnRefExpression>();
+				// a single arrow on a source column may be the JSON operator, which the binder tells apart only later
+				if (lambda.GetLambdaSyntaxType() != LambdaSyntaxType::LAMBDA_KEYWORD) {
+					may_be_json |= colref.IsQualified() || ResolvesInSource(colref);
+				}
+				if (!colref.IsQualified()) {
+					ReserveName(colref.GetColumnName());
+				}
+				names.insert(colref.GetColumnName());
+			}
+			if (may_be_json) {
+				break;
+			}
+			lambda_params.push_back(std::move(names));
+			Collect(*lambda.RightMutable(), result);
+			lambda_params.pop_back();
+			return;
+		}
+		default:
+			break;
+		}
+		ParsedExpressionIterator::EnumerateChildren(expr, [&](ParsedExpression &child) { Collect(child, result); });
+	}
+
+	bool ResolvesInSource(ColumnRefExpression &colref) {
+		if (!colref.IsQualified() && !source_binder.bind_context.GetMatchingBindings(colref.GetColumnName()).empty()) {
+			return true;
+		}
+		return QualifySourceColumn(colref, macro_binding, source_binder) != nullptr;
+	}
+
+	void CollectColumn(ColumnRefExpression &colref, vector<Identifier> &result) {
+		auto &names = colref.ColumnNames();
+		bool names_lambda_parameter = LambdaExpression::IsLambdaParameter(lambda_params, names[0]);
+		if (names_lambda_parameter && !colref.IsQualified()) {
+			ReserveName(colref.GetColumnName());
+			return;
+		}
+		if (!colref.IsQualified()) {
+			if (!source_binder.bind_context.GetMatchingBindings(colref.GetColumnName()).empty()) {
+				result.push_back(colref.GetColumnName());
+				return;
+			}
+			ReserveName(colref.GetColumnName());
+		}
+		auto qualified = QualifySourceColumn(colref, macro_binding, source_binder);
+		if (qualified) {
+			// a table of the source takes precedence over a lambda parameter, a column of the source does not
+			if (names_lambda_parameter && StructExtractDepth(*qualified) + 1 >= names.size()) {
+				return;
+			}
+			vector<Identifier> columns;
+			AddSourceColumns(*qualified, columns);
+			result.insert(result.end(), columns.begin(), columns.end());
+			return;
+		}
+		if (names_lambda_parameter) {
+			return;
+		}
+		if (!colref.IsQualified() && source_binder.GetSQLValueFunction(colref.GetColumnName())) {
+			return;
+		}
+		if (scopes.ResolveColumn(colref, 1).found) {
+			return;
+		}
+		// a name that resolves nowhere is reported as a missing source column
+		result.push_back(colref.GetColumnName());
+	}
+
+	void ReserveName(const Identifier &name) {
+		if (source_binder.bind_context.GetMatchingBindings(name).empty()) {
+			reserved_names.push_back(name);
+		}
+	}
+
+	Binder &source_binder;
+	optional_ptr<DummyBinding> macro_binding;
+	//! Bare names that are no source column: the generated projection must not use them, or it would capture them
+	vector<Identifier> reserved_names;
+	//! Resolves the names the source does not, against the scopes enclosing the UNPIVOT
+	ExpressionBinder scopes;
+	vector<identifier_set_t> lambda_params;
+};
 
 unique_ptr<SelectNode> Binder::BindUnpivot(Binder &child_binder, PivotRef &ref,
                                            vector<unique_ptr<ParsedExpression>> all_columns,
@@ -887,10 +1025,17 @@ unique_ptr<SelectNode> Binder::BindUnpivot(Binder &child_binder, PivotRef &ref,
 
 	identifier_set_t handled_columns;
 	identifier_map_t<Identifier> name_map;
+	UnpivotColumnCollector collector(child_binder, macro_binding, context);
 	for (auto &entry : unpivot_entries) {
 		for (auto &unpivot_expr : entry.expressions) {
 			vector<Identifier> result;
-			ExtractUnpivotColumnName(*unpivot_expr, result);
+			if (unpivot_expr->GetExpressionType() == ExpressionType::COLUMN_REF &&
+			    !unpivot_expr->Cast<ColumnRefExpression>().IsQualified()) {
+				// a bare name lists a column of the source, even where an enclosing scope has one of that name
+				result.push_back(unpivot_expr->Cast<ColumnRefExpression>().GetColumnName());
+			} else {
+				collector.Collect(*unpivot_expr, result);
+			}
 			if (result.empty()) {
 				throw BinderException(
 				    *unpivot_expr,
@@ -978,8 +1123,14 @@ unique_ptr<SelectNode> Binder::BindUnpivot(Binder &child_binder, PivotRef &ref,
 		}
 	}
 
-	// now de-duplicate the names
+	// now de-duplicate the names; the passthrough names come first, as the source names them, and the internal names
+	// also avoid the bare names the expressions read from elsewhere
+	auto &reserved_names = collector.reserved_names;
+	select_names.insert(select_names.begin() + NumericCast<int64_t>(column_count), reserved_names.begin(),
+	                    reserved_names.end());
 	QueryResult::DeduplicateColumns(select_names);
+	select_names.erase(select_names.begin() + NumericCast<int64_t>(column_count),
+	                   select_names.begin() + NumericCast<int64_t>(column_count + reserved_names.size()));
 
 	// construct the UNNEST expression for the set of names (constant)
 	auto unpivot_list = Value::LIST(LogicalType::VARCHAR, std::move(unpivot_names));
