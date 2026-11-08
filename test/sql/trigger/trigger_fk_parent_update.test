@@ -1,0 +1,86 @@
+# name: test/sql/trigger/trigger_fk_parent_update.test
+# description: The trigger expansion adds RETURNING to an update of a referenced table; a kept key passes the foreign key check
+# group: [trigger]
+
+require noforcestorage
+
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE TABLE c (id INTEGER REFERENCES p (id));
+
+statement ok
+CREATE TABLE log (event VARCHAR);
+
+statement ok
+INSERT INTO p VALUES (1, 1);
+
+statement ok
+INSERT INTO c VALUES (1);
+
+statement ok
+CREATE TRIGGER pu AFTER UPDATE ON p FOR EACH STATEMENT INSERT INTO log VALUES ('update');
+
+statement ok
+CREATE TRIGGER pi AFTER INSERT ON p FOR EACH STATEMENT INSERT INTO log VALUES ('insert');
+
+statement ok
+INSERT OR REPLACE INTO p VALUES (1, 2);
+
+query I
+SELECT count(*) FROM log WHERE event = 'insert';
+----
+1
+
+statement ok
+UPDATE p SET v = 3;
+
+query I
+SELECT count(*) FROM log WHERE event = 'update';
+----
+1
+
+statement ok
+INSERT INTO p VALUES (1, 4) ON CONFLICT DO UPDATE SET v = excluded.v;
+
+query II
+SELECT * FROM p;
+----
+1	4
+
+statement error
+UPDATE p SET id = 2;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement error
+INSERT INTO p VALUES (1, 0) ON CONFLICT DO UPDATE SET id = 2;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+# inside a transaction that is rolled back
+statement ok
+BEGIN;
+
+statement ok
+INSERT OR REPLACE INTO p VALUES (1, 5);
+
+statement ok
+UPDATE p SET v = 6;
+
+query II
+SELECT * FROM p;
+----
+1	6
+
+statement ok
+ROLLBACK;
+
+query II
+SELECT * FROM p;
+----
+1	4

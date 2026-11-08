@@ -1,0 +1,559 @@
+# name: test/sql/constraints/foreignkey/test_fk_update_unchanged_key.test
+# description: An update of a referenced row that keeps its key passes the foreign key check, also when it runs as delete and insert
+# group: [foreignkey]
+
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE p (id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE TABLE c (id INTEGER REFERENCES p (id));
+
+statement ok
+INSERT INTO p VALUES (1, 1), (2, 2);
+
+statement ok
+INSERT INTO c VALUES (1);
+
+# RETURNING writes the key to itself, so the replace runs as delete and insert
+query II
+INSERT OR REPLACE INTO p VALUES (1, 10) RETURNING *;
+----
+1	10
+
+statement ok
+INSERT OR REPLACE INTO p VALUES (1, 11);
+
+query II
+INSERT INTO p VALUES (1, 12) ON CONFLICT DO UPDATE SET v = excluded.v RETURNING *;
+----
+1	12
+
+query II
+INSERT INTO p VALUES (1, 13) ON CONFLICT (id) DO UPDATE SET v = excluded.v + 0 RETURNING id, v;
+----
+1	13
+
+query II
+MERGE INTO p USING (SELECT 1 AS id, 14 AS v) s ON (p.id = s.id) WHEN MATCHED THEN UPDATE SET v = s.v RETURNING *;
+----
+1	14
+
+query II
+UPDATE p SET v = 15 WHERE id = 1 RETURNING *;
+----
+1	15
+
+query II
+UPDATE p SET id = id, v = 16 WHERE id = 1 RETURNING *;
+----
+1	16
+
+statement ok
+UPDATE p SET id = id;
+
+# UPDATE ... FROM with a repeated match deletes and inserts the row once
+query II
+UPDATE p SET v = s.x FROM (VALUES (1, 17), (1, 17)) s(id, x) WHERE p.id = s.id RETURNING p.*;
+----
+1	17
+
+# only the unreferenced key changes
+query II rowsort
+UPDATE p SET id = CASE WHEN id = 2 THEN 20 ELSE id END RETURNING *;
+----
+1	17
+20	2
+
+query II
+SELECT * FROM p ORDER BY id;
+----
+1	17
+20	2
+
+query I
+SELECT * FROM c;
+----
+1
+
+# a referenced key that changes fails the same way with and without RETURNING
+statement error
+UPDATE p SET id = 3 WHERE id = 1;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement error
+UPDATE p SET id = 3 WHERE id = 1 RETURNING *;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement error
+INSERT INTO p VALUES (1, 0) ON CONFLICT DO UPDATE SET id = 3;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement error
+INSERT INTO p VALUES (1, 0) ON CONFLICT DO UPDATE SET id = 3 RETURNING *;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement error
+UPDATE p SET id = id + 100 RETURNING *;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement error
+DELETE FROM p WHERE id = 1;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+query II
+SELECT * FROM p ORDER BY id;
+----
+1	17
+20	2
+
+# the other routes into delete and insert: a LIST column, a CHECK over the key, the forced setting
+statement ok
+CREATE TABLE pl (id INTEGER PRIMARY KEY, l INTEGER[], v INTEGER, CHECK (id + v < 100));
+
+statement ok
+CREATE TABLE cl (id INTEGER REFERENCES pl (id));
+
+statement ok
+INSERT INTO pl VALUES (1, [1], 1);
+
+statement ok
+INSERT INTO cl VALUES (1);
+
+statement ok
+UPDATE pl SET l = [2];
+
+statement ok
+UPDATE pl SET v = 2;
+
+statement error
+UPDATE pl SET v = 200;
+----
+CHECK constraint failed
+
+statement ok
+SET debug_force_update_to_del_and_insert = true;
+
+statement ok
+UPDATE p SET v = 18 WHERE id = 1;
+
+statement error
+UPDATE p SET id = 4 WHERE id = 1;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement ok
+RESET debug_force_update_to_del_and_insert;
+
+query III
+SELECT * FROM pl;
+----
+1	[2]	2
+
+# a composite key: a change of either column changes the key
+statement ok
+CREATE TABLE p2 (a INTEGER, b INTEGER, v INTEGER, PRIMARY KEY (a, b));
+
+statement ok
+CREATE TABLE c2 (a INTEGER, b INTEGER, FOREIGN KEY (a, b) REFERENCES p2 (a, b));
+
+statement ok
+INSERT INTO p2 VALUES (1, 1, 0), (1, 2, 0);
+
+statement ok
+INSERT INTO c2 VALUES (1, 1);
+
+query III
+INSERT OR REPLACE INTO p2 VALUES (1, 1, 5) RETURNING *;
+----
+1	1	5
+
+query III rowsort
+UPDATE p2 SET a = a, b = b, v = 6 RETURNING *;
+----
+1	1	6
+1	2	6
+
+query III
+UPDATE p2 SET b = b + 10 WHERE b = 2 RETURNING *;
+----
+1	12	6
+
+statement error
+UPDATE p2 SET b = b + 10 WHERE b = 1 RETURNING *;
+----
+Violates foreign key constraint
+
+statement error
+UPDATE p2 SET a = 2 WHERE b = 1;
+----
+Violates foreign key constraint
+
+query III
+SELECT * FROM p2 ORDER BY b;
+----
+1	1	6
+1	12	6
+
+# a composite key where different rows change different key columns in one statement
+statement ok
+CREATE TABLE p5 (a INTEGER, b INTEGER, PRIMARY KEY (a, b));
+
+statement ok
+CREATE TABLE c5 (a INTEGER, b INTEGER, FOREIGN KEY (a, b) REFERENCES p5 (a, b));
+
+statement ok
+INSERT INTO p5 VALUES (1, 1), (2, 2), (3, 3);
+
+statement ok
+INSERT INTO c5 VALUES (3, 3);
+
+query II rowsort
+UPDATE p5 SET a = CASE WHEN a = 1 THEN 10 ELSE a END, b = CASE WHEN a = 2 THEN 20 ELSE b END RETURNING *;
+----
+10	1
+2	20
+3	3
+
+statement ok
+INSERT INTO c5 VALUES (2, 20);
+
+statement error
+UPDATE p5 SET a = CASE WHEN a = 10 THEN 11 ELSE a END, b = CASE WHEN a = 2 THEN 21 ELSE b END;
+----
+Violates foreign key constraint because key "a: 2, b: 20" is still referenced
+
+statement error
+UPDATE p5 SET a = CASE WHEN a = 10 THEN 11 ELSE a END, b = CASE WHEN a = 2 THEN 21 ELSE b END RETURNING *;
+----
+Violates foreign key constraint because key "a: 2, b: 20" is still referenced
+
+statement ok
+DELETE FROM c5 WHERE a = 2;
+
+statement ok
+INSERT INTO c5 VALUES (10, 1);
+
+statement error
+UPDATE p5 SET a = CASE WHEN a = 2 THEN 12 ELSE a END, b = CASE WHEN a = 10 THEN 5 ELSE b END;
+----
+Violates foreign key constraint because key "a: 10, b: 1" is still referenced
+
+statement error
+UPDATE p5 SET a = CASE WHEN a = 2 THEN 12 ELSE a END, b = CASE WHEN a = 10 THEN 5 ELSE b END RETURNING *;
+----
+Violates foreign key constraint because key "a: 10, b: 1" is still referenced
+
+query II rowsort
+SELECT * FROM p5;
+----
+10	1
+2	20
+3	3
+
+query I
+SELECT count(*) FROM c5 ANTI JOIN p5 USING (a, b);
+----
+0
+
+# a foreign key on a UNIQUE column checks that column, not the primary key
+statement ok
+CREATE TABLE p3 (id INTEGER PRIMARY KEY, u INTEGER UNIQUE, v INTEGER);
+
+statement ok
+CREATE TABLE c3 (u INTEGER REFERENCES p3 (u));
+
+statement ok
+INSERT INTO p3 VALUES (1, 10, 0), (2, NULL, 0);
+
+statement ok
+INSERT INTO c3 VALUES (10), (NULL);
+
+query III
+INSERT INTO p3 VALUES (1, 10, 1) ON CONFLICT (id) DO UPDATE SET v = excluded.v RETURNING *;
+----
+1	10	1
+
+query III
+UPDATE p3 SET id = 5 WHERE u = 10 RETURNING *;
+----
+5	10	1
+
+query III
+UPDATE p3 SET v = 2 WHERE id = 2 RETURNING *;
+----
+2	NULL	2
+
+query III
+UPDATE p3 SET u = 12 WHERE id = 2 RETURNING *;
+----
+2	12	2
+
+statement error
+UPDATE p3 SET u = 11 WHERE id = 5 RETURNING *;
+----
+Violates foreign key constraint because key "u: 10" is still referenced
+
+# a second foreign key on the primary key of the same table
+statement ok
+CREATE TABLE c4 (id INTEGER REFERENCES p3 (id));
+
+statement ok
+INSERT INTO c4 VALUES (5);
+
+query III rowsort
+UPDATE p3 SET v = 3 RETURNING *;
+----
+2	12	3
+5	10	3
+
+statement error
+UPDATE p3 SET id = 6 WHERE id = 5 RETURNING *;
+----
+Violates foreign key constraint because key "id: 5" is still referenced
+
+statement ok
+DELETE FROM c4;
+
+query III
+UPDATE p3 SET id = 6 WHERE id = 5 RETURNING *;
+----
+6	10	3
+
+statement error
+UPDATE p3 SET u = 13 WHERE id = 6;
+----
+Violates foreign key constraint because key "u: 10" is still referenced
+
+# a self reference
+statement ok
+CREATE TABLE s (id INTEGER PRIMARY KEY, parent INTEGER REFERENCES s (id), v INTEGER);
+
+statement ok
+INSERT INTO s VALUES (1, NULL, 0);
+
+statement ok
+INSERT INTO s VALUES (2, 1, 0);
+
+query III
+UPDATE s SET v = 1 WHERE id = 1 RETURNING *;
+----
+1	NULL	1
+
+query III
+UPDATE s SET v = 1 WHERE id = 2 RETURNING *;
+----
+2	1	1
+
+statement error
+UPDATE s SET id = 3 WHERE id = 1;
+----
+Violates foreign key constraint
+
+# more than one vector of referenced rows, one changed key among them
+statement ok
+CREATE TABLE pm (id INTEGER PRIMARY KEY, l INTEGER[]);
+
+statement ok
+CREATE TABLE cm (id INTEGER REFERENCES pm (id));
+
+statement ok
+INSERT INTO pm SELECT i, [] FROM range(5000) t(i);
+
+statement ok
+INSERT INTO cm SELECT i FROM range(5000) t(i);
+
+statement ok
+UPDATE pm SET l = [id];
+
+query II
+SELECT count(*), sum(l[1]) FROM pm;
+----
+5000	12497500
+
+statement error
+UPDATE pm SET id = CASE WHEN id = 4500 THEN -1 ELSE id END, l = [];
+----
+Violates foreign key constraint because key "id: 4500" is still referenced
+
+query II
+SELECT count(*), sum(l[1]) FROM pm;
+----
+5000	12497500
+
+# inside a transaction: the second update deletes a transaction local row
+statement ok
+BEGIN;
+
+query II
+INSERT OR REPLACE INTO p VALUES (1, 20) RETURNING *;
+----
+1	20
+
+query II
+UPDATE p SET v = 21 WHERE id = 1 RETURNING *;
+----
+1	21
+
+# one statement over a committed and a transaction local referenced row
+statement ok
+INSERT INTO c VALUES (20);
+
+query II rowsort
+INSERT OR REPLACE INTO p VALUES (20, 4), (1, 22) RETURNING *;
+----
+1	22
+20	4
+
+query II rowsort
+UPDATE p SET v = v + 1 RETURNING *;
+----
+1	23
+20	5
+
+statement ok
+INSERT INTO c VALUES (1);
+
+statement error
+UPDATE p SET id = 5 WHERE id = 1 RETURNING *;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement ok
+UPDATE pm SET l = [];
+
+statement ok
+UPDATE pm SET l = [id + 1];
+
+statement error
+DELETE FROM p WHERE id = 1;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement ok
+ROLLBACK;
+
+query II
+SELECT * FROM p ORDER BY id;
+----
+1	18
+20	2
+
+query I
+SELECT count(*) FROM c;
+----
+1
+
+query II
+SELECT count(*), sum(l[1]) FROM pm;
+----
+5000	12497500
+
+statement ok
+BEGIN;
+
+query II
+INSERT OR REPLACE INTO p VALUES (1, 30) RETURNING *;
+----
+1	30
+
+statement error
+DELETE FROM p WHERE id = 1;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement ok
+ROLLBACK;
+
+query II
+SELECT * FROM p ORDER BY id;
+----
+1	18
+20	2
+
+# one statement changes a committed referenced key while a transaction local row keeps its key
+# (RETURNING makes the first replace a delete and insert, so row 20 becomes transaction local)
+statement ok
+BEGIN;
+
+query II
+INSERT OR REPLACE INTO p VALUES (20, 9) RETURNING *;
+----
+20	9
+
+statement error
+INSERT INTO p VALUES (20, 0), (1, 0) ON CONFLICT DO UPDATE SET id = CASE WHEN id = 1 THEN 5 ELSE id END RETURNING *;
+----
+Violates foreign key constraint because key "id: 1" is still referenced
+
+statement ok
+ROLLBACK;
+
+# another connection inserts a child row of a key that is replaced unchanged
+statement ok
+CREATE TABLE pc (id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE TABLE cc (id INTEGER REFERENCES pc (id));
+
+statement ok
+INSERT INTO pc VALUES (1, 1), (2, 2);
+
+statement ok con1
+BEGIN;
+
+statement ok con2
+BEGIN;
+
+statement ok con2
+INSERT INTO cc VALUES (2);
+
+query II con1
+INSERT OR REPLACE INTO pc VALUES (2, 20) RETURNING *;
+----
+2	20
+
+statement ok con1
+COMMIT;
+
+statement ok con2
+COMMIT;
+
+statement ok con1
+BEGIN;
+
+query II con1
+UPDATE pc SET v = 21 WHERE id = 2 RETURNING *;
+----
+2	21
+
+statement ok con2
+INSERT INTO cc VALUES (2);
+
+statement ok con1
+COMMIT;
+
+query II
+SELECT cc.id, pc.v FROM cc JOIN pc USING (id);
+----
+2	21
+2	21
+
+statement error
+UPDATE pc SET id = 3 WHERE id = 2 RETURNING *;
+----
+Violates foreign key constraint because key "id: 2" is still referenced

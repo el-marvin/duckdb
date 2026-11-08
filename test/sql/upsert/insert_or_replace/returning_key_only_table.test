@@ -176,7 +176,7 @@ SELECT count(*), sum(id) FROM big;
 ----
 6001	18003000
 
-# a replaced key that a foreign key references fails with RETURNING, as it does for a table with more columns
+# a replaced key that a foreign key references stays referenced, with RETURNING as without, as for a wider table
 statement ok
 CREATE TABLE parent (id INTEGER PRIMARY KEY);
 
@@ -192,10 +192,10 @@ INSERT INTO child VALUES (1);
 statement ok
 INSERT OR REPLACE INTO parent VALUES (1);
 
-statement error
+query I
 INSERT OR REPLACE INTO parent VALUES (1) RETURNING *;
 ----
-Violates foreign key constraint because key "pid: 1" is still referenced
+1
 
 statement ok
 CREATE TABLE wide_parent (id INTEGER PRIMARY KEY, v INTEGER);
@@ -209,10 +209,15 @@ INSERT INTO wide_parent VALUES (1, 1);
 statement ok
 INSERT INTO wide_child VALUES (1);
 
-statement error
+query II
 INSERT OR REPLACE INTO wide_parent VALUES (1, 2) RETURNING *;
 ----
-Violates foreign key constraint because key "pid: 1" is still referenced
+1	2
+
+query II
+SELECT * FROM wide_parent;
+----
+1	2
 
 # the shapes that worked already: two key columns, a key column list on a wider table, DO UPDATE, MERGE
 statement ok
