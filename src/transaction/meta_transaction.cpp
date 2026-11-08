@@ -112,6 +112,11 @@ bool MetaTransaction::IsReadOnly() const {
 	return is_read_only;
 }
 
+optional_ptr<AttachedDatabase> MetaTransaction::ModifiedDatabase() {
+	lock_guard<mutex> guard(modify_lock);
+	return modified_database;
+}
+
 Transaction &Transaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog.GetAttached());
 }
@@ -257,29 +262,27 @@ AttachedDatabase &MetaTransaction::UseDatabase(shared_ptr<AttachedDatabase> &dat
 }
 
 void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationType modification) {
+	lock_guard<mutex> guard(modify_lock);
 	// Temporary objects are private to the connection, so a read-only transaction may still write them
 	if (IsReadOnly() && !db.IsTemporary()) {
 		throw TransactionException("Cannot write to database %s - transaction is launched in read-only mode",
 		                           db.GetName());
+	}
+	// we can always modify the system and temp databases; any other is checked before the transaction changes
+	auto always_writable = db.IsSystem() || db.IsTemporary();
+	if (!always_writable && modified_database && &db != modified_database.get()) {
+		throw TransactionException(
+		    "Attempting to write to database %s in a transaction that has already modified database %s - a "
+		    "single transaction can only write to a single attached database.",
+		    db.GetName(), modified_database->GetName());
 	}
 	auto &transaction = GetTransaction(db);
 	if (transaction.IsReadOnly()) {
 		transaction.SetReadWrite();
 	}
 	transaction.SetModifications(modification);
-	if (db.IsSystem() || db.IsTemporary()) {
-		// we can always modify the system and temp databases
-		return;
-	}
-	if (!modified_database) {
+	if (!always_writable && !modified_database) {
 		modified_database = &db;
-		return;
-	}
-	if (&db != modified_database.get()) {
-		throw TransactionException(
-		    "Attempting to write to database %s in a transaction that has already modified database %s - a "
-		    "single transaction can only write to a single attached database.",
-		    db.GetName(), modified_database->GetName());
 	}
 }
 

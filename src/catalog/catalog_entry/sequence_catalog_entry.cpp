@@ -8,7 +8,10 @@
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -56,7 +59,24 @@ int64_t SequenceCatalogEntry::CurrentValue() {
 	return result;
 }
 
+void SequenceCatalogEntry::DeclareWrite(DuckTransaction &transaction) {
+	if (temporary || !transaction.IsReadOnly()) {
+		return;
+	}
+	auto context = transaction.context.lock();
+	if (!context) {
+		throw InternalException("Sequence %s written without a client context", name);
+	}
+	auto &db = ParentCatalog().GetAttached();
+	if (db.IsReadOnly()) {
+		throw TransactionException("Cannot write to database %s - it is attached in read-only mode", db.GetName());
+	}
+	// a read only transaction throws here, before the sequence changes
+	MetaTransaction::Get(*context).ModifyDatabase(db, DatabaseModificationType::SEQUENCE);
+}
+
 int64_t SequenceCatalogEntry::NextValue(DuckTransaction &transaction) {
+	DeclareWrite(transaction);
 	lock_guard<mutex> seqlock(state->lock);
 	int64_t result;
 	result = state->data.counter;
@@ -101,6 +121,7 @@ int64_t SequenceCatalogEntry::NextValue(DuckTransaction &transaction) {
 }
 
 int64_t SequenceCatalogEntry::SetValue(DuckTransaction &transaction, int64_t value, bool is_called) {
+	DeclareWrite(transaction);
 	{
 		lock_guard<mutex> seqlock(state->lock);
 		if (value < state->data.min_value || value > state->data.max_value) {

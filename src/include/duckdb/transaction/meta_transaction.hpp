@@ -74,9 +74,7 @@ public:
 	void SetReadOnly();
 	bool IsReadOnly() const;
 	void ModifyDatabase(AttachedDatabase &db, DatabaseModificationType modification);
-	optional_ptr<AttachedDatabase> ModifiedDatabase() {
-		return modified_database;
-	}
+	optional_ptr<AttachedDatabase> ModifiedDatabase();
 	const vector<reference<AttachedDatabase>> &OpenedTransactions() const {
 		return all_transactions;
 	}
@@ -90,6 +88,8 @@ private:
 
 	//! Lock to prevent all_transactions and transactions from getting out of sync.
 	mutex lock;
+	//! Serializes ModifyDatabase, which the threads of a statement call when a write declares itself
+	mutex modify_lock;
 	//! The set of active transactions for each database.
 	reference_map_t<AttachedDatabase, TransactionReference> transactions;
 	//! The set of referenced databases in invocation order.

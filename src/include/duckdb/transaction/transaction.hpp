@@ -83,7 +83,8 @@ public:
 	}
 
 private:
-	bool is_read_only;
+	//! Atomic because a write that declares itself reads it while another thread may promote the transaction
+	atomic<bool> is_read_only;
 };
 
 } // namespace duckdb
