@@ -76,6 +76,7 @@ struct CreateTriggerInfo;
 struct QualifiedName;
 struct BoundCreateTableInfo;
 struct CreateMacroInfo;
+class MacroFunction;
 struct BoundOnConflictInfo;
 struct CommonTableExpressionInfo;
 struct BoundParameterMap;
@@ -311,6 +312,11 @@ public:
 	                     const vector<Identifier> &schema_path, optional_ptr<LogicalDependencyList> dependencies,
 	                     const vector<Identifier> &aliases, vector<LogicalType> &result_types,
 	                     vector<Identifier> &result_names);
+	//! Bind a view body as CREATE VIEW does, reporting every catalog entry the bind looks up to the callback
+	static void BindViewBody(ClientContext &context, const SelectStatement &stmt, const Identifier &catalog_name,
+	                         const vector<Identifier> &schema_path, const catalog_entry_callback_t &lookup_callback,
+	                         const vector<Identifier> &aliases, vector<LogicalType> &result_types,
+	                         vector<Identifier> &result_names);
 
 	void SearchSchema(CreateInfo &info);
 	//! Resolve the leading component of a (possibly qualified) name into a catalog: if it names an attached database it
@@ -333,6 +339,9 @@ public:
 	void BindCreateSchema(CreateSchemaInfo &info);
 	SchemaCatalogEntry &BindSchema(CreateInfo &info);
 	SchemaCatalogEntry &BindCreateFunctionInfo(CreateInfo &info);
+	//! Bind one overload of a macro as CREATE MACRO does to verify it, reporting the entries the bind looks up
+	void BindMacroDefinition(CatalogType type, const MacroFunction &function, const string &macro_name,
+	                         optional_ptr<const catalog_entry_callback_t> lookup_callback);
 	//! Reject macro entries with declared RETURNS types in storage below v2.1.0
 	static void CheckMacroStorageVersion(Catalog &catalog, const CreateMacroInfo &info);
 	static void CheckTriggerStorageVersion(Catalog &catalog, const CreateTriggerInfo &info);
@@ -493,6 +502,8 @@ private:
 	idx_t GetBinderDepth() const;
 	//! Increase the depth of the binder
 	void IncreaseDepth();
+	//! Continue the depth of the binder that creates this one, for a binder that does not take it as its parent
+	void ContinueDepth(const Binder &creator);
 	//! Bind the expressions of generated columns to check for errors
 	void BindGeneratedColumns(BoundCreateTableInfo &info);
 	//! Bind the default values of the columns of a table

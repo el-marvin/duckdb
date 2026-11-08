@@ -339,17 +339,28 @@ void Binder::BindView(ClientContext &context, const SelectStatement &stmt, const
                       const vector<Identifier> &schema_path, optional_ptr<LogicalDependencyList> dependencies,
                       const vector<Identifier> &aliases, vector<LogicalType> &result_types,
                       vector<Identifier> &result_names) {
-	auto view_binder = Binder::CreateBinder(context);
-	auto &catalog = Catalog::GetCatalog(context, catalog_name);
-
+	catalog_entry_callback_t lookup_callback;
 	if (dependencies) {
-		view_binder->SetCatalogLookupCallback([&dependencies, &catalog](CatalogEntry &entry) {
+		auto &catalog = Catalog::GetCatalog(context, catalog_name);
+		lookup_callback = [&dependencies, &catalog](CatalogEntry &entry) {
 			if (&catalog != &entry.ParentCatalog()) {
 				// Don't register dependencies between catalogs
 				return;
 			}
 			dependencies->AddDependency(entry);
-		});
+		};
+	}
+	BindViewBody(context, stmt, catalog_name, schema_path, lookup_callback, aliases, result_types, result_names);
+}
+
+void Binder::BindViewBody(ClientContext &context, const SelectStatement &stmt, const Identifier &catalog_name,
+                          const vector<Identifier> &schema_path, const catalog_entry_callback_t &lookup_callback,
+                          const vector<Identifier> &aliases, vector<LogicalType> &result_types,
+                          vector<Identifier> &result_names) {
+	auto view_binder = Binder::CreateBinder(context);
+	auto &catalog = Catalog::GetCatalog(context, catalog_name);
+	if (lookup_callback) {
+		view_binder->SetCatalogLookupCallback(lookup_callback);
 	}
 	view_binder->SetCanContainNulls(true);
 
@@ -421,6 +432,76 @@ void Binder::CheckMacroStorageVersion(Catalog &catalog, const CreateMacroInfo &i
 		string msg = "Macros with a declared RETURNS type are only supported for storage versions v2.1.0 and higher.\n";
 		msg += "Use an in-memory database, ATTACH with (STORAGE_VERSION v2.1.0), or create a TEMP macro";
 		throw BinderException(msg);
+	}
+}
+
+static vector<LogicalType> MacroParameterTypes(const MacroFunction &function) {
+	vector<LogicalType> types;
+	for (idx_t param_idx = 0; param_idx < function.parameters.size(); param_idx++) {
+		types.emplace_back(function.types.empty() ? LogicalType::UNKNOWN : function.types[param_idx]);
+	}
+	return types;
+}
+
+void Binder::BindMacroDefinition(CatalogType type, const MacroFunction &function, const string &macro_name,
+                                 optional_ptr<const catalog_entry_callback_t> lookup_callback) {
+	auto dummy_types = MacroParameterTypes(function);
+	vector<Identifier> dummy_names;
+	for (auto &parameter : function.parameters) {
+		dummy_names.emplace_back(parameter->Cast<ColumnRefExpression>().GetColumnName());
+	}
+	auto this_macro_binding = make_uniq<DummyBinding>(dummy_types, dummy_names, macro_name);
+	struct MacroBindingScope {
+		Binder &binder;
+		~MacroBindingScope() {
+			binder.macro_binding = nullptr;
+		}
+	} macro_binding_scope {*this};
+	macro_binding = this_macro_binding.get();
+
+	// bind it to verify the function was defined correctly
+	ErrorData error;
+	if (type == CatalogType::MACRO_ENTRY) {
+		BoundSelectNode sel_node;
+		SelectBinder binder(*this, context, sel_node);
+		if (lookup_callback) {
+			binder.SetCatalogLookupCallback(*lookup_callback);
+		}
+
+		// create a copy of the expression because we do not want to alter the original
+		auto expression = function.Cast<ScalarMacroFunction>().expression->Copy();
+		ExpressionBinder::QualifyColumnNames(*this, expression);
+		try {
+			auto bind_result = binder.Bind(expression, 0, false);
+			if (bind_result.HasError()) {
+				error = std::move(bind_result.error);
+				error.Throw();
+			}
+		} catch (const std::exception &ex) {
+			error = ErrorData(ex);
+		}
+	} else {
+		D_ASSERT(type == CatalogType::TABLE_MACRO_ENTRY);
+		auto dummy_binder = CreateBinder(context, this);
+		if (lookup_callback) {
+			dummy_binder->SetCatalogLookupCallback(*lookup_callback);
+		}
+
+		// create a copy of the query node because we do not want to alter the original
+		auto query_node = function.Cast<TableMacroFunction>().query_node->Copy();
+		ParsedExpressionIterator::EnumerateQueryNodeChildren(
+		    *query_node, [&dummy_binder](unique_ptr<ParsedExpression> &child) {
+			    ExpressionBinder::QualifyColumnNames(*dummy_binder, child);
+		    });
+		try {
+			dummy_binder->Bind(*query_node);
+		} catch (const std::exception &ex) {
+			error = ErrorData(ex);
+		}
+	}
+	// if we cannot resolve parameters we postpone binding until the macro function is used
+	if (error.HasError() && error.Type() != ExceptionType::PARAMETER_NOT_RESOLVED) {
+		error.Throw();
 	}
 }
 
@@ -563,27 +644,14 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 			}
 		}
 
-		vector<LogicalType> dummy_types;
-		vector<Identifier> dummy_names;
-		// positional parameters
-		for (idx_t param_idx = 0; param_idx < function->parameters.size(); param_idx++) {
-			dummy_types.emplace_back(function->types.empty() ? LogicalType::UNKNOWN : function->types[param_idx]);
-			dummy_names.emplace_back(function->parameters[param_idx]->Cast<ColumnRefExpression>().GetColumnName());
-		}
-
-		if (!type_overloads.insert(dummy_types).second) {
+		if (!type_overloads.insert(MacroParameterTypes(*function)).second) {
 			throw BinderException(
 			    "Ambiguity in macro overloads - macro %s() has multiple definitions with the same parameters",
 			    base.GetFunctionName().GetIdentifierName());
 		}
 
-		auto this_macro_binding =
-		    make_uniq<DummyBinding>(dummy_types, dummy_names, base.GetFunctionName().GetIdentifierName());
-		macro_binding = this_macro_binding.get();
-
 		auto &dependencies = base.dependencies;
-		const auto should_create_dependencies = Settings::Get<EnableMacroDependenciesSetting>(context);
-		const auto binder_callback = [&dependencies, &catalog](CatalogEntry &entry) {
+		const catalog_entry_callback_t binder_callback = [&dependencies, &catalog](CatalogEntry &entry) {
 			if (&catalog != &entry.ParentCatalog()) {
 				// Don't register any cross-catalog dependencies
 				return;
@@ -591,52 +659,9 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 			// Register any catalog entry required to bind the macro function
 			dependencies.AddDependency(entry);
 		};
-
-		// bind it to verify the function was defined correctly
-		ErrorData error;
-		if (info.type == CatalogType::MACRO_ENTRY) {
-			BoundSelectNode sel_node;
-			SelectBinder binder(*this, context, sel_node);
-			if (should_create_dependencies) {
-				binder.SetCatalogLookupCallback(binder_callback);
-			}
-
-			// create a copy of the expression because we do not want to alter the original
-			auto expression = function->Cast<ScalarMacroFunction>().expression->Copy();
-			ExpressionBinder::QualifyColumnNames(*this, expression);
-			try {
-				auto bind_result = binder.Bind(expression, 0, false);
-				if (bind_result.HasError()) {
-					error = std::move(bind_result.error);
-					error.Throw();
-				}
-			} catch (const std::exception &ex) {
-				error = ErrorData(ex);
-			}
-		} else {
-			D_ASSERT(info.type == CatalogType::TABLE_MACRO_ENTRY);
-			auto dummy_binder = CreateBinder(context, this);
-			if (should_create_dependencies) {
-				dummy_binder->SetCatalogLookupCallback(binder_callback);
-			}
-
-			// create a copy of the query node because we do not want to alter the original
-			auto query_node = function->Cast<TableMacroFunction>().query_node->Copy();
-			ParsedExpressionIterator::EnumerateQueryNodeChildren(
-			    *query_node, [&dummy_binder](unique_ptr<ParsedExpression> &child) {
-				    ExpressionBinder::QualifyColumnNames(*dummy_binder, child);
-			    });
-			try {
-				dummy_binder->Bind(*query_node);
-			} catch (const std::exception &ex) {
-				error = ErrorData(ex);
-			}
-		}
-
-		// if we cannot resolve parameters we postpone binding until the macro function is used
-		if (error.HasError() && error.Type() != ExceptionType::PARAMETER_NOT_RESOLVED) {
-			error.Throw();
-		}
+		const auto should_create_dependencies = Settings::Get<EnableMacroDependenciesSetting>(context);
+		BindMacroDefinition(info.type, *function, base.GetFunctionName().GetIdentifierName(),
+		                    should_create_dependencies ? &binder_callback : nullptr);
 	}
 
 	return BindCreateSchema(info);

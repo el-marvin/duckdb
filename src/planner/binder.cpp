@@ -52,6 +52,11 @@ void Binder::IncreaseDepth() {
 	}
 }
 
+void Binder::ContinueDepth(const Binder &creator) {
+	depth = creator.GetBinderDepth();
+	IncreaseDepth();
+}
+
 shared_ptr<Binder> Binder::CreateBinder(ClientContext &context, optional_ptr<Binder> parent, BinderType binder_type) {
 	return shared_ptr<Binder>(new Binder(context, parent ? parent->shared_from_this() : nullptr, binder_type));
 }

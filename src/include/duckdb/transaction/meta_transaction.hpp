@@ -71,6 +71,17 @@ public:
 	idx_t GetActiveQuery();
 	void SetActiveQuery(transaction_t query_number);
 
+	//! No write may happen on the calling thread, in any database, while a scope is open. The scope is per thread
+	//! because the other threads of a statement share its transaction and may write
+	class NoWriteScope {
+	public:
+		NoWriteScope();
+		~NoWriteScope();
+		NoWriteScope(const NoWriteScope &) = delete;
+		NoWriteScope &operator=(const NoWriteScope &) = delete;
+	};
+	static bool RefusesWrites();
+
 	void SetReadOnly();
 	bool IsReadOnly() const;
 	void ModifyDatabase(AttachedDatabase &db, DatabaseModificationType modification);

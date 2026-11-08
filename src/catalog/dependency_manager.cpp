@@ -674,10 +674,215 @@ void DependencyManager::DropObject(CatalogTransaction transaction, CatalogEntry 
 	}
 }
 
-void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries, ClientContext &context) {
+//! Orders the strongly connected components of the graph (recorded dependencies and references from a node to its
+//! subjects) so that each comes after the components it points into, and the members of a component in the order
+//! ReorderEntry gives them from the recorded dependencies alone. Ties go by node index, then by oid, as ReorderEntry
+//! visits them. Iterative, so a long chain of entries cannot exhaust the stack.
+static catalog_entry_vector_t OrderByComponents(const catalog_entry_vector_t &nodes,
+                                                const vector<vector<idx_t>> &recorded,
+                                                const vector<vector<idx_t>> &referenced) {
+	auto count = nodes.size();
+	auto by_oid = [&](idx_t lhs, idx_t rhs) {
+		return nodes[lhs].get().oid < nodes[rhs].get().oid;
+	};
+	vector<vector<idx_t>> edges(count);
+	vector<vector<idx_t>> recorded_by_oid(count);
+	for (idx_t node = 0; node < count; node++) {
+		recorded_by_oid[node] = recorded[node];
+		std::stable_sort(recorded_by_oid[node].begin(), recorded_by_oid[node].end(), by_oid);
+		edges[node] = recorded[node];
+		edges[node].insert(edges[node].end(), referenced[node].begin(), referenced[node].end());
+		std::stable_sort(edges[node].begin(), edges[node].end(), by_oid);
+	}
+
+	// Tarjan's algorithm
+	vector<optional_idx> visit_index(count);
+	vector<idx_t> low_link(count);
+	vector<idx_t> component(count);
+	vector<bool> on_stack(count, false);
+	vector<idx_t> stack;
+	vector<pair<idx_t, idx_t>> frames;
+	idx_t next_index = 0;
+	idx_t component_count = 0;
+	for (idx_t root = 0; root < count; root++) {
+		if (visit_index[root].IsValid()) {
+			continue;
+		}
+		frames.emplace_back(root, 0);
+		visit_index[root] = low_link[root] = next_index++;
+		stack.push_back(root);
+		on_stack[root] = true;
+		while (!frames.empty()) {
+			auto node = frames.back().first;
+			auto &next_edge = frames.back().second;
+			if (next_edge < edges[node].size()) {
+				auto subject = edges[node][next_edge++];
+				if (!visit_index[subject].IsValid()) {
+					visit_index[subject] = low_link[subject] = next_index++;
+					stack.push_back(subject);
+					on_stack[subject] = true;
+					frames.emplace_back(subject, 0);
+				} else if (on_stack[subject]) {
+					low_link[node] = MinValue(low_link[node], visit_index[subject].GetIndex());
+				}
+				continue;
+			}
+			frames.pop_back();
+			if (!frames.empty()) {
+				auto parent = frames.back().first;
+				low_link[parent] = MinValue(low_link[parent], low_link[node]);
+			}
+			if (low_link[node] != visit_index[node].GetIndex()) {
+				continue;
+			}
+			while (true) {
+				auto member = stack.back();
+				stack.pop_back();
+				on_stack[member] = false;
+				component[member] = component_count;
+				if (member == node) {
+					break;
+				}
+			}
+			component_count++;
+		}
+	}
+
+	vector<vector<idx_t>> members(component_count);
+	vector<vector<idx_t>> component_subjects(component_count);
+	for (idx_t node = 0; node < count; node++) {
+		members[component[node]].push_back(node);
+	}
+	for (idx_t unit = 0; unit < component_count; unit++) {
+		vector<idx_t> subjects;
+		for (auto member : members[unit]) {
+			for (auto subject : edges[member]) {
+				if (component[subject] != unit) {
+					subjects.push_back(subject);
+				}
+			}
+		}
+		std::stable_sort(subjects.begin(), subjects.end(), by_oid);
+		for (auto subject : subjects) {
+			auto &list = component_subjects[unit];
+			if (std::find(list.begin(), list.end(), component[subject]) == list.end()) {
+				list.push_back(component[subject]);
+			}
+		}
+	}
+
+	// the order without references, for the members of a component
+	vector<idx_t> old_position(count);
+	vector<bool> visited(count, false);
+	idx_t next_position = 0;
+	for (idx_t root = 0; root < count; root++) {
+		if (visited[root]) {
+			continue;
+		}
+		visited[root] = true;
+		frames.emplace_back(root, 0);
+		while (!frames.empty()) {
+			auto node = frames.back().first;
+			auto &next_edge = frames.back().second;
+			if (next_edge < recorded_by_oid[node].size()) {
+				auto subject = recorded_by_oid[node][next_edge++];
+				if (!visited[subject]) {
+					visited[subject] = true;
+					frames.emplace_back(subject, 0);
+				}
+				continue;
+			}
+			old_position[node] = next_position++;
+			frames.pop_back();
+		}
+	}
+	for (auto &unit : members) {
+		std::sort(unit.begin(), unit.end(),
+		          [&](idx_t lhs, idx_t rhs) { return old_position[lhs] < old_position[rhs]; });
+	}
+
+	catalog_entry_vector_t result;
+	vector<bool> component_seen(component_count, false);
+	for (idx_t root = 0; root < count; root++) {
+		if (component_seen[component[root]]) {
+			continue;
+		}
+		component_seen[component[root]] = true;
+		frames.emplace_back(component[root], 0);
+		while (!frames.empty()) {
+			auto unit = frames.back().first;
+			auto &next_subject = frames.back().second;
+			if (next_subject < component_subjects[unit].size()) {
+				auto subject = component_subjects[unit][next_subject++];
+				if (!component_seen[subject]) {
+					component_seen[subject] = true;
+					frames.emplace_back(subject, 0);
+				}
+				continue;
+			}
+			for (auto member : members[unit]) {
+				result.push_back(nodes[member]);
+			}
+			frames.pop_back();
+		}
+	}
+	return result;
+}
+
+void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries, ClientContext &context,
+                                       const entry_references_t &references) {
 	auto transaction = catalog.GetCatalogTransaction(context);
 	// Read all the entries visible to this snapshot. Internal entries are not exported
-	ReorderEntries(entries, transaction, false);
+	catalog_entry_vector_t nodes;
+	catalog_entry_map_t<idx_t> node_index;
+	auto add_node = [&](CatalogEntry &entry) -> optional_idx {
+		auto &catalog_entry = *LookupEntry(transaction, entry);
+		if (catalog_entry.internal) {
+			return optional_idx();
+		}
+		auto existing = node_index.find(catalog_entry);
+		if (existing != node_index.end()) {
+			return existing->second;
+		}
+		node_index[catalog_entry] = nodes.size();
+		nodes.push_back(catalog_entry);
+		return nodes.size() - 1;
+	};
+	for (auto &entry : entries) {
+		add_node(entry);
+	}
+	vector<vector<idx_t>> recorded;
+	vector<vector<idx_t>> referenced;
+	for (idx_t node = 0; node < nodes.size(); node++) {
+		auto &entry = nodes[node].get();
+		vector<idx_t> entry_recorded;
+		ScanSubjects(transaction, GetLookupProperties(entry), [&](DependencyEntry &dep) {
+			auto subject = add_node(*LookupEntry(transaction, dep));
+			if (subject.IsValid()) {
+				entry_recorded.push_back(subject.GetIndex());
+			}
+		});
+		catalog_entry_vector_t found;
+		references(entry, found);
+		vector<idx_t> entry_referenced;
+		for (auto &reference : found) {
+			auto subject = add_node(reference);
+			if (subject.IsValid()) {
+				entry_referenced.push_back(subject.GetIndex());
+			}
+		}
+		recorded.push_back(std::move(entry_recorded));
+		referenced.push_back(std::move(entry_referenced));
+	}
+	// References and recorded dependencies can form a cycle that no order imports (a macro reading a table whose
+	// DEFAULT calls the macro). Cutting it at one edge could drop a recorded dependency, so a cycle is placed as a
+	// whole, after what it points into, and its entries keep the order they have without references (recorded
+	// dependencies form no cycle)
+	auto reordered = OrderByComponents(nodes, recorded, referenced);
+	// If this would fail, that means there are more entries that we somehow reached through the dependency manager
+	// but those entries should not actually be visible to this transaction
+	D_ASSERT(entries.size() == reordered.size());
+	entries = std::move(reordered);
 }
 
 void DependencyManager::ReorderEntries(catalog_entry_vector_t &entries, VisibilityBound bound) {

@@ -1,0 +1,207 @@
+# name: test/sql/export/export_bind_writes.test
+# description: the binds EXPORT DATABASE and COPY FROM DATABASE run for their order write nothing and do not recurse
+# group: [export]
+
+require json
+
+require noforcestorage
+
+statement ok
+CREATE SEQUENCE s
+
+# json_serialize_plan plans its SQL with a planner of its own, which evaluates nextval; the bind fails at that write
+
+statement ok
+CREATE VIEW v AS FROM repeat(json_serialize_plan('SELECT * FROM range(nextval(''s''))'), 1)
+
+query I
+SELECT currval('s')
+----
+1
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_bind_writes'
+
+query I
+SELECT currval('s')
+----
+1
+
+statement ok
+ATTACH ':memory:' AS cp
+
+statement ok
+BEGIN
+
+statement ok
+COPY FROM DATABASE memory TO cp (SCHEMA)
+
+query I
+SELECT currval('s')
+----
+1
+
+statement ok
+COMMIT
+
+# a bind that plans a COPY FROM DATABASE of the same database does not bind the same view again
+
+statement ok
+CREATE VIEW w AS FROM repeat(json_serialize_plan('COPY FROM DATABASE memory TO cp2 (SCHEMA)'), 1)
+
+statement ok
+ATTACH ':memory:' AS cp2
+
+statement ok
+COPY FROM DATABASE memory TO cp2 (SCHEMA)
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_bind_writes_nested'
+
+query I
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'cp2' AND NOT internal
+----
+2
+
+# a macro that recurses through a USING KEY aggregate ends at the expression depth limit instead of the stack; the
+# limit is lowered so that the larger stack frames of sanitizer builds reach it too
+
+statement ok
+SET max_expression_depth = 100
+
+statement ok
+CREATE MACRO m(x) AS x
+
+statement ok
+CREATE OR REPLACE MACRO m(x) AS (WITH RECURSIVE t(k, v) USING KEY (k, sum(m(v)) AS v) AS (SELECT 1, 1 UNION SELECT k + 1, v FROM t WHERE k < 3) SELECT max(v) FROM t)
+
+statement error
+SELECT m(1)
+----
+Max expression depth limit
+
+statement ok
+ATTACH ':memory:' AS cp3
+
+statement ok
+COPY FROM DATABASE memory TO cp3 (SCHEMA)
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_bind_writes_recursion'
+
+statement ok
+RESET max_expression_depth
+
+# the binds write nothing whatever the state of the transaction: in a transaction that has already written, nextval in
+# a body is refused and the body keeps its old place before z_v, while a_c, which binds, moves after y_c
+
+statement ok
+ATTACH ':memory:' AS w
+
+statement ok
+USE w
+
+statement ok
+CREATE SEQUENCE ws
+
+statement ok
+CREATE VIEW z_v AS SELECT 1 AS x
+
+statement ok
+CREATE VIEW a_v AS SELECT (SELECT x FROM z_v) FROM range(nextval('ws'))
+
+statement ok
+CREATE VIEW y_c AS SELECT 1 AS x
+
+statement ok
+CREATE VIEW a_c AS SELECT x FROM y_c
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+query I
+SELECT currval('ws')
+----
+1
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO t VALUES (1)
+
+statement ok
+EXPORT DATABASE w TO '{TEST_DIR}/export_bind_writes_wrote'
+
+query I
+SELECT currval('ws')
+----
+1
+
+statement ok
+COMMIT
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_bind_writes_wrote/schema.sql')
+----
+CREATE SEQUENCE ws INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START 2 NO CYCLE;
+CREATE TABLE t(i INTEGER);
+CREATE VIEW y_c AS SELECT 1 AS x;
+CREATE VIEW a_c AS SELECT x FROM y_c;
+CREATE VIEW a_v AS SELECT (SELECT x FROM z_v) FROM "range"(nextval('ws'));
+CREATE VIEW z_v AS SELECT 1 AS x;
+
+# a temporary sequence, which even a read only transaction may write, is not written by the binds either
+
+statement ok
+CREATE TEMP SEQUENCE ts
+
+statement ok
+CREATE VIEW a_t AS SELECT (SELECT x FROM z_v) FROM range(setval('temp.ts', 5, false))
+
+query I
+SELECT nextval('temp.ts')
+----
+5
+
+statement ok
+ATTACH ':memory:' AS cpw
+
+statement ok
+COPY FROM DATABASE w TO cpw (SCHEMA)
+
+query I
+SELECT nextval('temp.ts')
+----
+6
+
+statement ok
+EXPORT DATABASE w TO '{TEST_DIR}/export_bind_writes_temp'
+
+query I
+SELECT nextval('temp.ts')
+----
+7
+
+# the binds refuse writes on their own thread only: a nextval in another pipeline of the same statement still writes
+# while a branch plans a COPY FROM DATABASE
+
+statement ok
+SET threads = 4
+
+statement ok
+ATTACH ':memory:' AS src_par
+
+statement ok
+ATTACH ':memory:' AS dst_par
+
+statement ok
+CREATE VIEW src_par.v AS FROM range(length(repeat('x', 10000000)))
+
+statement ok
+CREATE SEQUENCE w.ps
+
+query I
+SELECT sum(x) FROM (SELECT nextval('w.ps') AS x FROM range(1000000) UNION ALL SELECT (json_serialize_plan('COPY FROM DATABASE src_par TO dst_par (SCHEMA)' || repeat(' ', i::INT))->>'error')::BOOLEAN::BIGINT AS x FROM range(1) t(i))
+----
+500000500000

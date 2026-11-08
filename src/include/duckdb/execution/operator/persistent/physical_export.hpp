@@ -59,7 +59,8 @@ public:
 	static void ExtractEntries(ClientContext &context, vector<reference<SchemaCatalogEntry>> &schemas,
 	                           ExportEntries &result);
 	static catalog_entry_vector_t GetNaiveExportOrder(ClientContext &context, Catalog &catalog);
-	//! The entries of the catalog, each after the entries it records a dependency on
+	//! The entries of the catalog, each after the entries it records a dependency on and the tables, views and macros
+	//! its body binds
 	static catalog_entry_vector_t GetExportOrder(ClientContext &context, Catalog &catalog);
 	//! The triggers of the tables in the order they can be recreated in
 	static catalog_entry_vector_t GetTriggerExportOrder(CatalogTransaction transaction,

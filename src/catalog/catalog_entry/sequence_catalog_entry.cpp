@@ -60,7 +60,7 @@ int64_t SequenceCatalogEntry::CurrentValue() {
 }
 
 void SequenceCatalogEntry::DeclareWrite(DuckTransaction &transaction) {
-	if (temporary || !transaction.IsReadOnly()) {
+	if (!MetaTransaction::RefusesWrites() && (temporary || !transaction.IsReadOnly())) {
 		return;
 	}
 	auto context = transaction.context.lock();
@@ -71,7 +71,7 @@ void SequenceCatalogEntry::DeclareWrite(DuckTransaction &transaction) {
 	if (db.IsReadOnly()) {
 		throw TransactionException("Cannot write to database %s - it is attached in read-only mode", db.GetName());
 	}
-	// a read only transaction throws here, before the sequence changes
+	// a read only transaction or a scope that refuses writes throws here, before the sequence changes
 	MetaTransaction::Get(*context).ModifyDatabase(db, DatabaseModificationType::SEQUENCE);
 }
 

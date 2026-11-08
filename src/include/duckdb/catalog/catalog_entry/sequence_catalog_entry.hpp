@@ -76,7 +76,8 @@ public:
 	SequenceData GetData() const;
 	int64_t CurrentValue();
 	int64_t NextValue(DuckTransaction &transaction);
-	//! Declares the write to the transaction where the statement did not, as a bind that evaluates nextval
+	//! Declares the write to the transaction where the statement did not, as a bind that evaluates nextval, and
+	//! refuses it where the transaction refuses writes
 	void DeclareWrite(DuckTransaction &transaction);
 	int64_t SetValue(DuckTransaction &transaction, int64_t value, bool is_called);
 	void ReplayValue(uint64_t usage_count, int64_t counter, optional<int64_t> last_value);

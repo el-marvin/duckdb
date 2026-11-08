@@ -117,6 +117,23 @@ optional_ptr<AttachedDatabase> MetaTransaction::ModifiedDatabase() {
 	return modified_database;
 }
 
+static idx_t &OpenNoWriteScopes() {
+	static thread_local idx_t open_scopes = 0;
+	return open_scopes;
+}
+
+MetaTransaction::NoWriteScope::NoWriteScope() {
+	OpenNoWriteScopes()++;
+}
+
+MetaTransaction::NoWriteScope::~NoWriteScope() {
+	OpenNoWriteScopes()--;
+}
+
+bool MetaTransaction::RefusesWrites() {
+	return OpenNoWriteScopes() > 0;
+}
+
 Transaction &Transaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog.GetAttached());
 }
@@ -262,6 +279,10 @@ AttachedDatabase &MetaTransaction::UseDatabase(shared_ptr<AttachedDatabase> &dat
 }
 
 void MetaTransaction::ModifyDatabase(AttachedDatabase &db, DatabaseModificationType modification) {
+	if (RefusesWrites()) {
+		throw TransactionException("Cannot write to database %s - no write may happen in this part of the statement",
+		                           db.GetName());
+	}
 	lock_guard<mutex> guard(modify_lock);
 	// Temporary objects are private to the connection, so a read-only transaction may still write them
 	if (IsReadOnly() && !db.IsTemporary()) {

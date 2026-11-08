@@ -1,16 +1,24 @@
 #include "duckdb/execution/operator/persistent/physical_export.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/transaction.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
 #include "duckdb/catalog/dependency_manager.hpp"
+#include "duckdb/catalog/dependency_list.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/context.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -233,12 +241,106 @@ catalog_entry_vector_t PhysicalExport::GetNaiveExportOrder(ClientContext &contex
 	return catalog_entries;
 }
 
+namespace {
+
+class ExportReferences {
+public:
+	ExportReferences(ClientContext &context_p, const catalog_entry_vector_t &entries) : context(context_p) {
+		for (auto &entry : entries) {
+			auto type = entry.get().type;
+			if (type == CatalogType::TABLE_ENTRY || type == CatalogType::VIEW_ENTRY ||
+			    type == CatalogType::MACRO_ENTRY || type == CatalogType::TABLE_MACRO_ENTRY) {
+				exported.emplace(DependencyManager::MangleName(entry.get()).name, entry);
+			}
+		}
+	}
+
+	//! The exported tables, views and macros the binder looks up when it binds the body, which is the bind IMPORT runs
+	void Collect(CatalogEntry &entry, catalog_entry_vector_t &result) const {
+		auto &catalog = entry.ParentCatalog();
+		LogicalDependencyList found;
+		const catalog_entry_callback_t lookup = [&](CatalogEntry &used) {
+			if (&used.ParentCatalog() == &catalog) {
+				found.AddDependency(used);
+			}
+		};
+		try {
+			if (entry.type == CatalogType::VIEW_ENTRY) {
+				auto &view = entry.Cast<ViewCatalogEntry>();
+				vector<LogicalType> types;
+				vector<Identifier> names;
+				Binder::BindViewBody(context, view.GetQuery(), catalog.GetName(),
+				                     DependencyManager::GetSchemaPath(entry), lookup, view.aliases, types, names);
+			} else if (entry.type == CatalogType::MACRO_ENTRY || entry.type == CatalogType::TABLE_MACRO_ENTRY) {
+				// IMPORT runs CREATE MACRO in a session whose default schema is the one of the importing database
+				auto binder = Binder::CreateBinder(context);
+				binder->SetSearchPath(catalog, vector<Identifier>());
+				for (auto &function : entry.Cast<MacroCatalogEntry>().macros) {
+					binder->BindMacroDefinition(entry.type, *function, entry.name.GetIdentifierName(), &lookup);
+				}
+			} else {
+				return;
+			}
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::INTERRUPT || error.Type() == ExceptionType::INTERNAL ||
+			    Exception::InvalidatesDatabase(error.Type())) {
+				throw;
+			}
+			// a body that does not bind here keeps its old place
+			return;
+		}
+		for (auto &dependency : found.Set()) {
+			auto used = exported.find(DependencyManager::MangleName(dependency.entry).name);
+			if (used != exported.end()) {
+				result.push_back(used->second);
+			}
+		}
+	}
+
+private:
+	ClientContext &context;
+	identifier_map_t<reference<CatalogEntry>> exported;
+};
+
+} // namespace
+
+namespace {
+
+//! Set while the bodies of an export are bound. A bind can plan a statement of its own (json_serialize_plan of a COPY
+//! FROM DATABASE), which would bind the same bodies again without end
+struct ExportOrderBindState : public ClientContextState {
+	bool binding = false;
+};
+
+} // namespace
+
 catalog_entry_vector_t PhysicalExport::GetExportOrder(ClientContext &context, Catalog &catalog) {
 	auto catalog_entries = GetNaiveExportOrder(context, catalog);
 	auto dependency_manager = catalog.GetDependencyManager();
-	if (dependency_manager) {
-		dependency_manager->ReorderEntries(catalog_entries, context);
+	if (!dependency_manager) {
+		return catalog_entries;
 	}
+	auto state = context.GetContext().GetRegisteredState().GetOrCreate<ExportOrderBindState>("export_order_bind");
+	if (state->binding) {
+		dependency_manager->ReorderEntries(catalog_entries, context, [](CatalogEntry &, catalog_entry_vector_t &) {});
+		return catalog_entries;
+	}
+	// a bind evaluates table function arguments, which may write (nextval); such a write fails at the write and the
+	// body keeps its old place
+	MetaTransaction::NoWriteScope no_write;
+	struct BindingScope {
+		ExportOrderBindState &state;
+		~BindingScope() {
+			state.binding = false;
+		}
+	} binding_scope {*state};
+	state->binding = true;
+	// views and macros record what their bodies use only under an opt in setting, so their bodies are bound here
+	ExportReferences references(context, catalog_entries);
+	dependency_manager->ReorderEntries(
+	    catalog_entries, context,
+	    [&](CatalogEntry &entry, catalog_entry_vector_t &result) { references.Collect(entry, result); });
 	return catalog_entries;
 }
 

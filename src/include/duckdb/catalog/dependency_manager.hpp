@@ -93,9 +93,14 @@ public:
 
 	void AddOwnership(CatalogTransaction transaction, CatalogEntry &owner, CatalogEntry &entry);
 
+	//! Adds the entries that an entry's definition uses without a recorded dependency
+	using entry_references_t = std::function<void(CatalogEntry &entry, catalog_entry_vector_t &references)>;
+
 	//! Get the order of entries needed by EXPORT, the objects with no dependencies are exported first
 	void ReorderEntries(catalog_entry_vector_t &entries, VisibilityBound bound);
-	void ReorderEntries(catalog_entry_vector_t &entries, ClientContext &context);
+	//! Each entry also comes after the entries the callback adds for it, except inside a cycle of such references,
+	//! whose entries keep the order of the recorded dependencies
+	void ReorderEntries(catalog_entry_vector_t &entries, ClientContext &context, const entry_references_t &references);
 
 private:
 	DuckCatalog &catalog;

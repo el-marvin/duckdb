@@ -1,0 +1,1787 @@
+# name: test/sql/export/export_view_macro_order.test
+# description: EXPORT DATABASE writes every view and macro after the tables, views and macros its body binds
+# group: [export]
+
+# a table macro over a view, and a view over a view with a later name
+
+statement ok
+ATTACH ':memory:' AS src1
+
+statement ok
+USE src1
+
+statement ok
+CREATE VIEW v AS SELECT 1 c
+
+statement ok
+CREATE MACRO tm() AS TABLE SELECT * FROM v
+
+statement ok
+CREATE VIEW z AS SELECT 2 x
+
+statement ok
+CREATE VIEW a AS SELECT x * 10 AS x FROM z
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_1'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_1/schema.sql')
+----
+CREATE VIEW v AS SELECT 1 AS c;
+CREATE MACRO tm () AS TABLE (SELECT * FROM v);
+CREATE VIEW z AS SELECT 2 AS x;
+CREATE VIEW a AS SELECT (x * 10) AS x FROM z;
+
+statement ok
+ATTACH ':memory:' AS imp1
+
+statement ok
+USE imp1
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_1'
+
+query I
+FROM tm()
+----
+1
+
+query I
+FROM a
+----
+20
+
+statement ok
+ATTACH ':memory:' AS cp1
+
+statement ok
+USE cp1
+
+statement ok
+COPY FROM DATABASE src1 TO cp1
+
+query I
+FROM tm()
+----
+1
+
+query I
+FROM a
+----
+20
+
+# a scalar macro over a view over a scalar macro, named against creation order
+
+statement ok
+ATTACH ':memory:' AS src2
+
+statement ok
+USE src2
+
+statement ok
+DETACH src1
+
+statement ok
+DETACH imp1
+
+statement ok
+DETACH cp1
+
+statement ok
+CREATE MACRO zm(x) AS x + 1
+
+statement ok
+CREATE VIEW mv AS SELECT zm(1) AS y
+
+statement ok
+CREATE MACRO am() AS (SELECT y * 100 FROM mv)
+
+# a view over a table macro over a view
+
+statement ok
+CREATE VIEW zv AS SELECT 7 c
+
+statement ok
+CREATE MACRO mtm() AS TABLE SELECT c FROM zv
+
+statement ok
+CREATE VIEW av AS SELECT c * 2 AS d FROM mtm()
+
+# a chain of three views whose order is neither name order nor creation order: a reads b only through c
+
+statement ok
+CREATE VIEW b AS SELECT 3 n
+
+statement ok
+CREATE VIEW c AS SELECT n + 1 AS n FROM b
+
+statement ok
+CREATE VIEW a AS SELECT n * 10 AS n FROM c
+
+statement ok
+CREATE OR REPLACE VIEW b AS SELECT 4 n
+
+# a called macro replaced after its caller
+
+statement ok
+CREATE MACRO zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO adouble(x) AS zinc(x) * 2
+
+statement ok
+CREATE OR REPLACE MACRO zinc(x) AS x + 2
+
+# a macro overload the table does not bind calls a macro the table does not record
+
+statement ok
+CREATE MACRO yinc(x) AS x + 1
+
+statement ok
+CREATE MACRO amacro() AS 42, (x) AS yinc(x)
+
+statement ok
+CREATE TABLE t(i INTEGER DEFAULT amacro())
+
+statement ok
+INSERT INTO t DEFAULT VALUES
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_2'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_2/schema.sql')
+----
+CREATE MACRO yinc (x) AS ((x + 1));
+CREATE MACRO amacro () AS (42), (x) AS (yinc(x));
+CREATE TABLE t(i INTEGER DEFAULT(amacro()));
+CREATE MACRO zm (x) AS ((x + 1));
+CREATE VIEW mv AS SELECT zm(1) AS y;
+CREATE MACRO am () AS ((SELECT (y * 100) FROM mv));
+CREATE VIEW zv AS SELECT 7 AS c;
+CREATE MACRO mtm () AS TABLE (SELECT c FROM zv);
+CREATE MACRO zinc (x) AS ((x + 2));
+CREATE MACRO adouble (x) AS ((zinc(x) * 2));
+CREATE VIEW b AS SELECT 4 AS n;
+CREATE VIEW c AS SELECT (n + 1) AS n FROM b;
+CREATE VIEW a AS SELECT (n * 10) AS n FROM c;
+CREATE VIEW av AS SELECT (c * 2) AS d FROM mtm();
+
+statement ok
+ATTACH ':memory:' AS imp2
+
+statement ok
+USE imp2
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_2'
+
+query IIIIII
+SELECT am(), (FROM av), (FROM a), adouble(1), amacro(), amacro(5)
+----
+200	14	50	6	42	6
+
+query I
+FROM t
+----
+42
+
+statement ok
+ATTACH ':memory:' AS cp2
+
+statement ok
+USE cp2
+
+statement ok
+COPY FROM DATABASE src2 TO cp2
+
+query IIIIII
+SELECT am(), (FROM av), (FROM a), adouble(1), amacro(), amacro(5)
+----
+200	14	50	6	42	6
+
+query I
+FROM t
+----
+42
+
+# a schema other than main: a view body resolves an unqualified name in its own schema first, a macro body in the
+# session's search path
+
+statement ok
+ATTACH ':memory:' AS src3
+
+statement ok
+USE src3
+
+statement ok
+DETACH src2
+
+statement ok
+DETACH imp2
+
+statement ok
+DETACH cp2
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE VIEW s.z AS SELECT 1 k
+
+statement ok
+CREATE VIEW z AS SELECT 100 k
+
+statement ok
+CREATE VIEW s.a AS SELECT k + 1 AS k FROM z
+
+statement ok
+CREATE MACRO s.tm() AS TABLE SELECT k FROM s.a
+
+statement ok
+CREATE VIEW b AS SELECT k * 3 AS k FROM s.tm()
+
+statement ok
+CREATE VIEW y AS SELECT 5 k
+
+statement ok
+CREATE MACRO s.am() AS (SELECT max(k) FROM y)
+
+statement ok
+CREATE SCHEMA s.n
+
+statement ok
+CREATE VIEW s.n.zz AS SELECT 8 k
+
+statement ok
+CREATE VIEW s.n.aa AS SELECT k FROM zz
+
+statement ok
+CREATE VIEW s.ab AS SELECT k + 1 AS k FROM s.n.aa
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_3'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_3/schema.sql')
+----
+CREATE SCHEMA s;
+CREATE SCHEMA s.n;
+CREATE VIEW s.z AS SELECT 1 AS k;
+CREATE VIEW s.a AS SELECT (k + 1) AS k FROM z;
+CREATE MACRO s.tm () AS TABLE (SELECT k FROM s.a);
+CREATE VIEW y AS SELECT 5 AS k;
+CREATE MACRO s.am () AS ((SELECT max(k) FROM y));
+CREATE VIEW b AS SELECT (k * 3) AS k FROM s.tm();
+CREATE VIEW z AS SELECT 100 AS k;
+CREATE VIEW s.n.zz AS SELECT 8 AS k;
+CREATE VIEW s.n.aa AS SELECT k FROM zz;
+CREATE VIEW s.ab AS SELECT (k + 1) AS k FROM s.n.aa;
+
+statement ok
+ATTACH ':memory:' AS imp3
+
+statement ok
+USE imp3
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_3'
+
+query IIII
+SELECT (FROM b), (FROM s.a), s.am(), (FROM s.ab)
+----
+6	2	5	9
+
+statement ok
+ATTACH ':memory:' AS cp3
+
+statement ok
+USE cp3
+
+statement ok
+COPY FROM DATABASE src3 TO cp3
+
+query IIII
+SELECT (FROM b), (FROM s.a), s.am(), (FROM s.ab)
+----
+6	2	5	9
+
+# a common table expression named like a view is not a reference to it, so the name order a, b stays
+
+statement ok
+ATTACH ':memory:' AS src4
+
+statement ok
+USE src4
+
+statement ok
+DETACH src3
+
+statement ok
+DETACH imp3
+
+statement ok
+DETACH cp3
+
+statement ok
+CREATE VIEW a AS WITH b AS (SELECT 1 x) SELECT * FROM b
+
+statement ok
+CREATE VIEW b AS SELECT x + 1 AS x FROM a
+
+statement ok
+CREATE MACRO m() AS TABLE WITH b AS (SELECT 10 x) FROM b
+
+statement ok
+CREATE VIEW c AS SELECT x + 1 AS x FROM m()
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_4'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_4/schema.sql')
+----
+CREATE MACRO m () AS TABLE (WITH b AS (SELECT 10 AS x) SELECT * FROM b);
+CREATE VIEW a AS WITH b AS (SELECT 1 AS x) SELECT * FROM b;
+CREATE VIEW b AS SELECT (x + 1) AS x FROM a;
+CREATE VIEW c AS SELECT (x + 1) AS x FROM m();
+
+statement ok
+ATTACH ':memory:' AS imp4
+
+statement ok
+USE imp4
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_4'
+
+query II
+SELECT (FROM b), (FROM c)
+----
+2	11
+
+statement ok
+ATTACH ':memory:' AS cp4
+
+statement ok
+USE cp4
+
+statement ok
+COPY FROM DATABASE src4 TO cp4
+
+query II
+SELECT (FROM b), (FROM c)
+----
+2	11
+
+# after a checkpoint and a reload the oids follow the names, the order of the export does not
+
+statement ok
+ATTACH '{TEST_DIR}/export_view_macro_order_5.db' AS src5
+
+statement ok
+USE src5
+
+statement ok
+DETACH src4
+
+statement ok
+DETACH imp4
+
+statement ok
+DETACH cp4
+
+statement ok
+CREATE VIEW z AS SELECT 2 x
+
+statement ok
+CREATE VIEW a AS SELECT x * 10 AS x FROM z
+
+statement ok
+CREATE MACRO zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO adouble(x) AS zinc(x) * 2
+
+statement ok
+ATTACH ':memory:' AS imp5
+
+statement ok
+USE imp5
+
+statement ok
+DETACH src5
+
+statement ok
+ATTACH '{TEST_DIR}/export_view_macro_order_5.db' AS src5
+
+statement ok
+USE src5
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_5'
+
+statement ok
+USE imp5
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_5'
+
+query II
+SELECT (FROM a), adouble(1)
+----
+20	4
+
+statement ok
+ATTACH ':memory:' AS cp5
+
+statement ok
+USE cp5
+
+statement ok
+COPY FROM DATABASE src5 TO cp5
+
+query II
+SELECT (FROM a), adouble(1)
+----
+20	4
+
+# a reference cycle, which CREATE OR REPLACE VIEW accepts: EXPORT ends and COPY FROM DATABASE copies it
+
+statement ok
+ATTACH ':memory:' AS src6
+
+statement ok
+USE src6
+
+statement ok
+DETACH src5
+
+statement ok
+DETACH imp5
+
+statement ok
+DETACH cp5
+
+statement ok
+CREATE VIEW a AS SELECT 1 x
+
+statement ok
+CREATE VIEW b AS FROM a
+
+statement ok
+CREATE OR REPLACE VIEW a AS FROM b
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_6'
+
+statement ok
+ATTACH ':memory:' AS cp6
+
+statement ok
+USE cp6
+
+statement ok
+COPY FROM DATABASE src6 TO cp6
+
+query II
+SELECT view_name, sql FROM duckdb_views() WHERE database_name = 'cp6' AND NOT internal ORDER BY view_name
+----
+a	CREATE VIEW a AS SELECT * FROM b;
+b	CREATE VIEW b AS SELECT * FROM a;
+
+statement error
+FROM a
+----
+infinite recursion
+
+# an export that needs no reordering keeps the order of the type groups: tables, macros by creation, views by name
+
+statement ok
+ATTACH ':memory:' AS src7
+
+statement ok
+USE src7
+
+statement ok
+DETACH src6
+
+statement ok
+DETACH cp6
+
+statement ok
+CREATE TABLE tt(i INTEGER)
+
+statement ok
+INSERT INTO tt VALUES (1), (2), (NULL)
+
+statement ok
+CREATE MACRO zm(x) AS x + 1
+
+statement ok
+CREATE MACRO am(x) AS zm(x) * 2
+
+statement ok
+CREATE VIEW zv AS SELECT am(i) AS j FROM tt
+
+statement ok
+CREATE VIEW av AS SELECT i FROM tt WHERE i IS NOT NULL
+
+statement ok
+CREATE VIEW bv AS SELECT count(*) AS n FROM av
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_7'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_7/schema.sql')
+----
+CREATE TABLE tt(i INTEGER);
+CREATE MACRO zm (x) AS ((x + 1));
+CREATE MACRO am (x) AS ((zm(x) * 2));
+CREATE VIEW av AS SELECT i FROM tt WHERE (i IS NOT NULL);
+CREATE VIEW bv AS SELECT count_star() AS n FROM av;
+CREATE VIEW zv AS SELECT am(i) AS j FROM tt;
+
+statement ok
+ATTACH ':memory:' AS imp7
+
+statement ok
+USE imp7
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_7'
+
+query I
+SELECT j FROM zv ORDER BY j NULLS LAST
+----
+4
+6
+NULL
+
+query I
+FROM bv
+----
+2
+
+statement ok
+ATTACH ':memory:' AS cp7
+
+statement ok
+USE cp7
+
+statement ok
+COPY FROM DATABASE src7 TO cp7
+
+query I
+FROM bv
+----
+2
+
+# a name binds to the first entry the binder finds: a view body looks in its own schema, also at tables, then in the
+# default schema; a macro body only in the default schema
+
+statement ok
+ATTACH ':memory:' AS src8
+
+statement ok
+USE src8
+
+statement ok
+DETACH src7
+
+statement ok
+DETACH imp7
+
+statement ok
+DETACH cp7
+
+statement ok
+CREATE SCHEMA aa
+
+statement ok
+CREATE VIEW aa.b AS SELECT 1 x
+
+statement ok
+CREATE VIEW aa.c AS SELECT x + 1 AS x FROM b
+
+statement ok
+CREATE VIEW b AS SELECT x + 10 AS x FROM aa.c
+
+statement ok
+CREATE TABLE aa.t AS SELECT 100 x
+
+statement ok
+CREATE VIEW aa.a AS SELECT x + 1 AS x FROM t
+
+statement ok
+CREATE VIEW t AS SELECT x + 1 AS x FROM aa.a
+
+statement ok
+CREATE MACRO f() AS 1
+
+statement ok
+CREATE MACRO aa.g() AS f() + 1
+
+statement ok
+CREATE MACRO aa.f() AS aa.g() + 10
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_8'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_8/schema.sql')
+----
+CREATE SCHEMA aa;
+CREATE TABLE aa.t(x INTEGER);
+CREATE MACRO f () AS (1);
+CREATE MACRO aa.g () AS ((f() + 1));
+CREATE MACRO aa.f () AS ((aa.g() + 10));
+CREATE VIEW aa.a AS SELECT (x + 1) AS x FROM t;
+CREATE VIEW aa.b AS SELECT 1 AS x;
+CREATE VIEW aa.c AS SELECT (x + 1) AS x FROM b;
+CREATE VIEW b AS SELECT (x + 10) AS x FROM aa.c;
+CREATE VIEW t AS SELECT (x + 1) AS x FROM aa.a;
+
+statement ok
+ATTACH ':memory:' AS imp8
+
+statement ok
+USE imp8
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_8'
+
+query IIII
+SELECT (FROM b), (FROM t), aa.g(), aa.f()
+----
+12	102	2	12
+
+statement ok
+ATTACH ':memory:' AS cp8
+
+statement ok
+USE cp8
+
+statement ok
+COPY FROM DATABASE src8 TO cp8
+
+query IIII
+SELECT (FROM b), (FROM t), aa.g(), aa.f()
+----
+12	102	2	12
+
+# a common table expression only hides a view inside its own scope, and a body that is no set operation reads the
+# entry outside of its own name; references inside set operations, subqueries, MATCH_RECOGNIZE and PIVOT count
+
+statement ok
+ATTACH ':memory:' AS src9
+
+statement ok
+USE src9
+
+statement ok
+DETACH src8
+
+statement ok
+DETACH imp8
+
+statement ok
+DETACH cp8
+
+statement ok
+CREATE VIEW b AS SELECT 1 x
+
+statement ok
+CREATE VIEW a1 AS SELECT x FROM b UNION ALL (WITH b AS (SELECT 2 x) SELECT x FROM b)
+
+statement ok
+CREATE VIEW a2 AS WITH b AS (SELECT x + 1 AS x FROM b) SELECT x FROM b
+
+statement ok
+CREATE VIEW a3 AS SELECT (WITH b AS (SELECT 9 x) SELECT x FROM b) AS k, x FROM b
+
+statement ok
+CREATE VIEW a4 AS WITH RECURSIVE zc(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM zc WHERE x < 3) SELECT count(*) AS n FROM zc
+
+statement ok
+CREATE VIEW zc AS SELECT n * 2 AS n FROM a4
+
+statement ok
+CREATE VIEW z AS SELECT 1 x UNION ALL SELECT 2
+
+statement ok
+CREATE VIEW a5 AS FROM (SELECT x FROM z) MATCH_RECOGNIZE (ORDER BY x MEASURES count(*) AS c ONE ROW PER MATCH PATTERN (A+) DEFINE A AS x > 0)
+
+statement ok
+CREATE MACRO m1(x) AS x + 1
+
+statement ok
+CREATE VIEW a6 AS PIVOT z ON m1(x) IN (2, 3) USING count(*)
+
+statement ok
+CREATE OR REPLACE MACRO m1(x) AS x + 1
+
+# a scalar and a table macro of the same name, and a qualified call of a macro replaced after its caller
+
+statement ok
+CREATE MACRO foo() AS TABLE FROM b
+
+statement ok
+CREATE MACRO foo() AS 10
+
+statement ok
+CREATE MACRO bar() AS (SELECT x FROM foo()) + foo()
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE MACRO s.zz(x) AS x * 7
+
+statement ok
+CREATE MACRO qa() AS s.zz(1)
+
+statement ok
+CREATE OR REPLACE MACRO s.zz(x) AS x * 7
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_9'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_9/schema.sql')
+----
+CREATE SCHEMA s;
+CREATE MACRO m1 (x) AS ((x + 1));
+CREATE VIEW b AS SELECT 1 AS x;
+CREATE MACRO foo () AS TABLE (SELECT * FROM b);
+CREATE MACRO foo () AS (10);
+CREATE MACRO bar () AS (((SELECT x FROM foo()) + foo()));
+CREATE MACRO s.zz (x) AS ((x * 7));
+CREATE MACRO qa () AS (s.zz(1));
+CREATE VIEW a1 AS (SELECT x FROM b) UNION ALL (WITH b AS (SELECT 2 AS x) SELECT x FROM b);
+CREATE VIEW a2 AS WITH b AS (SELECT (x + 1) AS x FROM b) SELECT x FROM b;
+CREATE VIEW a3 AS SELECT (WITH b AS (SELECT 9 AS x) SELECT x FROM b) AS k, x FROM b;
+CREATE VIEW a4 AS WITH RECURSIVE zc (x) AS ((SELECT 1) UNION ALL (SELECT (x + 1) FROM zc WHERE (x < 3))) SELECT count_star() AS n FROM zc;
+CREATE VIEW z AS (SELECT 1 AS x) UNION ALL (SELECT 2);
+CREATE VIEW a5 AS SELECT * FROM (SELECT x FROM z) MATCH_RECOGNIZE(ORDER BY x MEASURES count_star() AS c ONE ROW PER MATCH PATTERN (A+) DEFINE A AS (x > 0));
+CREATE VIEW a6 AS SELECT * FROM z PIVOT (count_star() FOR (m1(x)) IN (2, 3));
+CREATE VIEW zc AS SELECT (n * 2) AS n FROM a4;
+
+statement ok
+ATTACH ':memory:' AS imp9
+
+statement ok
+USE imp9
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_9'
+
+query IIIIIIIII
+SELECT (SELECT list(x ORDER BY x) FROM a1), (FROM a2), (SELECT k FROM a3), (FROM zc), (FROM a5), (SELECT "2" FROM a6), (SELECT "3" FROM a6), bar(), qa()
+----
+[1, 2]	2	9	6	2	1	1	11	7
+
+statement ok
+ATTACH ':memory:' AS cp9
+
+statement ok
+USE cp9
+
+statement ok
+COPY FROM DATABASE src9 TO cp9
+
+query IIIIIIIII
+SELECT (SELECT list(x ORDER BY x) FROM a1), (FROM a2), (SELECT k FROM a3), (FROM zc), (FROM a5), (SELECT "2" FROM a6), (SELECT "3" FROM a6), bar(), qa()
+----
+[1, 2]	2	9	6	2	1	1	11	7
+
+# names the binder never binds (an unused CTE, a macro argument the expansion drops, unnest, a recurring table, a
+# temporary macro that shadows) give no edge, so the old order stays, and a recorded dependency is kept
+
+statement ok
+ATTACH ':memory:' AS src10
+
+statement ok
+USE src10
+
+statement ok
+DETACH src9
+
+statement ok
+DETACH imp9
+
+statement ok
+DETACH cp9
+
+statement ok
+CREATE VIEW a AS WITH unused AS (SELECT * FROM b) SELECT 1 x
+
+statement ok
+SET enable_view_dependencies = true
+
+statement ok
+CREATE VIEW b AS SELECT x + 1 AS x FROM a
+
+statement ok
+RESET enable_view_dependencies
+
+statement ok
+CREATE MACRO ignore_arg(x) AS 1
+
+statement ok
+CREATE MACRO g() AS ignore_arg(f())
+
+statement ok
+CREATE MACRO f() AS g() + 1
+
+statement ok
+CREATE MACRO h() AS unnest([1])
+
+statement ok
+CREATE MACRO unnest(x) AS h() + 1
+
+statement ok
+CREATE SCHEMA recurring
+
+statement ok
+CREATE VIEW r AS WITH RECURSIVE t(x) USING KEY (x) AS (SELECT 1 UNION SELECT x + 1 FROM recurring.t WHERE x < 3) FROM t
+
+statement ok
+CREATE VIEW recurring.t AS SELECT * FROM r
+
+statement ok
+CREATE TEMP MACRO tf() AS 1
+
+statement ok
+CREATE MACRO tg() AS tf() + 1
+
+statement ok
+CREATE MACRO tf() AS tg() + 10
+
+# references inside unused CTEs, beside a view cycle and beside a dot call
+
+statement ok
+CREATE VIEW p1 AS WITH unused AS (FROM p3) SELECT 1 x
+
+statement ok
+CREATE VIEW p2 AS WITH unused AS (FROM p3) SELECT 2 x
+
+statement ok
+CREATE VIEW p3 AS FROM p2
+
+statement ok
+CREATE MACRO da(x) AS (WITH unused AS (SELECT db(1)) SELECT x + 1)
+
+statement ok
+CREATE MACRO db(x) AS x.da()
+
+# qb() calls tq(), which binds the temporary macro tq: that is in another catalog, so qb gets no edge to the persistent
+# tq, no cycle forms and the old order stays; and a bare SQL value function name and a three part dot call beside an
+# argument the expansion drops
+
+statement ok
+CREATE TEMP MACRO tq() AS 1
+
+statement ok
+CREATE MACRO qb() AS 7
+
+statement ok
+CREATE MACRO qa() AS qb()
+
+statement ok
+CREATE OR REPLACE MACRO qb() AS tq()
+
+statement ok
+CREATE MACRO tq() AS qa()
+
+statement ok
+CREATE TABLE qt(i INTEGER DEFAULT qb())
+
+statement ok
+CREATE MACRO current_date() AS ignore_arg(vb())
+
+statement ok
+CREATE MACRO vb() AS current_date * 2
+
+statement ok
+CREATE MACRO z3(x) AS x + ignore_arg(a3())
+
+statement ok
+CREATE MACRO a3() AS (SELECT p.x.z3() FROM (VALUES (1)) p(x))
+
+# a dropped argument against a table macro reading the caller's CTE and against query_table
+
+statement ok
+CREATE TABLE c(x INTEGER)
+
+statement ok
+CREATE MACRO mc() AS TABLE FROM c
+
+statement ok
+CREATE VIEW ca AS SELECT ignore_arg((SELECT * FROM cb)) AS x
+
+statement ok
+CREATE VIEW cb AS WITH c AS (FROM ca) FROM mc()
+
+statement ok
+CREATE VIEW qta AS SELECT ignore_arg((SELECT * FROM qtb)) AS x
+
+statement ok
+CREATE VIEW qtb AS SELECT * FROM query_table('qta')
+
+# a wrapper that passes its argument on to a macro that drops it, against a relation named through a macro parameter
+
+statement ok
+CREATE MACRO fallback(x) AS 1
+
+statement ok
+CREATE MACRO compatibility(x) AS fallback(x)
+
+statement ok
+CREATE MACRO read_relation(table_name) AS TABLE FROM query_table(table_name)
+
+statement ok
+CREATE VIEW wa AS SELECT compatibility((SELECT x FROM wb)) AS x
+
+statement ok
+CREATE VIEW wb AS FROM read_relation('wa')
+
+# a window call of a macro that drops its argument
+
+statement ok
+CREATE MACRO count_rows(value) AS count(*)
+
+statement ok
+CREATE VIEW xa AS SELECT count_rows((SELECT x FROM xb)) OVER () AS x
+
+statement ok
+CREATE VIEW xb AS FROM read_relation('xa')
+
+# a qualified helper picks one macro although another schema has one of its name
+
+statement ok
+CREATE SCHEMA overrides
+
+statement ok
+CREATE MACRO fallback1(x) AS 1
+
+statement ok
+CREATE MACRO overrides.fallback1(x) AS x
+
+statement ok
+CREATE MACRO compatibility1(x) AS main.fallback1(x)
+
+statement ok
+CREATE VIEW ya AS SELECT compatibility1((SELECT x FROM yb)) AS x
+
+statement ok
+CREATE VIEW yb AS FROM read_relation('ya')
+
+# the overload a call selects drops the argument another overload reads
+
+statement ok
+CREATE MACRO trace(value) AS 0, (value, enabled) AS CASE WHEN enabled THEN value ELSE 0 END
+
+statement ok
+CREATE VIEW va AS SELECT trace((SELECT x FROM vb)) AS x
+
+statement ok
+CREATE VIEW vb AS FROM read_relation('va')
+
+# a named argument and an overload with a default select the overload that drops the argument
+
+statement ok
+CREATE MACRO trace2(value) AS 0, (value, enabled, label := '') AS CASE WHEN enabled THEN value ELSE 0 END
+
+statement ok
+CREATE VIEW na AS SELECT trace(value := (SELECT x FROM nb)) AS x, trace2((SELECT x FROM nb)) AS y
+
+statement ok
+CREATE VIEW nb AS SELECT x FROM read_relation('na')
+
+# a parameter named only inside a CTE nothing reads, in a macro that calls no table function
+
+statement ok
+CREATE MACRO audit_value(value) AS (WITH detail AS (SELECT value AS sample) SELECT 0)
+
+statement ok
+CREATE VIEW ua AS SELECT audit_value((SELECT x FROM ub)) AS x
+
+statement ok
+CREATE VIEW ub AS FROM read_relation('ua')
+
+# the same in a macro that calls a builtin table function
+
+statement ok
+CREATE MACRO audit_count(value) AS (WITH detail AS (SELECT value AS sample) SELECT count(*) * 0 FROM duckdb_tables())
+
+statement ok
+CREATE VIEW ka AS SELECT audit_count((SELECT x FROM kb)) AS x
+
+statement ok
+CREATE VIEW kb AS FROM read_relation('ka')
+
+# a table macro of another schema named like the builtin that the macro body calls
+
+statement ok
+CREATE SCHEMA metadata
+
+statement ok
+CREATE MACRO metadata.duckdb_tables() AS TABLE SELECT * FROM duckdb_tables() WHERE NOT internal
+
+statement ok
+CREATE VIEW ma AS SELECT audit_count((SELECT x FROM mb)) AS x
+
+statement ok
+CREATE VIEW mb AS FROM read_relation('ma')
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_10'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_10/schema.sql')
+----
+CREATE SCHEMA metadata;
+CREATE SCHEMA overrides;
+CREATE SCHEMA recurring;
+CREATE TABLE c(x INTEGER);
+CREATE MACRO qb () AS (tq());
+CREATE TABLE qt(i INTEGER DEFAULT(qb()));
+CREATE MACRO ignore_arg (x) AS (1);
+CREATE MACRO g () AS (ignore_arg(f()));
+CREATE MACRO f () AS ((g() + 1));
+CREATE MACRO h () AS (unnest(list_value(1)));
+CREATE MACRO unnest (x) AS ((h() + 1));
+CREATE MACRO tg () AS ((tf() + 1));
+CREATE MACRO tf () AS ((tg() + 10));
+CREATE MACRO da (x) AS ((WITH unused AS (SELECT db(1)) SELECT (x + 1)));
+CREATE MACRO db (x) AS (x.da());
+CREATE MACRO qa () AS (qb());
+CREATE MACRO tq () AS (qa());
+CREATE MACRO current_date () AS (ignore_arg(vb()));
+CREATE MACRO vb () AS ((current_date * 2));
+CREATE MACRO z3 (x) AS ((x + ignore_arg(a3())));
+CREATE MACRO a3 () AS ((SELECT p.x.z3() FROM (SELECT * FROM (VALUES (1)) AS valueslist) AS p(x)));
+CREATE MACRO mc () AS TABLE (SELECT * FROM c);
+CREATE MACRO fallback (x) AS (1);
+CREATE MACRO compatibility (x) AS (fallback(x));
+CREATE MACRO read_relation (table_name) AS TABLE (SELECT * FROM query_table(table_name));
+CREATE MACRO count_rows ("value") AS (count_star());
+CREATE MACRO fallback1 (x) AS (1);
+CREATE MACRO overrides.fallback1 (x) AS (x);
+CREATE MACRO compatibility1 (x) AS (main.fallback1(x));
+CREATE MACRO trace ("value") AS (0), ("value", enabled) AS (CASE  WHEN (enabled) THEN ("value") ELSE 0 END);
+CREATE MACRO trace2 ("value") AS (0), ("value", enabled, "label" := '') AS (CASE  WHEN (enabled) THEN ("value") ELSE 0 END);
+CREATE MACRO audit_value ("value") AS ((WITH detail AS (SELECT "value" AS "sample") SELECT 0));
+CREATE MACRO audit_count ("value") AS ((WITH detail AS (SELECT "value" AS "sample") SELECT (count_star() * 0) FROM duckdb_tables()));
+CREATE MACRO metadata.duckdb_tables () AS TABLE (SELECT * FROM duckdb_tables() WHERE (NOT internal));
+CREATE VIEW a AS WITH unused AS (SELECT * FROM b) SELECT 1 AS x;
+CREATE VIEW b AS SELECT (x + 1) AS x FROM a;
+CREATE VIEW ca AS SELECT ignore_arg((SELECT * FROM cb)) AS x;
+CREATE VIEW cb AS WITH c AS (SELECT * FROM ca) SELECT * FROM mc();
+CREATE VIEW ka AS SELECT audit_count((SELECT x FROM kb)) AS x;
+CREATE VIEW kb AS SELECT * FROM read_relation('ka');
+CREATE VIEW ma AS SELECT audit_count((SELECT x FROM mb)) AS x;
+CREATE VIEW mb AS SELECT * FROM read_relation('ma');
+CREATE VIEW na AS SELECT trace("value" := (SELECT x FROM nb)) AS x, trace2((SELECT x FROM nb)) AS y;
+CREATE VIEW nb AS SELECT x FROM read_relation('na');
+CREATE VIEW p1 AS WITH unused AS (SELECT * FROM p3) SELECT 1 AS x;
+CREATE VIEW p2 AS WITH unused AS (SELECT * FROM p3) SELECT 2 AS x;
+CREATE VIEW p3 AS SELECT * FROM p2;
+CREATE VIEW qta AS SELECT ignore_arg((SELECT * FROM qtb)) AS x;
+CREATE VIEW qtb AS SELECT * FROM query_table('qta');
+CREATE VIEW r AS WITH RECURSIVE t (x) USING KEY (x)  AS ((SELECT 1) UNION (SELECT (x + 1) FROM recurring.t WHERE (x < 3))) SELECT * FROM t;
+CREATE VIEW ua AS SELECT audit_value((SELECT x FROM ub)) AS x;
+CREATE VIEW ub AS SELECT * FROM read_relation('ua');
+CREATE VIEW va AS SELECT trace((SELECT x FROM vb)) AS x;
+CREATE VIEW vb AS SELECT * FROM read_relation('va');
+CREATE VIEW wa AS SELECT compatibility((SELECT x FROM wb)) AS x;
+CREATE VIEW wb AS SELECT * FROM read_relation('wa');
+CREATE VIEW xa AS SELECT count_rows((SELECT x FROM xb)) OVER () AS x;
+CREATE VIEW xb AS SELECT * FROM read_relation('xa');
+CREATE VIEW ya AS SELECT compatibility1((SELECT x FROM yb)) AS x;
+CREATE VIEW yb AS SELECT * FROM read_relation('ya');
+CREATE VIEW recurring.t AS SELECT * FROM r;
+
+statement ok
+ATTACH ':memory:' AS imp10
+
+statement ok
+USE imp10
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_10'
+
+query IIIIIIIIIIIIIIIIIIII
+SELECT (FROM b), f(), h(), (SELECT count(*) FROM recurring.t), tg(), (FROM p3), db(1), qa(), vb(), a3(), (FROM cb), (FROM qtb), (FROM wb), (FROM xb), (FROM yb), (FROM vb), (FROM nb), (FROM ub), (FROM kb), (FROM mb)
+----
+2	2	1	3	2	2	2	1	2	2	1	1	1	1	1	0	0	0	0	0
+
+statement ok
+ATTACH ':memory:' AS cp10
+
+statement ok
+USE cp10
+
+statement ok
+COPY FROM DATABASE src10 TO cp10
+
+query IIIIIIIIIIIIIIIIIIII
+SELECT (FROM b), f(), h(), (SELECT count(*) FROM recurring.t), tg(), (FROM p3), db(1), qa(), vb(), a3(), (FROM cb), (FROM qtb), (FROM wb), (FROM xb), (FROM yb), (FROM vb), (FROM nb), (FROM ub), (FROM kb), (FROM mb)
+----
+2	2	1	3	2	2	2	1	2	2	1	1	1	1	1	0	0	0	0	0
+
+statement ok
+DROP MACRO temp.main.tf
+
+statement ok
+DROP MACRO temp.main.tq
+
+# CTE scope in order: an earlier CTE body reads the view a later CTE shadows, and the seed of a recursive CTE reads the
+# view of its name; a window call and a USING KEY target name macros
+
+statement ok
+ATTACH ':memory:' AS src11
+
+statement ok
+USE src11
+
+statement ok
+DETACH src10
+
+statement ok
+DETACH imp10
+
+statement ok
+DETACH cp10
+
+statement ok
+CREATE VIEW z AS SELECT 1 x
+
+statement ok
+CREATE VIEW a1 AS WITH c AS (SELECT * FROM z), z AS (SELECT 9 x) SELECT * FROM c
+
+statement ok
+CREATE VIEW a2 AS WITH RECURSIVE z(x) AS (SELECT x FROM z UNION ALL SELECT x + 1 FROM z WHERE x < 3) SELECT * FROM z
+
+statement ok
+CREATE MACRO zs(x) AS sum(x)
+
+statement ok
+CREATE MACRO aw(x) AS zs(x) OVER ()
+
+statement ok
+CREATE OR REPLACE MACRO zs(x) AS sum(x)
+
+statement ok
+CREATE MACRO zk(x) AS x + 1
+
+statement ok
+CREATE MACRO ak() AS TABLE WITH RECURSIVE t(k, v) USING KEY (k, sum(zk(v)) AS v) AS (SELECT 1, 1 UNION SELECT k + 1, v FROM t WHERE k < 3) FROM t
+
+statement ok
+CREATE OR REPLACE MACRO zk(x) AS x + 1
+
+# a view under a schema named recurring beside an ordinary CTE, the ranking expression of NEAREST, a dot call
+
+statement ok
+CREATE SCHEMA recurring
+
+statement ok
+CREATE VIEW recurring.rz AS SELECT 1 x
+
+statement ok
+CREATE VIEW ar AS WITH rz AS (SELECT 99 x) SELECT x FROM recurring.rz
+
+statement ok
+CREATE MACRO distance_value(x) AS abs(x)
+
+statement ok
+CREATE MACRO nearest_pair() AS TABLE SELECT * FROM (VALUES (1)) a(x) JOIN (VALUES (2)) b(y) NEAREST 1 BY DISTANCE distance_value(a.x - b.y)
+
+statement ok
+CREATE OR REPLACE MACRO distance_value(x) AS abs(x)
+
+statement ok
+CREATE MACRO df(x) AS x + 1
+
+statement ok
+CREATE MACRO dg(x) AS x.df()
+
+statement ok
+CREATE OR REPLACE MACRO df(x) AS x + 2
+
+# the seed of a recursive CTE reads an outer CTE of the same name
+
+statement ok
+CREATE VIEW zr AS SELECT 1 x
+
+statement ok
+CREATE VIEW ab AS WITH b AS (FROM zr) SELECT * FROM (WITH RECURSIVE b(x) AS (SELECT x FROM b UNION ALL SELECT x + 1 FROM b WHERE x < 3) SELECT * FROM b)
+
+# query_table names its relations by constant, and an argument the macro body reads binds
+
+statement ok
+CREATE VIEW zq AS SELECT 5 x
+
+statement ok
+CREATE VIEW zq2 AS SELECT 6 x
+
+statement ok
+CREATE VIEW aq AS SELECT * FROM query_table('zq')
+
+statement ok
+CREATE VIEW aq2 AS SELECT * FROM query_table(['zq', 'zq2'])
+
+statement ok
+CREATE VIEW zu AS SELECT 3 c
+
+statement ok
+CREATE MACRO keep(x) AS x + 0
+
+statement ok
+CREATE MACRO au() AS keep((SELECT c FROM zu))
+
+# arguments the binder binds although the body drops them or names them otherwise: a typed macro, a dot call
+# receiver used as a parameter, a dot call shifting the arguments, a builtin shadowed by a macro in another schema, and
+# a qualified query_table
+
+statement ok
+CREATE VIEW zw1 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw2 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw3 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw4 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw5 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw6 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw7 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw8 AS SELECT 2 n
+
+statement ok
+CREATE MACRO ignore_int(x INTEGER) AS 99
+
+statement ok
+CREATE VIEW aw1 AS SELECT ignore_int((SELECT n FROM zw1)) AS n
+
+statement ok
+CREATE MACRO rounded(x) AS x.abs()
+
+statement ok
+CREATE VIEW aw2 AS SELECT rounded((SELECT n FROM zw2)) AS n
+
+statement ok
+CREATE MACRO take_second(x, y) AS y
+
+statement ok
+CREATE VIEW aw3 AS SELECT x.take_second((SELECT n FROM zw3)) AS n FROM (VALUES (1)) t(x)
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE MACRO s.abs(x) AS 99
+
+statement ok
+CREATE VIEW aw4 AS SELECT abs((SELECT n FROM zw4)) AS n
+
+statement ok
+CREATE VIEW aw5 AS FROM main.query_table('zw5')
+
+# a parameter read through a CTE that only a called table macro reads, and a helper that resolves in the caller's
+# schema, are reads: their arguments keep their names
+
+statement ok
+CREATE TABLE input(x INTEGER)
+
+statement ok
+CREATE MACRO input_rows() AS TABLE FROM input
+
+statement ok
+CREATE MACRO aggregate_input(value) AS (WITH input AS (SELECT value AS x) SELECT sum(x) FROM input_rows())
+
+statement ok
+CREATE VIEW aw6 AS SELECT aggregate_input((SELECT n FROM zw6)) AS n
+
+statement ok
+CREATE MACRO fallback(x) AS 0
+
+statement ok
+CREATE MACRO compatibility(x) AS fallback(x)
+
+statement ok
+CREATE MACRO s.fallback(x) AS x
+
+statement ok
+CREATE VIEW s.zs AS SELECT 7 AS x
+
+statement ok
+CREATE VIEW s.as1 AS SELECT compatibility((SELECT x FROM s.zs)) AS x
+
+# a window specification reads a parameter the body drops, and the builtin unnest beside a macro named unnest
+
+statement ok
+CREATE MACRO count_rows(value) AS count(*)
+
+statement ok
+CREATE VIEW aw7 AS SELECT count_rows((SELECT n FROM zw7)) OVER (ORDER BY value) AS n
+
+statement ok
+CREATE MACRO unnest(x) AS 99
+
+statement ok
+CREATE VIEW zl AS SELECT [1, 2] xs
+
+statement ok
+CREATE VIEW al AS SELECT unnest((SELECT xs FROM zl)) AS x
+
+# a window specification reads a parameter through a CTE that a called table macro reads
+
+statement ok
+CREATE VIEW aw8 AS SELECT count_rows((SELECT n FROM zw8)) OVER (ORDER BY (WITH input AS (SELECT value AS x) SELECT sum(x) FROM input_rows())) AS n
+
+# a parameter with a default that the body reads, given by position and by name
+
+statement ok
+CREATE VIEW zp AS SELECT 3 c
+
+statement ok
+CREATE VIEW zp2 AS SELECT 4 c
+
+statement ok
+CREATE MACRO pick(value, enabled := true) AS CASE WHEN enabled THEN value ELSE 0 END
+
+statement ok
+CREATE VIEW ap AS SELECT pick((SELECT c FROM zp)) AS c, pick(1, enabled := (SELECT c FROM zp2) > 0) AS d
+
+# a scalar macro reads the caller's CTE too, called from a macro body and from a window specification
+
+statement ok
+CREATE MACRO sum_input() AS (SELECT sum(x) FROM input)
+
+statement ok
+CREATE MACRO aggregate_scalar(value) AS (WITH input AS (SELECT value AS x) SELECT sum_input())
+
+statement ok
+CREATE VIEW zw9 AS SELECT 2 n
+
+statement ok
+CREATE VIEW zw10 AS SELECT 2 n
+
+statement ok
+CREATE VIEW aw9 AS SELECT aggregate_scalar((SELECT n FROM zw9)) AS n
+
+statement ok
+CREATE VIEW aw10 AS SELECT count_rows((SELECT n FROM zw10)) OVER (ORDER BY (WITH input AS (SELECT value AS x) SELECT sum_input())) AS n
+
+# the SQL text of query() reads the caller's CTE too
+
+statement ok
+CREATE MACRO read_input(value) AS (WITH input AS (SELECT value AS x) SELECT sum(x) FROM query('FROM input'))
+
+statement ok
+CREATE VIEW zw11 AS SELECT 2 n
+
+statement ok
+CREATE VIEW aw11 AS SELECT read_input((SELECT n FROM zw11)) AS n
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_11'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_11/schema.sql')
+----
+CREATE SCHEMA recurring;
+CREATE SCHEMA s;
+CREATE TABLE "input"(x INTEGER);
+CREATE MACRO zs (x) AS (sum(x));
+CREATE MACRO aw (x) AS (zs(x) OVER ());
+CREATE MACRO zk (x) AS ((x + 1));
+CREATE MACRO ak () AS TABLE (WITH RECURSIVE t (k, v) USING KEY (k, sum(zk(v)) AS v)  AS ((SELECT 1, 1) UNION (SELECT (k + 1), v FROM t WHERE (k < 3))) SELECT * FROM t);
+CREATE MACRO distance_value (x) AS (abs(x));
+CREATE MACRO nearest_pair () AS TABLE (SELECT * FROM ((SELECT * FROM (VALUES (1)) AS valueslist) AS a(x) INNER JOIN (SELECT * FROM (VALUES (2)) AS valueslist) AS b(y) EXACT NEAREST 1 BY DISTANCE distance_value((a.x - b.y))));
+CREATE MACRO df (x) AS ((x + 2));
+CREATE MACRO dg (x) AS (x.df());
+CREATE MACRO keep (x) AS ((x + 0));
+CREATE VIEW zu AS SELECT 3 AS c;
+CREATE MACRO au () AS (keep((SELECT c FROM zu)));
+CREATE MACRO ignore_int (x INTEGER) AS (99);
+CREATE MACRO rounded (x) AS (x.abs());
+CREATE MACRO take_second (x, y) AS (y);
+CREATE MACRO s.abs (x) AS (99);
+CREATE MACRO input_rows () AS TABLE (SELECT * FROM "input");
+CREATE MACRO aggregate_input ("value") AS ((WITH "input" AS (SELECT "value" AS x) SELECT sum(x) FROM input_rows()));
+CREATE MACRO fallback (x) AS (0);
+CREATE MACRO compatibility (x) AS (fallback(x));
+CREATE MACRO s.fallback (x) AS (x);
+CREATE MACRO count_rows ("value") AS (count_star());
+CREATE MACRO unnest (x) AS (99);
+CREATE MACRO pick ("value", enabled := true) AS (CASE  WHEN (enabled) THEN ("value") ELSE 0 END);
+CREATE MACRO sum_input () AS ((SELECT sum(x) FROM "input"));
+CREATE MACRO aggregate_scalar ("value") AS ((WITH "input" AS (SELECT "value" AS x) SELECT sum_input()));
+CREATE MACRO read_input ("value") AS ((WITH "input" AS (SELECT "value" AS x) SELECT sum(x) FROM query('FROM input')));
+CREATE VIEW z AS SELECT 1 AS x;
+CREATE VIEW a1 AS WITH c AS (SELECT * FROM z), z AS (SELECT 9 AS x) SELECT * FROM c;
+CREATE VIEW a2 AS WITH RECURSIVE z (x) AS ((SELECT x FROM z) UNION ALL (SELECT (x + 1) FROM z WHERE (x < 3))) SELECT * FROM z;
+CREATE VIEW zr AS SELECT 1 AS x;
+CREATE VIEW ab AS WITH b AS (SELECT * FROM zr) SELECT * FROM (WITH RECURSIVE b (x) AS ((SELECT x FROM b) UNION ALL (SELECT (x + 1) FROM b WHERE (x < 3))) SELECT * FROM b);
+CREATE VIEW zl AS SELECT list_value(1, 2) AS xs;
+CREATE VIEW al AS SELECT unnest((SELECT xs FROM zl)) AS x;
+CREATE VIEW zp AS SELECT 3 AS c;
+CREATE VIEW zp2 AS SELECT 4 AS c;
+CREATE VIEW ap AS SELECT pick((SELECT c FROM zp)) AS c, pick(1, enabled := ((SELECT c FROM zp2) > 0)) AS d;
+CREATE VIEW zq AS SELECT 5 AS x;
+CREATE VIEW aq AS SELECT * FROM query_table('zq');
+CREATE VIEW zq2 AS SELECT 6 AS x;
+CREATE VIEW aq2 AS SELECT * FROM query_table(list_value('zq', 'zq2'));
+CREATE VIEW recurring.rz AS SELECT 1 AS x;
+CREATE VIEW ar AS WITH rz AS (SELECT 99 AS x) SELECT x FROM recurring.rz;
+CREATE VIEW zw1 AS SELECT 2 AS n;
+CREATE VIEW aw1 AS SELECT ignore_int((SELECT n FROM zw1)) AS n;
+CREATE VIEW zw10 AS SELECT 2 AS n;
+CREATE VIEW aw10 AS SELECT count_rows((SELECT n FROM zw10)) OVER (ORDER BY (WITH "input" AS (SELECT "value" AS x) SELECT sum_input())) AS n;
+CREATE VIEW zw11 AS SELECT 2 AS n;
+CREATE VIEW aw11 AS SELECT read_input((SELECT n FROM zw11)) AS n;
+CREATE VIEW zw2 AS SELECT 2 AS n;
+CREATE VIEW aw2 AS SELECT rounded((SELECT n FROM zw2)) AS n;
+CREATE VIEW zw3 AS SELECT 2 AS n;
+CREATE VIEW aw3 AS SELECT x.take_second((SELECT n FROM zw3)) AS n FROM (SELECT * FROM (VALUES (1)) AS valueslist) AS t(x);
+CREATE VIEW zw4 AS SELECT 2 AS n;
+CREATE VIEW aw4 AS SELECT abs((SELECT n FROM zw4)) AS n;
+CREATE VIEW zw5 AS SELECT 2 AS n;
+CREATE VIEW aw5 AS SELECT * FROM main.query_table('zw5');
+CREATE VIEW zw6 AS SELECT 2 AS n;
+CREATE VIEW aw6 AS SELECT aggregate_input((SELECT n FROM zw6)) AS n;
+CREATE VIEW zw7 AS SELECT 2 AS n;
+CREATE VIEW aw7 AS SELECT count_rows((SELECT n FROM zw7)) OVER (ORDER BY "value") AS n;
+CREATE VIEW zw8 AS SELECT 2 AS n;
+CREATE VIEW aw8 AS SELECT count_rows((SELECT n FROM zw8)) OVER (ORDER BY (WITH "input" AS (SELECT "value" AS x) SELECT sum(x) FROM input_rows())) AS n;
+CREATE VIEW zw9 AS SELECT 2 AS n;
+CREATE VIEW aw9 AS SELECT aggregate_scalar((SELECT n FROM zw9)) AS n;
+CREATE VIEW s.zs AS SELECT 7 AS x;
+CREATE VIEW s.as1 AS SELECT compatibility((SELECT x FROM s.zs)) AS x;
+
+statement ok
+ATTACH ':memory:' AS imp11
+
+statement ok
+USE imp11
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_11'
+
+query IIIIIIIIIIIIIIIIIIIIIIIII
+SELECT (FROM a1), (SELECT list(x ORDER BY x) FROM a2), aw(2), (SELECT list(v ORDER BY k) FROM ak()), (FROM ar), (SELECT y FROM nearest_pair()), dg(1), (SELECT list(x ORDER BY x) FROM ab), (FROM aq), (SELECT list(x ORDER BY x) FROM aq2), au(), (FROM aw1), (FROM aw2), (FROM aw3), (FROM aw4), (FROM aw5), (FROM aw6), (FROM s.as1), (FROM aw7), (SELECT list(x ORDER BY x) FROM al), (FROM aw8), (SELECT c + d FROM ap), (FROM aw9), (FROM aw10), (FROM aw11)
+----
+1	[1, 2, 3]	2	[2, 3, 4]	1	2	3	[1, 2, 3]	5	[5, 6]	3	99	2	2	2	2	2	7	1	[1, 2]	1	4	2	1	2
+
+statement ok
+ATTACH ':memory:' AS cp11
+
+statement ok
+USE cp11
+
+statement ok
+COPY FROM DATABASE src11 TO cp11
+
+query IIIIIIIIIIIIIIIIIIIIIIIII
+SELECT (FROM a1), (SELECT list(x ORDER BY x) FROM a2), aw(2), (SELECT list(v ORDER BY k) FROM ak()), (FROM ar), (SELECT y FROM nearest_pair()), dg(1), (SELECT list(x ORDER BY x) FROM ab), (FROM aq), (SELECT list(x ORDER BY x) FROM aq2), au(), (FROM aw1), (FROM aw2), (FROM aw3), (FROM aw4), (FROM aw5), (FROM aw6), (FROM s.as1), (FROM aw7), (SELECT list(x ORDER BY x) FROM al), (FROM aw8), (SELECT c + d FROM ap), (FROM aw9), (FROM aw10), (FROM aw11)
+----
+1	[1, 2, 3]	2	[2, 3, 4]	1	2	3	[1, 2, 3]	5	[5, 6]	3	99	2	2	2	2	2	7	1	[1, 2]	1	4	2	1	2
+
+# an argument passed on through three overloads until one drops it is never bound, so the old order stays whatever
+# other macros exist
+
+statement ok
+ATTACH ':memory:' AS src12
+
+statement ok
+USE src12
+
+statement ok
+DETACH src11
+
+statement ok
+DETACH imp11
+
+statement ok
+DETACH cp11
+
+statement ok
+CREATE MACRO trace(a) AS 1
+
+statement ok
+CREATE OR REPLACE MACRO trace(a) AS 1, (a, b) AS trace(b)
+
+statement ok
+CREATE OR REPLACE MACRO trace(a) AS 1, (a, b) AS trace(b), (a, b, c) AS trace(b, c)
+
+statement ok
+CREATE OR REPLACE MACRO trace(a) AS 1, (a, b) AS trace(b), (a, b, c) AS trace(b, c), (a, b, c, d) AS trace(b, c, d)
+
+statement ok
+CREATE VIEW a AS SELECT trace(0, 0, 0, (SELECT x FROM z)) AS x
+
+statement ok
+CREATE VIEW z AS SELECT 7 AS x
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_12'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_12/schema.sql')
+----
+CREATE MACRO trace (a) AS (1), (a, b) AS (trace(b)), (a, b, c) AS (trace(b, c)), (a, b, c, d) AS (trace(b, c, d));
+CREATE VIEW a AS SELECT trace(0, 0, 0, (SELECT x FROM z)) AS x;
+CREATE VIEW z AS SELECT 7 AS x;
+
+statement ok
+ATTACH ':memory:' AS cp12
+
+statement ok
+USE cp12
+
+statement ok
+COPY FROM DATABASE src12 TO cp12
+
+query II
+SELECT (FROM a), (FROM z)
+----
+1	7
+
+# a real cycle: the macro binds the table, and the table records a DEFAULT on the macro; no order imports it, the cycle
+# is written as a whole and its members keep the order of the recorded dependencies (the macro before its table)
+
+statement ok
+ATTACH ':memory:' AS src13
+
+statement ok
+USE src13
+
+statement ok
+DETACH src12
+
+statement ok
+DETACH cp12
+
+statement ok
+CREATE TABLE zt(i INTEGER)
+
+statement ok
+CREATE MACRO am() AS 1, (x) AS (SELECT count(*) FROM zt) + x
+
+statement ok
+ALTER TABLE zt ADD COLUMN j INTEGER DEFAULT am()
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_13'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_13/schema.sql')
+----
+CREATE MACRO am () AS (1), (x) AS (((SELECT count_star() FROM zt) + x));
+CREATE TABLE zt(i INTEGER, j INTEGER DEFAULT(am()));
+
+statement ok
+ATTACH ':memory:' AS cp13
+
+statement ok
+USE cp13
+
+statement ok
+COPY FROM DATABASE src13 TO cp13
+
+statement ok
+INSERT INTO zt (i) VALUES (5)
+
+query II
+SELECT i, j FROM zt
+----
+5	1
+
+# bodies that do not bind for the export order keep their old place and EXPORT succeeds: a view over a dropped table,
+# and nextval in a table function argument, whose write the binds refuse
+
+statement ok
+ATTACH ':memory:' AS src14
+
+statement ok
+USE src14
+
+statement ok
+DETACH src13
+
+statement ok
+DETACH cp13
+
+statement ok
+CREATE TABLE dt(i INTEGER)
+
+statement ok
+CREATE VIEW a_dt AS SELECT i FROM dt
+
+statement ok
+DROP TABLE dt
+
+statement ok
+CREATE SEQUENCE s
+
+statement ok
+CREATE VIEW sv AS SELECT * FROM range(nextval('s'))
+
+statement ok
+CREATE VIEW asv AS SELECT * FROM sv
+
+statement ok
+CREATE MACRO sm() AS TABLE SELECT * FROM range(nextval('s'))
+
+query I
+SELECT currval('s')
+----
+3
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/export_view_macro_order_14'
+
+query I
+SELECT currval('s')
+----
+3
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_14/schema.sql')
+----
+CREATE SEQUENCE s INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START 4 NO CYCLE;
+CREATE MACRO sm () AS TABLE (SELECT * FROM "range"(nextval('s')));
+CREATE VIEW asv AS SELECT * FROM sv;
+CREATE VIEW a_dt AS SELECT i FROM dt;
+CREATE VIEW sv AS SELECT * FROM "range"(nextval('s'));
+
+statement ok
+ATTACH ':memory:' AS cp14
+
+statement ok
+USE cp14
+
+statement ok
+COPY FROM DATABASE src14 TO cp14
+
+query I
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'cp14' AND NOT internal
+----
+3
+
+# EXPORT from a session whose default database is another one: the aggregate of a USING KEY recursion resolves zk in
+# the exported database, as IMPORT will
+
+statement ok
+ATTACH ':memory:' AS src15
+
+statement ok
+ATTACH ':memory:' AS other15
+
+statement ok
+USE src15
+
+statement ok
+DETACH src14
+
+statement ok
+DETACH cp14
+
+statement ok
+CREATE MACRO other15.main.zk(x) AS x * 100
+
+statement ok
+CREATE MACRO zk(x) AS x
+
+statement ok
+CREATE MACRO ak() AS TABLE WITH RECURSIVE t(k, v) USING KEY (k, sum(zk(v)) AS v) AS (SELECT 1, 1 UNION SELECT k + 1, v FROM t WHERE k < 3) FROM t
+
+statement ok
+CREATE OR REPLACE MACRO zk(x) AS x + 0
+
+statement ok
+CREATE VIEW akv AS WITH RECURSIVE t(k, v) USING KEY (k, sum(zk(v)) AS v) AS (SELECT 1, 1 UNION SELECT k + 1, v FROM t WHERE k < 3) FROM t
+
+statement ok
+USE other15
+
+# the aggregate of a view resolves zk in the view's database, as the rest of the view does
+
+query I
+SELECT list(v ORDER BY k) FROM src15.akv
+----
+[1, 1, 1]
+
+statement ok
+EXPORT DATABASE src15 TO '{TEST_DIR}/export_view_macro_order_15'
+
+query I
+SELECT unnest(string_split(rtrim(content, chr(10)), chr(10))) FROM read_text('{TEST_DIR}/export_view_macro_order_15/schema.sql')
+----
+CREATE MACRO zk (x) AS ((x + 0));
+CREATE MACRO ak () AS TABLE (WITH RECURSIVE t (k, v) USING KEY (k, sum(zk(v)) AS v)  AS ((SELECT 1, 1) UNION (SELECT (k + 1), v FROM t WHERE (k < 3))) SELECT * FROM t);
+CREATE VIEW akv AS WITH RECURSIVE t (k, v) USING KEY (k, sum(zk(v)) AS v)  AS ((SELECT 1, 1) UNION (SELECT (k + 1), v FROM t WHERE (k < 3))) SELECT * FROM t;
+
+statement ok
+ATTACH ':memory:' AS imp15
+
+statement ok
+USE imp15
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_view_macro_order_15'
+
+query I
+SELECT list(v ORDER BY k) FROM ak()
+----
+[1, 1, 1]
+
+# CREATE records the macro a USING KEY aggregate calls when macro dependencies are recorded
+
+statement ok
+ATTACH ':memory:' AS src16
+
+statement ok
+USE src16
+
+statement ok
+DETACH src15
+
+statement ok
+DETACH other15
+
+statement ok
+DETACH imp15
+
+statement ok
+SET enable_macro_dependencies = true
+
+statement ok
+CREATE MACRO zk(x) AS x + 1
+
+statement ok
+CREATE MACRO ak() AS TABLE WITH RECURSIVE t(k, v) USING KEY (k, sum(zk(v)) AS v) AS (SELECT 1, 1 UNION SELECT k + 1, v FROM t WHERE k < 3) FROM t
+
+statement error
+DROP MACRO zk
+----
+Cannot drop entry "zk" because there are entries that depend on it
+
+statement ok
+RESET enable_macro_dependencies
