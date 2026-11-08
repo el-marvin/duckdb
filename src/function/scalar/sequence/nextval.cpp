@@ -11,6 +11,8 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 
 namespace duckdb {
 
@@ -149,6 +151,19 @@ unique_ptr<FunctionData> Deserialize(Deserializer &deserializer, BoundScalarFunc
 	return make_uniq<NextvalBindData>(sequence);
 }
 
+//! The sequence was resolved at bind time, possibly under a search path the generated SQL is not rebound with, so the
+//! rendered call names it in full
+unique_ptr<ParsedExpression> NextValUnbind(FunctionUnbindInput &input) {
+	auto children = std::move(input.children);
+	auto &bind_data = input.expression.BindInfo();
+	if (bind_data && !children.empty()) {
+		auto &sequence_name = bind_data->Cast<NextvalBindData>().create_info->GetQualifiedName();
+		children[0] = ConstantExpression::FromValue(Value(sequence_name.ToString()));
+	}
+	return make_uniq<FunctionExpression>(input.expression.Function().GetDefinition()->GetQualifiedName(),
+	                                     std::move(children));
+}
+
 void NextValModifiedDatabases(ClientContext &context, FunctionModifiedDatabasesInput &input) {
 	if (!input.bind_data) {
 		return;
@@ -176,6 +191,7 @@ ScalarFunction NextvalFun::GetFunction() {
 	next_val.SetBindCallback(NextValBind);
 	next_val.SetSerializeCallback(Serialize);
 	next_val.SetDeserializeCallback(Deserialize);
+	next_val.SetUnbindCallback(NextValUnbind);
 	next_val.SetModifiedDatabasesCallback(NextValModifiedDatabases);
 	next_val.SetInitStateCallback(NextValLocalFunction);
 	next_val.SetVolatile();
@@ -191,6 +207,7 @@ ScalarFunction CurrvalFun::GetFunction() {
 	curr_val.SetBindCallback(NextValBind);
 	curr_val.SetSerializeCallback(Serialize);
 	curr_val.SetDeserializeCallback(Deserialize);
+	curr_val.SetUnbindCallback(NextValUnbind);
 	curr_val.SetModifiedDatabasesCallback(CurrValReadDatabases);
 	curr_val.SetInitStateCallback(NextValLocalFunction);
 	curr_val.SetVolatile();
@@ -206,6 +223,7 @@ ScalarFunctionSet SetvalFun::GetFunctions() {
 	set_val.SetBindCallback(NextValBind);
 	set_val.SetSerializeCallback(Serialize);
 	set_val.SetDeserializeCallback(Deserialize);
+	set_val.SetUnbindCallback(NextValUnbind);
 	set_val.SetModifiedDatabasesCallback(NextValModifiedDatabases);
 	set_val.SetInitStateCallback(NextValLocalFunction);
 	set_val.SetVolatile();

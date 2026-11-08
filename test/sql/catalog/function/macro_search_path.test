@@ -760,6 +760,21 @@ SELECT s.next_sub(), (SELECT v FROM s.tq());
 ----
 100	s
 
+# the SQL generated from the plan names the sequence in full, so it rebinds to s.seq under any search path
+
+query TT
+EXPLAIN (SQL) SELECT s.next_sub();
+----
+sql	<REGEX>:.*nextval\('memory\.s\.seq'\).*
+
+statement ok
+CREATE MACRO s.cur_sub() AS (SELECT currval('seq'));
+
+query TT
+EXPLAIN (SQL) SELECT s.cur_sub();
+----
+sql	<REGEX>:.*currval\('memory\.s\.seq'\).*
+
 # EXPORT writes the bodies as written, and IMPORT from a fresh session creates and calls them
 
 load {TEST_DIR}/macro_search_path_export.db
