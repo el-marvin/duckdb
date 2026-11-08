@@ -101,6 +101,12 @@
       "paths": [
         "test/sql/order/order_by_negative_zero.test"
       ]
+    },
+    {
+      "reason": "RESET search_path drops this config's USE of the attached database, so the statements after it read the in memory database.",
+      "paths": [
+        "test/sql/catalog/function/test_macro_expansion_cycle.test"
+      ]
     }
   ]
 }
