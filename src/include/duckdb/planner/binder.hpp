@@ -631,7 +631,8 @@ private:
 	BoundStatement Bind(PivotRef &expr);
 	BoundStatement Bind(ShowRef &ref);
 
-	unique_ptr<SelectNode> BindPivot(PivotRef &expr, vector<unique_ptr<ParsedExpression>> all_columns);
+	unique_ptr<SelectNode> BindPivot(Binder &child_binder, PivotRef &expr,
+	                                 vector<unique_ptr<ParsedExpression>> all_columns);
 	unique_ptr<SelectNode> BindUnpivot(Binder &child_binder, PivotRef &expr,
 	                                   vector<unique_ptr<ParsedExpression>> all_columns,
 	                                   unique_ptr<ParsedExpression> &where_clause);

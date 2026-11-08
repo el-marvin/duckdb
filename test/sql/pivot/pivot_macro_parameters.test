@@ -1,0 +1,346 @@
+# name: test/sql/pivot/pivot_macro_parameters.test
+# description: A macro parameter in a PIVOT or UNPIVOT expression passes the pivot's checks as the argument it stands for
+# group: [pivot]
+
+statement ok
+CREATE TABLE wide(id INT, a INT, b INT);
+
+statement ok
+INSERT INTO wide VALUES (1, 10, 20);
+
+# a parameter in an UNPIVOT ON expression counts as the argument, not as a column of the source
+statement ok
+CREATE MACRO unpivot_add(p) AS TABLE (UNPIVOT wide ON (a + p) AS a_p INTO NAME n VALUE v);
+
+query IIII
+FROM unpivot_add(5);
+----
+1	20	a_p	15
+
+query IIII
+FROM unpivot_add(NULL);
+----
+
+statement ok
+CREATE MACRO unpivot_sum(p) AS (SELECT sum(v) FROM (UNPIVOT wide ON (a + p), (b * p) INTO NAME n VALUE v));
+
+query II
+SELECT unpivot_sum(2), unpivot_sum(NULL);
+----
+52	NULL
+
+statement ok
+CREATE MACRO unpivot_list(p) AS TABLE (UNPIVOT wide ON [a, p] AS l, [p - b] AS d INTO NAME n VALUE v);
+
+query III
+SELECT id, n, v FROM unpivot_list(3) ORDER BY n;
+----
+1	d	[-17]
+1	l	[10, 3]
+
+# a parameter in an expression the star expansion produces
+statement ok
+CREATE MACRO unpivot_star(p) AS TABLE (UNPIVOT wide ON COLUMNS('a|b') + p INTO NAME n VALUE v);
+
+query III
+SELECT id, n, v FROM unpivot_star(1) ORDER BY n;
+----
+1	a	11
+1	b	21
+
+# in a subquery of a scalar macro a parameter named like a source column is refused at CREATE, as elsewhere there
+statement error
+CREATE MACRO unpivot_shadow(a) AS (SELECT sum(v) FROM (UNPIVOT wide ON (a + 1) AS x INTO NAME n VALUE v));
+----
+Conflicting column names for column a!
+
+statement error
+CREATE MACRO unpivot_shadow(a) AS (SELECT sum(v) FROM (UNPIVOT wide ON (a + b) INTO NAME n VALUE v));
+----
+contains multiple (a, b)
+
+# in a table macro body the parameter takes precedence over a source column, while ON a lists the column a
+statement ok
+CREATE MACRO unpivot_shadow_table(b) AS TABLE (UNPIVOT wide ON (a + b) AS x INTO NAME n VALUE v);
+
+query IIII
+FROM unpivot_shadow_table(5);
+----
+1	20	x	15
+
+statement ok
+CREATE MACRO unpivot_mixed(a) AS TABLE (SELECT id, n, v FROM (UNPIVOT wide ON a, (b + a) INTO NAME n VALUE v) ORDER BY n);
+
+query III
+FROM unpivot_mixed(5);
+----
+1	a	10
+1	b	25
+
+# a parameter postpones every check of the body to the call
+statement ok
+CREATE MACRO unpivot_missing(p) AS TABLE (UNPIVOT wide ON missing, (a + p) INTO NAME n VALUE v);
+
+statement error
+FROM unpivot_missing(1);
+----
+Column "missing" referenced in UNPIVOT but no matching entry was found in the table
+
+# a constant argument leaves an expression without a source column
+statement ok
+CREATE MACRO unpivot_only(p) AS TABLE (UNPIVOT wide ON (p * 2) AS x INTO NAME n VALUE v);
+
+statement error
+FROM unpivot_only(1);
+----
+UNPIVOT clause must contain exactly one column - expression "(1 * 2)" does not contain any
+
+# a caller column as the argument is a second column, as it is when written by hand
+statement error
+SELECT unpivot_sum(k) FROM (SELECT 2 AS k) s;
+----
+contains multiple
+
+statement error
+SELECT (SELECT sum(v) FROM (UNPIVOT wide ON (a + s.k) INTO NAME n VALUE v)) FROM (SELECT 2 AS k) s;
+----
+contains multiple
+
+# ON lists columns: a bare name is a column of the source, never a parameter
+statement error
+CREATE MACRO unpivot_name(p) AS TABLE (UNPIVOT wide ON p INTO NAME n VALUE v);
+----
+Column "p" referenced in UNPIVOT but no matching entry was found in the table
+
+# a prepared parameter reaches the same positions
+statement ok
+PREPARE unpivot_prepared AS SELECT id, n, v FROM (UNPIVOT wide ON (a + $1) AS a_p, (b * $1) AS b_p INTO NAME n VALUE v) ORDER BY n;
+
+query III
+EXECUTE unpivot_prepared(5);
+----
+1	a_p	15
+1	b_p	100
+
+statement ok
+PREPARE unpivot_list_prepared AS UNPIVOT wide ON [a, $1] AS l INTO NAME n VALUE v;
+
+query IIII
+EXECUTE unpivot_list_prepared(5);
+----
+1	20	l	[10, 5]
+
+# a parameter in a PIVOT ON expression can be a caller column, which the expansion qualifies
+statement ok
+CREATE MACRO pivot_pick(a) AS (SELECT coalesce("1", 0::BIGINT) FROM (PIVOT (SELECT 7::BIGINT AS v) ON a IN (1) USING max(v)));
+
+query I
+SELECT pivot_pick(a) FROM (SELECT 1::BIGINT AS a) s;
+----
+7
+
+query II
+SELECT pivot_pick(b), pivot_pick(b - 1) FROM (SELECT 2::BIGINT AS b) s;
+----
+0	7
+
+query II
+SELECT pivot_pick(1), pivot_pick(NULL);
+----
+7	0
+
+statement ok
+CREATE TABLE callers(a BIGINT);
+
+statement ok
+INSERT INTO callers VALUES (1), (2), (NULL), (1);
+
+query II
+SELECT a, pivot_pick(callers.a) FROM callers ORDER BY a NULLS LAST;
+----
+1	7
+1	7
+2	0
+NULL	0
+
+# the pivot computed through lists instead of filtered aggregates takes no outer column, qualified or not
+statement ok
+SET pivot_filter_threshold=0;
+
+query II
+SELECT pivot_pick(1), pivot_pick(2);
+----
+7	0
+
+statement error
+SELECT a, pivot_pick(a) FROM callers;
+----
+PIVOT is not supported in correlated subqueries yet
+
+statement error
+SELECT (SELECT "1" FROM (PIVOT (SELECT 7::BIGINT AS v) ON a IN (1) USING max(v))) FROM callers;
+----
+PIVOT is not supported in correlated subqueries yet
+
+statement ok
+RESET pivot_filter_threshold;
+
+# a caller column in the aggregate
+statement ok
+CREATE MACRO pivot_scale(k) AS (SELECT "1" FROM (PIVOT (SELECT 7::BIGINT AS v, 1 AS g) ON g IN (1) USING max(v * k)));
+
+query I
+SELECT pivot_scale(k) FROM (SELECT 5 AS k) s;
+----
+35
+
+# a table macro called laterally with a caller column
+statement ok
+CREATE MACRO pivot_table(x) AS TABLE (SELECT coalesce("1", 0::BIGINT) AS r FROM (PIVOT (SELECT 7::BIGINT AS v) ON x IN (1) USING max(v)));
+
+query II
+SELECT a, r FROM callers, pivot_table(callers.a) ORDER BY a NULLS LAST;
+----
+1	7
+1	7
+2	0
+NULL	0
+
+# a parameter named like the caller's table is not a source column
+statement ok
+CREATE MACRO pivot_wrap(s) AS (SELECT pivot_pick(s.a) FROM (SELECT 1::BIGINT AS a) s);
+
+query I
+SELECT pivot_wrap(100);
+----
+7
+
+statement ok
+CREATE MACRO pivot_outer(s) AS (SELECT (SELECT "1" FROM (PIVOT (SELECT 7 AS v) ON s.a IN (1) USING max(v))) FROM (SELECT 1 AS a) s);
+
+query I
+SELECT pivot_outer(100);
+----
+7
+
+# a qualified outer column written by hand binds as an unqualified one does
+query II
+SELECT (SELECT "1" FROM (PIVOT (SELECT 7::BIGINT AS v) ON s.a IN (1) USING max(v))), (SELECT "1" FROM (PIVOT (SELECT 7::BIGINT AS v) ON a IN (1) USING max(v))) FROM (SELECT 1::BIGINT AS a) s;
+----
+7	7
+
+# an outer column named like a source column does not take that column out of the groups
+query II
+SELECT (SELECT g FROM (PIVOT (SELECT 7 AS v, 1 AS g) ON s.g IN (1) USING max(v))), (SELECT "1" FROM (PIVOT (SELECT 7 AS v, 1 AS g) ON s.g IN (1) USING max(v))) FROM (SELECT 2 AS g) s;
+----
+1	NULL
+
+# a qualified column of the pivot's own source is still refused
+statement ok
+CREATE TABLE pivot_source(g INT, v INT, st STRUCT(f INT));
+
+statement ok
+INSERT INTO pivot_source VALUES (1, 10, {'f': 1}), (2, 20, {'f': 2});
+
+statement error
+PIVOT pivot_source ON pivot_source.g IN (1, 2) USING sum(v);
+----
+PIVOT expression cannot contain qualified columns
+
+statement error
+PIVOT pivot_source AS p ON g IN (1, 2) USING sum(p.v);
+----
+PIVOT expression cannot contain qualified columns
+
+statement error
+PIVOT pivot_source ON st.f IN (1, 2) USING sum(v);
+----
+PIVOT expression cannot contain qualified columns
+
+statement error
+SELECT (SELECT "1" FROM (PIVOT pivot_source ON pivot_source.g IN (1) USING sum(v))) FROM (SELECT 1 AS g) pivot_source;
+----
+PIVOT expression cannot contain qualified columns
+
+# the parameter postpones the checks of a macro body to the call
+statement ok
+CREATE MACRO pivot_own(x) AS TABLE (PIVOT pivot_source ON pivot_source.g IN (1, 2) USING sum(v * x));
+
+statement error
+FROM pivot_own(1);
+----
+PIVOT expression cannot contain qualified columns
+
+# a qualified name that resolves nowhere fails to bind
+statement error
+PIVOT pivot_source ON other.g IN (1, 2) USING sum(v);
+----
+Referenced table "other" not found
+
+statement error
+PIVOT pivot_source ON pivot_source.missing IN (1, 2) USING sum(v);
+----
+does not have a column named "missing"
+
+# a generated source column is a source column, also when it reads no other column
+statement ok
+CREATE TABLE generated_source(x INT, v INT, gen INT AS (42));
+
+statement ok
+INSERT INTO generated_source VALUES (1, 10), (2, 20);
+
+statement error
+PIVOT generated_source ON generated_source.gen IN (42) USING sum(v);
+----
+PIVOT expression cannot contain qualified columns
+
+statement error
+PIVOT generated_source ON x IN (1, 2) USING sum(generated_source.gen);
+----
+PIVOT expression cannot contain qualified columns
+
+query II
+SELECT * FROM (PIVOT generated_source ON gen IN (42) USING sum(v)) ORDER BY x;
+----
+1	10
+2	20
+
+# a lambda parameter is not a source column
+query II
+SELECT * FROM (PIVOT (SELECT [{'f': 1}] AS l, 7 AS v, 3 AS g) ON list_transform(l, lambda x: x.f)[1] IN (1) USING max(v));
+----
+3	7
+
+# a prepared parameter in PIVOT ON
+statement ok
+PREPARE pivot_prepared AS SELECT coalesce("1", 0) FROM (PIVOT (SELECT 7 AS v) ON (v - 7 + $1::INT) IN (1) USING max(v));
+
+query I
+EXECUTE pivot_prepared(1);
+----
+7
+
+query I
+EXECUTE pivot_prepared(2);
+----
+0
+
+# views over the macros
+statement ok
+CREATE VIEW pivot_view AS SELECT a, pivot_pick(a) AS r FROM callers;
+
+query II
+SELECT a, r FROM pivot_view ORDER BY a NULLS LAST;
+----
+1	7
+1	7
+2	0
+NULL	0
+
+statement ok
+CREATE VIEW unpivot_view AS SELECT * FROM unpivot_add(5);
+
+query IIII
+FROM unpivot_view;
+----
+1	20	a_p	15

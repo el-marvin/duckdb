@@ -24,6 +24,7 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression_binder/constant_binder.hpp"
+#include "duckdb/planner/column_qualifier.hpp"
 
 namespace duckdb {
 
@@ -64,16 +65,47 @@ static void ConstructPivots(PivotRef &ref, vector<PivotValueElement> &pivot_valu
 	}
 }
 
+static bool IsMacroParameter(const ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding) {
+	if (!macro_binding || !macro_binding->HasMatchingBinding(Identifier(colref.GetColumnName()))) {
+		return false;
+	}
+	// a scalar macro leaves its parameters unqualified inside a subquery of its body
+	return !colref.IsQualified() || colref.ColumnNames()[0].StartsWith(DummyBinding::DUMMY_NAME);
+}
+
+static bool ReadsSourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding,
+                              Binder &source_binder) {
+	ErrorData error;
+	auto qualified = ColumnQualifier(source_binder).QualifyColumnName(colref, error);
+	if (!qualified) {
+		return false;
+	}
+	// the source binder also knows the macro's parameters; a generated source column may resolve to no column at all
+	bool reads_parameter = false;
+	bool reads_other = false;
+	ParsedExpressionIterator::VisitExpression<ColumnRefExpression>(*qualified, [&](const ColumnRefExpression &child) {
+		if (IsMacroParameter(child, macro_binding)) {
+			reads_parameter = true;
+		} else {
+			reads_other = true;
+		}
+	});
+	return reads_other || !reads_parameter;
+}
+
 static void ExtractPivotExpressions(ParsedExpression &root_expr, identifier_set_t &handled_columns,
-                                    optional_ptr<DummyBinding> macro_binding) {
-	ParsedExpressionIterator::VisitExpression<ColumnRefExpression>(
-	    root_expr, [&](const ColumnRefExpression &child_colref) {
+                                    optional_ptr<DummyBinding> macro_binding, Binder &source_binder) {
+	ParsedExpressionIterator::VisitExpressionMutable<ColumnRefExpression>(
+	    root_expr, [&](ColumnRefExpression &child_colref) {
 		    if (child_colref.IsQualified()) {
-			    if (child_colref.ColumnNames()[0].StartsWith(DummyBinding::DUMMY_NAME) && macro_binding &&
-			        macro_binding->HasMatchingBinding(Identifier(child_colref.GetColumnName()))) {
+			    if (IsMacroParameter(child_colref, macro_binding)) {
 				    throw ParameterNotResolvedException();
 			    }
-			    throw BinderException(child_colref, "PIVOT expression cannot contain qualified columns");
+			    // the GROUP BY drops source columns by bare name, so only outer columns may be qualified
+			    if (ReadsSourceColumn(child_colref, macro_binding, source_binder)) {
+				    throw BinderException(child_colref, "PIVOT expression cannot contain qualified columns");
+			    }
+			    return;
 		    }
 		    handled_columns.insert(child_colref.GetColumnName());
 	    });
@@ -583,7 +615,8 @@ static void BindPivotInList(unique_ptr<ParsedExpression> &expr, vector<Value> &v
 	}
 }
 
-unique_ptr<SelectNode> Binder::BindPivot(PivotRef &ref, vector<unique_ptr<ParsedExpression>> all_columns) {
+unique_ptr<SelectNode> Binder::BindPivot(Binder &child_binder, PivotRef &ref,
+                                         vector<unique_ptr<ParsedExpression>> all_columns) {
 	// keep track of the columns by which we pivot/aggregate
 	// any columns which are not pivoted/aggregated on are added to the GROUP BY clause
 	identifier_set_t handled_columns;
@@ -607,7 +640,7 @@ unique_ptr<SelectNode> Binder::BindPivot(PivotRef &ref, vector<unique_ptr<Parsed
 		}
 	}
 	for (auto &aggr : pivot_aggregates) {
-		ExtractPivotExpressions(aggr.get(), handled_columns, macro_binding);
+		ExtractPivotExpressions(aggr.get(), handled_columns, macro_binding, child_binder);
 	}
 
 	// process the in-lists
@@ -665,7 +698,7 @@ unique_ptr<SelectNode> Binder::BindPivot(PivotRef &ref, vector<unique_ptr<Parsed
 		total_pivots *= pivot.entries.size();
 		// add the pivoted column to the columns that have been handled
 		for (auto &pivot_name : pivot.pivot_expressions) {
-			ExtractPivotExpressions(*pivot_name, handled_columns, macro_binding);
+			ExtractPivotExpressions(*pivot_name, handled_columns, macro_binding, child_binder);
 		}
 		value_set_t pivots;
 		for (auto &entry : pivot.entries) {
@@ -799,6 +832,15 @@ void Binder::ExtractUnpivotEntries(Binder &child_binder, PivotColumnEntry &entry
 	child_binder.ExpandStarExpression(std::move(entry.expr), star_columns);
 
 	for (auto &expr : star_columns) {
+		ParsedExpressionIterator::VisitExpression<ColumnRefExpression>(*expr, [&](const ColumnRefExpression &colref) {
+			// a bare parameter named like a source column is left to the checks that report the conflict
+			if (IsMacroParameter(colref, macro_binding) &&
+			    (colref.IsQualified() ||
+			     child_binder.bind_context.GetMatchingBindings(colref.GetColumnName()).empty())) {
+				// the argument decides how many source columns the expression reads
+				throw ParameterNotResolvedException();
+			}
+		});
 		// create one pivot entry per result column
 		UnpivotEntry unpivot_entry;
 		if (!expr->GetAlias().empty()) {
@@ -1064,7 +1106,7 @@ BoundStatement Binder::Bind(PivotRef &ref) {
 	unique_ptr<SelectNode> select_node;
 	unique_ptr<ParsedExpression> where_clause;
 	if (!ref.aggregates.empty()) {
-		select_node = BindPivot(ref, std::move(all_columns));
+		select_node = BindPivot(*star_binder, ref, std::move(all_columns));
 	} else {
 		select_node = BindUnpivot(*star_binder, ref, std::move(all_columns), where_clause);
 	}
