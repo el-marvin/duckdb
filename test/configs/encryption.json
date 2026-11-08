@@ -101,6 +101,12 @@
       "paths": [
         "test/sql/order/order_by_negative_zero.test"
       ]
+    },
+    {
+      "reason": "RESET search_path drops this config's USE of the attached database, so the statements after it write to the in memory database in the same transaction.",
+      "paths": [
+        "test/sql/export/export_triggers.test"
+      ]
     }
   ]
 }
