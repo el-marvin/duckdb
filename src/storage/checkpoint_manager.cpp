@@ -153,8 +153,17 @@ unique_ptr<TableDataWriter> SingleFileCheckpointWriter::GetTableDataWriter(Table
 	return make_uniq<SingleFileTableDataWriter>(*this, table, *table_metadata_writer);
 }
 
+static void AppendInOidOrder(catalog_entry_vector_t &entries, catalog_entry_vector_t &to_append) {
+	sort(to_append.begin(), to_append.end(),
+	     [](const reference<CatalogEntry> &lhs, const reference<CatalogEntry> &rhs) {
+		     return lhs.get().oid < rhs.get().oid;
+	     });
+	entries.insert(entries.end(), to_append.begin(), to_append.end());
+}
+
 static catalog_entry_vector_t GetCatalogEntries(vector<reference<DuckSchemaEntry>> &schemas, VisibilityBound bound) {
 	catalog_entry_vector_t entries;
+	catalog_entry_vector_t macros;
 	catalog_entry_vector_t triggers;
 	for (auto &schema_p : schemas) {
 		auto &schema = schema_p.get();
@@ -173,6 +182,30 @@ static catalog_entry_vector_t GetCatalogEntries(vector<reference<DuckSchemaEntry
 			entries.push_back(entry);
 		});
 
+		schema.Scan(CatalogType::SCALAR_FUNCTION_ENTRY, bound, [&](CatalogEntry &entry) {
+			if (entry.internal) {
+				return;
+			}
+			if (entry.type == CatalogType::MACRO_ENTRY) {
+				macros.push_back(entry);
+			}
+		});
+
+		schema.Scan(CatalogType::TABLE_FUNCTION_ENTRY, bound, [&](CatalogEntry &entry) {
+			if (entry.internal) {
+				return;
+			}
+			if (entry.type == CatalogType::TABLE_MACRO_ENTRY) {
+				macros.push_back(entry);
+			}
+		});
+	}
+	// Written in oid order before every entry that can depend on them, so that ReorderEntries keeps their creation
+	// order across a reload unless a macro records a dependency (enable_macro_dependencies).
+	AppendInOidOrder(entries, macros);
+
+	for (auto &schema_p : schemas) {
+		auto &schema = schema_p.get();
 		catalog_entry_vector_t tables;
 		vector<reference<ViewCatalogEntry>> views;
 		schema.Scan(CatalogType::TABLE_ENTRY, bound, [&](CatalogEntry &entry) {
@@ -210,34 +243,13 @@ static catalog_entry_vector_t GetCatalogEntries(vector<reference<DuckSchemaEntry
 			});
 		}
 
-		schema.Scan(CatalogType::SCALAR_FUNCTION_ENTRY, bound, [&](CatalogEntry &entry) {
-			if (entry.internal) {
-				return;
-			}
-			if (entry.type == CatalogType::MACRO_ENTRY) {
-				entries.push_back(entry);
-			}
-		});
-
-		schema.Scan(CatalogType::TABLE_FUNCTION_ENTRY, bound, [&](CatalogEntry &entry) {
-			if (entry.internal) {
-				return;
-			}
-			if (entry.type == CatalogType::TABLE_MACRO_ENTRY) {
-				entries.push_back(entry);
-			}
-		});
-
 		schema.Scan(CatalogType::INDEX_ENTRY, bound, [&](CatalogEntry &entry) {
 			D_ASSERT(!entry.internal);
 			entries.push_back(entry);
 		});
 	}
 	// loading assigns oids in file order, so writing triggers in oid order keeps their creation order across a reload
-	sort(triggers.begin(), triggers.end(), [](const reference<CatalogEntry> &lhs, const reference<CatalogEntry> &rhs) {
-		return lhs.get().oid < rhs.get().oid;
-	});
-	entries.insert(entries.end(), triggers.begin(), triggers.end());
+	AppendInOidOrder(entries, triggers);
 	return entries;
 }
 

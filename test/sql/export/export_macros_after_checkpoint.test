@@ -1,0 +1,346 @@
+# name: test/sql/export/export_macros_after_checkpoint.test
+# description: EXPORT DATABASE of a reloaded database writes each macro after the macros it calls, so IMPORT replays
+# group: [export]
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+ATTACH ':memory:' AS home
+
+statement ok
+USE home
+
+# a callee whose name sorts after its caller's
+statement ok
+ATTACH '{TEST_DIR}/export_macros_callee.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE MACRO zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO adouble_inc(x) AS zinc(x) * 2
+
+statement ok
+USE home
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_callee.db' AS src
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/export_macros_callee'
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH ':memory:' AS dst
+
+statement ok
+USE dst
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_macros_callee'
+
+query I
+SELECT adouble_inc(1)
+----
+4
+
+statement ok
+USE home
+
+statement ok
+DETACH dst
+
+# two schemas whose macros are created interleaved
+statement ok
+ATTACH '{TEST_DIR}/export_macros_schemas.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE SCHEMA b
+
+statement ok
+CREATE SCHEMA a
+
+statement ok
+CREATE MACRO b.m1(x) AS x * 10
+
+statement ok
+CREATE MACRO a.m2(x) AS b.m1(x) + 1
+
+statement ok
+CREATE MACRO b.m3(x) AS a.m2(x) + 2
+
+statement ok
+CREATE MACRO m4(x) AS b.m3(x) + 3
+
+statement ok
+USE home
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_schemas.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE TABLE extra(i INTEGER)
+
+statement ok
+USE home
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_schemas.db' AS src
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/export_macros_schemas'
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH ':memory:' AS dst
+
+statement ok
+USE dst
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_macros_schemas'
+
+query II
+SELECT m4(1), a.m2(2)
+----
+16	21
+
+statement ok
+USE home
+
+statement ok
+DETACH dst
+
+# a table macro over a scalar macro, and a scalar macro over a table macro
+statement ok
+ATTACH '{TEST_DIR}/export_macros_kinds.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE MACRO zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO zone() AS TABLE SELECT zinc(range) AS v FROM range(3)
+
+statement ok
+CREATE MACRO total() AS (SELECT sum(v) FROM zone())
+
+statement ok
+USE home
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_kinds.db' AS src
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/export_macros_kinds'
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH ':memory:' AS dst
+
+statement ok
+USE dst
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_macros_kinds'
+
+query I
+SELECT total()
+----
+6
+
+query I
+SELECT v FROM zone() ORDER BY v
+----
+1
+2
+3
+
+statement ok
+USE home
+
+statement ok
+DETACH dst
+
+# macros created after a checkpoint come back from the WAL, then a checkpoint writes them
+statement ok
+ATTACH '{TEST_DIR}/export_macros_wal.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE MACRO zz(x) AS x + 1
+
+statement ok
+USE home
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_wal.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE SCHEMA a
+
+statement ok
+CREATE MACRO a.ay(x) AS zz(x) * 2
+
+statement ok
+CREATE MACRO ax() AS TABLE SELECT a.ay(range) AS v FROM range(2)
+
+statement ok
+USE home
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_wal.db' AS src
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_wal.db' AS src
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/export_macros_wal'
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH ':memory:' AS dst
+
+statement ok
+USE dst
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_macros_wal'
+
+query I
+SELECT v FROM ax() ORDER BY v
+----
+2
+4
+
+statement ok
+USE home
+
+statement ok
+DETACH dst
+
+# an index over a caller overload records only that overload, not the macro its other overload calls
+statement ok
+ATTACH '{TEST_DIR}/export_macros_index.db' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE MACRO z_leaf(x) AS x + 100
+
+statement ok
+CREATE MACRO a_wrapper(x) AS x, (x, y) AS z_leaf(x) + y
+
+statement ok
+CREATE TABLE t(i INTEGER)
+
+statement ok
+INSERT INTO t VALUES (1), (2)
+
+statement ok
+CREATE UNIQUE INDEX t_wrapped ON t (a_wrapper(i))
+
+statement ok
+USE home
+
+statement ok
+CHECKPOINT src
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH '{TEST_DIR}/export_macros_index.db' AS src
+
+statement ok
+EXPORT DATABASE src TO '{TEST_DIR}/export_macros_index'
+
+statement ok
+DETACH src
+
+statement ok
+ATTACH ':memory:' AS dst
+
+statement ok
+USE dst
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/export_macros_index'
+
+query I
+SELECT a_wrapper(1, 2)
+----
+103
+
+statement error
+INSERT INTO t VALUES (2)
+----
+<REGEX>:Constraint Error.*Duplicate key.*

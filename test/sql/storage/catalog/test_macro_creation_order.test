@@ -1,0 +1,295 @@
+# name: test/sql/storage/catalog/test_macro_creation_order.test
+# description: A checkpoint keeps the creation order of the scalar and table macros of all schemas across a reload
+# group: [catalog]
+
+load {TEST_DIR}/macro_creation_order.db
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+CREATE VIEW macro_order AS
+SELECT schema_name, function_name, function_type
+FROM duckdb_functions()
+WHERE database_name = current_database() AND function_type IN ('macro', 'table_macro') AND NOT internal
+ORDER BY function_oid
+
+# a callee whose name sorts after its caller's
+statement ok
+CREATE MACRO zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO adouble_inc(x) AS zinc(x) * 2
+
+# two schemas whose macros are created interleaved, so neither schema nor name order is creation order
+statement ok
+CREATE SCHEMA b
+
+statement ok
+CREATE SCHEMA a
+
+statement ok
+CREATE MACRO b.m1(x) AS x * 10
+
+statement ok
+CREATE MACRO a.m2(x) AS b.m1(x) + 1
+
+statement ok
+CREATE MACRO b.m3(x) AS a.m2(x) + 2
+
+statement ok
+CREATE MACRO m4(x) AS b.m3(x) + 3
+
+# a table macro over a scalar macro, and a scalar macro over a table macro
+statement ok
+CREATE MACRO zone() AS TABLE SELECT zinc(range) AS v FROM range(3)
+
+statement ok
+CREATE MACRO total() AS (SELECT sum(v) FROM zone())
+
+# a table with data, a DEFAULT calling a caller macro, and a view over a table macro
+statement ok
+CREATE TABLE t(id INTEGER, w INTEGER DEFAULT adouble_inc(10))
+
+statement ok
+INSERT INTO t (id) VALUES (1), (2)
+
+statement ok
+INSERT INTO t VALUES (3, NULL)
+
+statement ok
+CREATE VIEW zone_view AS SELECT * FROM zone()
+
+# a unique expression index over a caller macro
+statement ok
+CREATE UNIQUE INDEX t_ai ON t (adouble_inc(id))
+
+# a caller overload that a table and an index record, whose other overload calls a macro they do not record
+statement ok
+CREATE MACRO z_leaf(x) AS x + 100
+
+statement ok
+CREATE MACRO a_wrapper(x) AS x, (x, y) AS z_leaf(x) + y
+
+statement ok
+CREATE TABLE tw(i INTEGER DEFAULT a_wrapper(5))
+
+statement ok
+CREATE INDEX tw_idx ON tw (a_wrapper(i))
+
+query TTT
+SELECT * FROM macro_order
+----
+main	zinc	macro
+main	adouble_inc	macro
+b	m1	macro
+a	m2	macro
+b	m3	macro
+main	m4	macro
+main	zone	table_macro
+main	total	macro
+main	z_leaf	macro
+main	a_wrapper	macro
+main	a_wrapper	macro
+
+statement ok
+CHECKPOINT
+
+restart
+
+query TTT
+SELECT * FROM macro_order
+----
+main	zinc	macro
+main	adouble_inc	macro
+b	m1	macro
+a	m2	macro
+b	m3	macro
+main	m4	macro
+main	zone	table_macro
+main	total	macro
+main	z_leaf	macro
+main	a_wrapper	macro
+main	a_wrapper	macro
+
+# macros created after the checkpoint come back from the WAL on reopen, then a checkpoint writes them in their order
+statement ok
+CREATE SCHEMA aa
+
+statement ok
+CREATE MACRO aa.after1(x) AS m4(x) - 1
+
+statement ok
+CREATE MACRO after0() AS TABLE SELECT aa.after1(v) AS u FROM zone()
+
+restart
+
+query TTT
+SELECT * FROM macro_order
+----
+main	zinc	macro
+main	adouble_inc	macro
+b	m1	macro
+a	m2	macro
+b	m3	macro
+main	m4	macro
+main	zone	table_macro
+main	total	macro
+main	z_leaf	macro
+main	a_wrapper	macro
+main	a_wrapper	macro
+aa	after1	macro
+main	after0	table_macro
+
+statement ok
+CHECKPOINT
+
+restart
+
+query TTT
+SELECT * FROM macro_order
+----
+main	zinc	macro
+main	adouble_inc	macro
+b	m1	macro
+a	m2	macro
+b	m3	macro
+main	m4	macro
+main	zone	table_macro
+main	total	macro
+main	z_leaf	macro
+main	a_wrapper	macro
+main	a_wrapper	macro
+aa	after1	macro
+main	after0	table_macro
+
+# a second checkpoint and reload keep the order, the data and the behavior
+statement ok
+CREATE TABLE extra(i INTEGER)
+
+statement ok
+CHECKPOINT
+
+restart
+
+query TTT
+SELECT * FROM macro_order
+----
+main	zinc	macro
+main	adouble_inc	macro
+b	m1	macro
+a	m2	macro
+b	m3	macro
+main	m4	macro
+main	zone	table_macro
+main	total	macro
+main	z_leaf	macro
+main	a_wrapper	macro
+main	a_wrapper	macro
+aa	after1	macro
+main	after0	table_macro
+
+query II
+SELECT id, w FROM t ORDER BY id
+----
+1	22
+2	22
+3	NULL
+
+statement ok
+INSERT INTO t (id) VALUES (4)
+
+query I
+SELECT w FROM t WHERE id = 4
+----
+22
+
+statement error
+INSERT INTO t (id) VALUES (1)
+----
+<REGEX>:Constraint Error.*Duplicate key.*
+
+query T
+SELECT index_name FROM duckdb_indexes() WHERE database_name = current_database() ORDER BY index_name
+----
+t_ai
+tw_idx
+
+statement ok
+INSERT INTO tw DEFAULT VALUES
+
+query II
+SELECT i, a_wrapper(i, 2) FROM tw
+----
+5	107
+
+query IIIII
+SELECT adouble_inc(1), m4(1), total(), a.m2(2), b.m3(0)
+----
+4	16	6	21	3
+
+query I
+SELECT v FROM zone_view ORDER BY v
+----
+1
+2
+3
+
+query I
+SELECT u FROM after0() ORDER BY u
+----
+15
+25
+35
+
+# an ALTER keeps the oid, so a comment on a callee that no table calls keeps its place before its caller
+statement ok
+COMMENT ON MACRO b.m1 IS 'the callee'
+
+statement ok
+CHECKPOINT
+
+restart
+
+query TTT
+SELECT schema_name, function_name, comment FROM duckdb_functions()
+WHERE database_name = current_database() AND function_name IN ('m1', 'm2')
+ORDER BY function_oid
+----
+b	m1	the callee
+a	m2	NULL
+
+# replacing a callee gives it a new oid after its caller's; a reload keeps the order the catalog had
+statement ok
+CREATE MACRO a_callee(x) AS x + 1
+
+statement ok
+CREATE MACRO b_caller(x) AS a_callee(x) * 2
+
+statement ok
+CREATE OR REPLACE MACRO a_callee(x) AS x + 10
+
+query T
+SELECT function_name FROM macro_order WHERE function_name IN ('a_callee', 'b_caller')
+----
+b_caller
+a_callee
+
+statement ok
+CHECKPOINT
+
+restart
+
+query T
+SELECT function_name FROM macro_order WHERE function_name IN ('a_callee', 'b_caller')
+----
+b_caller
+a_callee
+
+query I
+SELECT b_caller(1)
+----
+22
