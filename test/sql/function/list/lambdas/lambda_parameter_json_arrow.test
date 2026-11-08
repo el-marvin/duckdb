@@ -169,3 +169,23 @@ query I
 SELECT v FROM ul;
 ----
 [100, 100]
+
+# a JSON dot call on the parameter reads the parameter, and an arrow on the parameter is JSON
+
+statement ok
+RESET lambda_syntax;
+
+query I
+SELECT list_transform(['{"f": "a"}'::JSON], lambda k: k.json_extract_string('f')) FROM t;
+----
+[a]
+
+query II
+SELECT k.json_extract_string('f'), list_transform(['{"f": "a"}'::JSON], lambda k: k.json_extract_string('f')) FROM t GROUP BY k.json_extract_string('f');
+----
+bbbb	[a]
+
+query I
+SELECT list_transform(['{"f": "a"}'::JSON], lambda k: k -> 'f') FROM t;
+----
+["a"]

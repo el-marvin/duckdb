@@ -264,7 +264,15 @@ CatalogEntry &ExpressionBinder::BindFunction(FunctionExpression &function) {
 	QueryErrorContext error_context(function.GetQueryLocation());
 
 	ColumnQualifier qualifier(binder);
-	auto func = qualifier.QualifyFunction(function);
+	// a receiver that names a lambda parameter stays a bare column reference, which this binder then binds
+	vector<identifier_set_t> lambda_params;
+	if (lambda_bindings) {
+		for (auto &binding : *lambda_bindings) {
+			auto &names = binding.GetColumnNames();
+			lambda_params.emplace_back(names.begin(), names.end());
+		}
+	}
+	auto func = qualifier.QualifyFunction(function, lambda_params);
 	if (!func) {
 		// function was not found - check if we this is a table function (to throw a more helpful error message)
 		EntryLookupInfo table_function_lookup(CatalogType::TABLE_FUNCTION_ENTRY, function.GetQualifiedName(),

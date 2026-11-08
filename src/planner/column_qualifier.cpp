@@ -240,7 +240,7 @@ void ColumnQualifier::QualifyColumnNames(unique_ptr<ParsedExpression> &expr, vec
 		// Special-handling for lambdas, which are inside function expressions.
 		auto &function = expr->Cast<FunctionExpression>();
 		if (!ExpressionBinder::IsUnnestFunction(function.FunctionName())) {
-			QualifyFunction(function);
+			QualifyFunction(function, lambda_params);
 		}
 		if (function.IsLambdaFunction()) {
 			return QualifyColumnNamesInLambda(function, lambda_params);
@@ -282,7 +282,8 @@ optional_ptr<CatalogEntry> ColumnQualifier::FindFunction(Binder &binder, const F
 	return func;
 }
 
-optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &function) {
+optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &function,
+                                                            const vector<identifier_set_t> &lambda_params) {
 	D_ASSERT(!ExpressionBinder::IsUnnestFunction(function.FunctionName()));
 	// promote a lone qualifier that names an attached database to a catalog, so that "db.f()" is not mistaken for a
 	// dot-call on a column named "db" by the rewrite below
@@ -301,7 +302,11 @@ optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &
 		colref =
 		    make_uniq<ColumnRefExpression>(function.GetQualifiedName().Schema(), function.GetQualifiedName().Catalog());
 	}
-	auto new_colref = QualifyColumnName(*colref, error);
+	unique_ptr<ParsedExpression> new_colref;
+	// a lambda parameter is a bare name and wins over a column inside its body, as for a bare column reference
+	if (colref->IsQualified() || !LambdaExpression::IsLambdaParameter(lambda_params, colref->GetColumnName())) {
+		new_colref = QualifyColumnName(*colref, error);
+	}
 	if (!new_colref) {
 		new_colref = std::move(colref);
 	}

@@ -1,0 +1,370 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_dot_call_receiver.test
+# description: A lambda parameter written as the receiver of a dot call is the parameter, not a table column of the same name
+# group: [lambdas]
+
+statement ok
+CREATE TABLE t (k VARCHAR, g INTEGER, s STRUCT(f VARCHAR));
+
+statement ok
+INSERT INTO t VALUES ('A', 1, {'f': 'X'}), ('C', 1, {'f': 'Y'});
+
+query I
+SELECT list_transform(['B'], lambda k: k.lower()) FROM t;
+----
+[b]
+[b]
+
+query I
+SELECT list_transform(['B', NULL, 'B'], lambda k: k.lower()) FROM t;
+----
+[b, NULL, b]
+[b, NULL, b]
+
+query II
+SELECT list_transform(['B'], lambda k: k.lower()), list_transform(['B'], lambda k: lower(k)) FROM t LIMIT 1;
+----
+[b]	[b]
+
+# the parameter has the type of the list element, not of the column
+statement error
+SELECT list_transform([1], lambda k: k.lower()) FROM t;
+----
+lower(INTEGER)
+
+# the other lambda functions and lambda forms
+
+query I
+SELECT list_filter(['B', 'b'], lambda k: k.lower() = k) FROM t LIMIT 1;
+----
+[b]
+
+query I
+SELECT list_reduce(['B', 'C'], lambda k, y: k.lower() || y) FROM t LIMIT 1;
+----
+bC
+
+query I
+SELECT list_reduce(['B', 'C'], lambda y, k: y || k.lower()) FROM t LIMIT 1;
+----
+Bc
+
+query I
+SELECT list_transform(['B'], lambda k, i: k.lower() || i) FROM t LIMIT 1;
+----
+[b1]
+
+query I
+SELECT [k.lower() FOR k IN ['B']] FROM t LIMIT 1;
+----
+[b]
+
+query I
+SELECT ['B'].list_transform(lambda k: k.lower()) FROM t LIMIT 1;
+----
+[b]
+
+# method chains on the parameter
+
+query II
+SELECT list_transform(['Bc'], lambda k: k.lower().upper()), list_transform(['Bc'], lambda k: k.upper().lower()) FROM t LIMIT 1;
+----
+[BC]	[bc]
+
+query I
+SELECT list_transform(['Bc'], lambda k: k.lower().concat(k)) FROM t LIMIT 1;
+----
+[bcBc]
+
+# nested lambdas: an outer parameter, an inner parameter, and an inner parameter shadowing an outer one
+
+query I
+SELECT list_transform(['B'], lambda k: list_transform(['D'], lambda x: k.lower() || x)) FROM t LIMIT 1;
+----
+[[bD]]
+
+query I
+SELECT list_transform(['B'], lambda x: list_transform(['D'], lambda k: k.lower() || x)) FROM t LIMIT 1;
+----
+[[dB]]
+
+query I
+SELECT list_transform(['B'], lambda k: list_transform(['D'], lambda k: k.lower())) FROM t LIMIT 1;
+----
+[[d]]
+
+# a receiver that is a column still reads the column
+
+query I
+SELECT list_transform(['B'], lambda x: k.lower() || x) FROM t ORDER BY ALL;
+----
+[aB]
+[cB]
+
+query I
+SELECT list_transform(['B'], lambda k: t.k.lower() || k) FROM t ORDER BY ALL;
+----
+[aB]
+[cB]
+
+query I
+SELECT k.lower() FROM t ORDER BY ALL;
+----
+a
+c
+
+# grouped queries: the group check sees the parameter
+
+query I
+SELECT list_transform(['B'], lambda k: k.lower()) FROM t GROUP BY g;
+----
+[b]
+
+query II
+SELECT k, list_transform(['B'], lambda k: k.lower()) FROM t GROUP BY k ORDER BY k;
+----
+A	[b]
+C	[b]
+
+query II
+SELECT lower(k), list_transform(['B'], lambda k: k.lower()) FROM t GROUP BY lower(k) ORDER BY ALL;
+----
+a	[b]
+c	[b]
+
+query II
+SELECT concat(k.lower(), '!'), list_transform(['B'], lambda k: concat(k.lower(), '!')) FROM t GROUP BY concat(k.lower(), '!') ORDER BY ALL;
+----
+a!	[b!]
+c!	[b!]
+
+query I
+SELECT list_transform(['B'], lambda x: k.lower() || x) FROM t GROUP BY k ORDER BY ALL;
+----
+[aB]
+[cB]
+
+query I
+SELECT list_transform(['B'], lambda k: t.k.lower() || k) FROM t GROUP BY k ORDER BY ALL;
+----
+[aB]
+[cB]
+
+query I
+SELECT list_transform(['B'], lambda k: k.lower()) FROM t GROUP BY list_transform(['B'], lambda k: k.lower());
+----
+[b]
+
+query I
+SELECT list_transform([['B']], lambda k: k.list_transform(lambda y: y.lower() || k[1])) FROM t GROUP BY g;
+----
+[[bB]]
+
+statement error
+SELECT list_transform(['B'], lambda x: k.lower() || x) FROM t GROUP BY g;
+----
+must appear in the GROUP BY clause
+
+query II
+SELECT g, list_transform(['B'], lambda k: k.lower()) FROM t GROUP BY GROUPING SETS ((g), (k)) ORDER BY ALL;
+----
+1	[b]
+NULL	[b]
+NULL	[b]
+
+statement error
+SELECT list_transform(['B'], lambda k: max(k.lower())) FROM t;
+----
+aggregate functions cannot reference lambda parameters
+
+query I
+SELECT count(*) FROM t GROUP BY g HAVING list_transform(['B'], lambda k: k.lower()) = ['b'];
+----
+2
+
+query I
+SELECT k FROM t GROUP BY k HAVING list_transform(['B'], lambda k: k.lower()) = ['b'] ORDER BY k;
+----
+A
+C
+
+# ORDER BY: the parameter orders C before A, the column would order A before C
+
+query I
+SELECT k FROM t ORDER BY list_transform([CASE WHEN k = 'A' THEN 'Z' ELSE 'B' END], lambda k: k.lower());
+----
+C
+A
+
+query II
+SELECT k, row_number() OVER (ORDER BY k) FROM t QUALIFY list_transform(['B'], lambda k: k.lower()) = ['b'] ORDER BY k;
+----
+A	1
+C	2
+
+query III
+SELECT k, list_transform(['B'], lambda k: k.lower()), first_value(list_transform(['D'], lambda k: k.lower())) OVER (PARTITION BY k) FROM t ORDER BY k;
+----
+A	[b]	[d]
+C	[b]	[d]
+
+query I
+SELECT max(list_transform(['B'], lambda k: k.lower())) FROM t;
+----
+[b]
+
+query I
+SELECT (SELECT list_transform(['B'], lambda k: k.lower()) FROM t AS u LIMIT 1) FROM t;
+----
+[b]
+[b]
+
+query I
+SELECT (SELECT max(list_transform(['B'], lambda k: k.lower())) FROM t AS u WHERE u.k = t.k) FROM t;
+----
+[b]
+[b]
+
+# clauses that are bound without being qualified first
+
+query I
+SELECT k FROM t WHERE list_transform(['B'], lambda k: k.lower()) = ['b'] ORDER BY k;
+----
+A
+C
+
+query I
+SELECT count(*) FROM t AS a JOIN t AS b ON list_transform(['B'], lambda k: k.lower()) = ['b'];
+----
+4
+
+query I
+SELECT list_transform(['B'], lambda k: k.lower()) FROM t JOIN t AS t2 USING (k);
+----
+[b]
+[b]
+
+# a clause that takes no lambda rejects the dot call on a parameter as it rejects the plain call
+
+statement error
+CREATE TABLE d (k VARCHAR DEFAULT (list_transform(['Dd'], lambda x: x.lower())[1]), v INTEGER);
+----
+DEFAULT value cannot contain column names
+
+statement error
+CREATE TABLE d (k VARCHAR DEFAULT (list_transform(['Dd'], lambda x: lower(x))[1]), v INTEGER);
+----
+DEFAULT value cannot contain column names
+
+statement error
+CREATE TABLE c (k VARCHAR CHECK (list_transform([k], lambda x: x.lower()) = [lower(k)]));
+----
+Lambda functions are currently not supported in CHECK constraints
+
+statement error
+CREATE TABLE c (k VARCHAR CHECK (list_transform([k], lambda x: lower(x)) = [lower(k)]));
+----
+Lambda functions are currently not supported in CHECK constraints
+
+statement ok
+CREATE TABLE u (k VARCHAR PRIMARY KEY, v VARCHAR);
+
+statement ok
+INSERT INTO u VALUES ('A', 'x');
+
+statement ok
+UPDATE u SET v = list_transform(['C'], lambda k: k.lower())[1];
+
+query II
+SELECT k, v FROM u;
+----
+A	c
+
+statement ok
+INSERT INTO u VALUES ('A', 'y') ON CONFLICT DO UPDATE SET v = list_transform(['B'], lambda k: k.lower())[1];
+
+query II
+SELECT k, v FROM u;
+----
+A	b
+
+statement ok
+INSERT INTO u VALUES ('A', 'z') ON CONFLICT DO UPDATE SET v = 'w' WHERE list_transform(['B'], lambda k: k.lower()) = ['b'];
+
+query II
+INSERT INTO u VALUES ('E', 'z') RETURNING k, list_transform(['B'], lambda k: k.lower());
+----
+E	[b]
+
+query II
+SELECT k, v FROM u ORDER BY k;
+----
+A	w
+E	z
+
+# macro bodies: the lambda parameter shadows a macro parameter of the same name
+
+statement ok
+CREATE MACRO lower_param(k) AS list_transform(['B'], lambda k: k.lower());
+
+query I
+SELECT lower_param('Z');
+----
+[b]
+
+query I
+SELECT lower_param('Z') FROM t;
+----
+[b]
+[b]
+
+# unchanged: a macro parameter as a receiver outside the lambda, and a caller column that never reaches the body
+
+statement ok
+CREATE MACRO lower_both(k) AS list_transform(['B'], lambda x: k.lower() || x.lower());
+
+query I
+SELECT lower_both('Z');
+----
+[zb]
+
+statement ok
+CREATE MACRO lower_body() AS list_transform(['B'], lambda k: k.lower());
+
+query I
+SELECT lower_body() FROM t GROUP BY k;
+----
+[b]
+[b]
+
+# unchanged: a receiver with a field still reads the field of a column of the parameter's name
+
+query I
+SELECT list_transform([{'f': 'Q'}], lambda s: s.f.lower()) FROM t ORDER BY ALL;
+----
+[x]
+[y]
+
+query I
+SELECT k FROM t WHERE list_transform([{'f': 'Q'}], lambda s: s.f.lower()) = [lower(s.f)] ORDER BY k;
+----
+A
+C
+
+statement error
+SELECT list_transform([{'f': 'Q'}], lambda k: k.f.lower()) FROM t;
+----
+Cannot extract field 'f' from expression "k"
+
+statement error
+SELECT k FROM t WHERE list_transform([{'f': 'Q'}], lambda k: k.f.lower()) = ['q'];
+----
+Cannot extract field 'f' from expression "k"
+
+statement ok
+SET lambda_syntax = 'ENABLE_SINGLE_ARROW';
+
+query I
+SELECT list_transform(['B'], k -> k.lower()) FROM t GROUP BY k;
+----
+[b]
+[b]

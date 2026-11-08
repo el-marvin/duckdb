@@ -44,7 +44,10 @@ public:
 	void QualifyColumnNames(unique_ptr<ParsedExpression> &expr, vector<identifier_set_t> &lambda_params,
 	                        const bool within_function_expression = false);
 
-	optional_ptr<CatalogEntry> QualifyFunction(FunctionExpression &function);
+	//! Looks up the function of the call and rewrites a dot call "x.lower()" into "lower(x)"; lambda_params are the
+	//! parameter names of the enclosing lambdas, and a bare receiver that names one is left unqualified
+	optional_ptr<CatalogEntry> QualifyFunction(FunctionExpression &function,
+	                                           const vector<identifier_set_t> &lambda_params);
 
 	//! Whether argument index of the call binds as a lambda, filling in the parameter names it declares
 	static bool TryGetLambdaParameters(Binder &binder, const FunctionExpression &function, idx_t index,
