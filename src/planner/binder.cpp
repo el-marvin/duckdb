@@ -62,8 +62,8 @@ void Binder::ContinueDepth(const Binder &creator) {
 void Binder::CheckStackSpace() {
 	// binding a leaf below the last check and throwing the error take about 14 KiB on a release build, more under a
 	// sanitizer
-	static constexpr idx_t MIN_STACK_RESERVE = 64 * 1024;
-	static constexpr idx_t MAX_STACK_RESERVE = 256 * 1024;
+	static constexpr idx_t MIN_STACK_RESERVE = idx_t(64) * 1024;
+	static constexpr idx_t MAX_STACK_RESERVE = idx_t(256) * 1024;
 	idx_t stack_size;
 	idx_t remaining;
 	if (!ThreadUtil::GetStackSpace(stack_size, remaining)) {

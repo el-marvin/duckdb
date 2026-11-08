@@ -92,8 +92,11 @@ struct ThreadStackBounds {
 	uintptr_t top;
 };
 
-// trivially destructible, so its first use in a thread registers no destructor that could fail to allocate
-thread_local ThreadStackBounds thread_stack_bounds;
+ThreadStackBounds &GetThreadStackBounds() {
+	// trivially destructible, so its first use in a thread registers no destructor that could fail to allocate
+	static thread_local ThreadStackBounds thread_stack_bounds;
+	return thread_stack_bounds;
+}
 
 uintptr_t CurrentStackAddress() {
 #if defined(_MSC_VER)
@@ -113,7 +116,7 @@ bool FindInitialStackTop(uintptr_t high, uintptr_t &top) {
 		return false;
 	}
 	// other stacks are mapped at least 128 MiB below it
-	static constexpr uintptr_t MAX_DISTANCE = 64 * 1024 * 1024;
+	static constexpr uintptr_t MAX_DISTANCE = uintptr_t(64) * 1024 * 1024;
 	auto name = reinterpret_cast<const char *>(getauxval(AT_EXECFN));
 	if (!name) {
 		return false;
@@ -192,7 +195,7 @@ bool QueryStackBounds(ThreadStackBounds &bounds) {
 } // namespace
 
 bool ThreadUtil::GetStackSpace(idx_t &stack_size, idx_t &remaining) {
-	auto &bounds = thread_stack_bounds;
+	auto &bounds = GetThreadStackBounds();
 	if (!bounds.queried) {
 		bounds.known = QueryStackBounds(bounds);
 		bounds.queried = true;
@@ -208,7 +211,7 @@ bool ThreadUtil::GetStackSpace(idx_t &stack_size, idx_t &remaining) {
 
 void ThreadUtil::RefreshStackLimit() {
 #if defined(DUCKDB_THREAD_UTIL_PTHREAD_STACK) && defined(__linux__)
-	auto &bounds = thread_stack_bounds;
+	auto &bounds = GetThreadStackBounds();
 	if (bounds.queried && bounds.follows_limit) {
 		bounds.known = ApplyStackLimit(bounds);
 	}
