@@ -68,7 +68,7 @@ static optional_idx FindExpression(const vector<unique_ptr<Expression>> &express
 	return optional_idx();
 }
 
-//! Expression equality ignores the return type, but a collation lives in the return type and decides which
+//! Expression equality ignores collations, but a collation lives in the return type and decides which
 //! argument values are duplicates of each other. Two distinct aggregates can only share a deduplication branch
 //! if their arguments agree on that as well.
 static bool ArgumentsEqualIncludingCollation(const BoundAggregateExpression &lhs, const BoundAggregateExpression &rhs) {

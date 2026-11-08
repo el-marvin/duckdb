@@ -2219,6 +2219,42 @@ bool LogicalType::EqualsIncludingCollation(const LogicalType &rhs) const {
 	return !mismatch && index == collations.size();
 }
 
+static bool FieldNamesSpelledAlike(const LogicalType &lhs, const LogicalType &rhs) {
+	if (!lhs.HasParameters()) {
+		return true;
+	}
+	switch (lhs.id()) {
+	case LogicalTypeId::STRUCT:
+	case LogicalTypeId::TUPLE:
+	case LogicalTypeId::UNION: {
+		auto &lhs_children = StructType::GetChildTypes(lhs);
+		auto &rhs_children = StructType::GetChildTypes(rhs);
+		D_ASSERT(lhs_children.size() == rhs_children.size());
+		for (idx_t i = 0; i < lhs_children.size(); i++) {
+			if (lhs_children[i].first.GetIdentifierName() != rhs_children[i].first.GetIdentifierName() ||
+			    !FieldNamesSpelledAlike(lhs_children[i].second, rhs_children[i].second)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	case LogicalTypeId::LIST:
+	case LogicalTypeId::MAP:
+		return FieldNamesSpelledAlike(ListType::GetChildType(lhs), ListType::GetChildType(rhs));
+	case LogicalTypeId::ARRAY:
+		return FieldNamesSpelledAlike(ArrayType::GetChildType(lhs), ArrayType::GetChildType(rhs));
+	default:
+		return true;
+	}
+}
+
+bool LogicalType::EqualsIncludingFieldSpelling(const LogicalType &rhs) const {
+	if (RefersToSameObject(type_info_, rhs.type_info_)) {
+		return true;
+	}
+	return *this == rhs && FieldNamesSpelledAlike(*this, rhs);
+}
+
 bool LogicalType::operator==(const LogicalType &rhs) const {
 	if (RefersToSameObject(type_info_, rhs.type_info_)) {
 		return true;

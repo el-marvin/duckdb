@@ -1,0 +1,24 @@
+# name: test/sql/optimizer/test_struct_field_spelling_matching_json.test
+# description: Bound expressions whose union member names differ only in case are not merged
+# group: [optimizer]
+
+require json
+
+statement ok
+CREATE TABLE t AS SELECT i AS x FROM range(4) r(i) UNION ALL SELECT NULL;
+
+query TT
+SELECT to_json([union_value(A := x)]), to_json([union_value(a := x)]) FROM t WHERE x = 1;
+----
+[{"A":1}]	[{"a":1}]
+
+# Control: keeps its spelling on main too, its plan does not merge the two.
+query TT
+SELECT (SELECT to_json([union_value(A := x)]) FROM t WHERE x = 1), (SELECT to_json([union_value(a := x)]) FROM t WHERE x = 1);
+----
+[{"A":1}]	[{"a":1}]
+
+query TT
+SELECT to_json(first(union_value(A := x) ORDER BY x)), to_json(first(union_value(a := x) ORDER BY x)) FROM t;
+----
+{"A":0}	{"a":0}

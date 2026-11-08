@@ -96,7 +96,7 @@ bool BoundAggregateExpression::Equals(const BaseExpression &other_p) const {
 		if (!Expression::Equals(*children[i], *other.children[i])) {
 			return false;
 		}
-		// expression equality ignores the return type, but a collation lives in the return type and decides
+		// expression equality ignores collations, but a collation lives in the return type and decides
 		// which argument values compare equal - two aggregates that disagree on it are not the same aggregate
 		if (!children[i]->GetReturnType().EqualsIncludingCollation(other.children[i]->GetReturnType())) {
 			return false;

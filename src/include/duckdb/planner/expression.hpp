@@ -67,7 +67,7 @@ public:
 		if (!BaseExpression::Equals(other)) {
 			return false;
 		}
-		return return_type == reinterpret_cast<const Expression &>(other).return_type;
+		return return_type.EqualsIncludingFieldSpelling(reinterpret_cast<const Expression &>(other).return_type);
 	}
 	static bool Equals(const Expression &left, const Expression &right) {
 		return left.Equals(right);
