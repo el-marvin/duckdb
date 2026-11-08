@@ -1,0 +1,514 @@
+# name: test/sql/aggregate/grouping_sets/grouping_sets_select_reference.test
+# description: Under grouping sets a GROUP BY entry names one group in every set: a select reference names its entry's group, also when repeated, and a plain expression equal to a referenced entry's expression names that group
+# group: [grouping_sets]
+
+statement ok
+CREATE TABLE t AS SELECT range AS s FROM range(1, 4);
+
+statement ok
+CREATE SEQUENCE q;
+
+# a repeated reference in another set is the entry's group, not a constant group
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((1), (c)) ORDER BY ALL;
+----
+2	1
+2	1
+3	1
+3	1
+4	1
+4	1
+
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((c), (1)) ORDER BY ALL;
+----
+2	1
+2	1
+3	1
+3	1
+4	1
+4	1
+
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((c), (c)) ORDER BY ALL;
+----
+2	1
+2	1
+3	1
+3	1
+4	1
+4	1
+
+query III
+SELECT s + 1 AS c, s AS d, count(*) FROM t GROUP BY GROUPING SETS ((1), (d), (c)) ORDER BY ALL;
+----
+2	NULL	1
+2	NULL	1
+3	NULL	1
+3	NULL	1
+4	NULL	1
+4	NULL	1
+NULL	1	1
+NULL	2	1
+NULL	3	1
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b FROM t GROUP BY GROUPING SETS ((1), (b)) HAVING b IS NOT NULL);
+----
+6
+
+# a group after a dropped entry takes the next free index
+query III
+SELECT s + 1 AS c, s AS d, count(*) FROM t GROUP BY GROUPING SETS ((1), (c), (d)) ORDER BY ALL;
+----
+2	NULL	1
+2	NULL	1
+3	NULL	1
+3	NULL	1
+4	NULL	1
+4	NULL	1
+NULL	1	1
+NULL	2	1
+NULL	3	1
+
+statement ok
+PREPARE p1 AS SELECT s + $1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((1), (c)) ORDER BY ALL;
+
+query II
+EXECUTE p1(10);
+----
+11	1
+11	1
+12	1
+12	1
+13	1
+13	1
+
+query II
+EXECUTE p1(20);
+----
+21	1
+21	1
+22	1
+22	1
+23	1
+23	1
+
+# ROLLUP and CUBE with a repeated alias
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY CUBE (1, c) ORDER BY ALL;
+----
+2	1
+2	1
+2	1
+3	1
+3	1
+3	1
+4	1
+4	1
+4	1
+NULL	3
+
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY ROLLUP (c), ROLLUP (1) ORDER BY ALL;
+----
+2	1
+2	1
+2	1
+3	1
+3	1
+3	1
+4	1
+4	1
+4	1
+NULL	3
+
+# GROUPING, HAVING, ORDER BY and a lateral alias read the entry's group in every set
+query III
+SELECT s + 1 AS c, GROUPING(c) AS g, count(*) FROM t GROUP BY GROUPING SETS ((1), (c), ()) ORDER BY ALL;
+----
+2	0	1
+2	0	1
+3	0	1
+3	0	1
+4	0	1
+4	0	1
+NULL	1	3
+
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((1), (c), ()) HAVING c > 2 ORDER BY ALL;
+----
+3	1
+3	1
+4	1
+4	1
+
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((1), (c), ()) HAVING c IS NULL;
+----
+NULL	3
+
+query II
+SELECT s + 1 AS c, count(*) AS n FROM t GROUP BY GROUPING SETS ((1), (c), ()) ORDER BY -c NULLS FIRST, n;
+----
+NULL	3
+4	1
+4	1
+3	1
+3	1
+2	1
+2	1
+
+query II
+SELECT s + 1 AS c, c * 10 AS e FROM t GROUP BY GROUPING SETS ((1), (c), ()) ORDER BY ALL;
+----
+2	20
+2	20
+3	30
+3	30
+4	40
+4	40
+NULL	NULL
+
+# a literal in the select list is the literal in every set, never a group
+query II
+SELECT s + 1 AS c, 42 AS k FROM t GROUP BY GROUPING SETS ((1), (c)) ORDER BY ALL;
+----
+2	42
+2	42
+3	42
+3	42
+4	42
+4	42
+
+query II
+SELECT s + 1 AS c, 42 AS k FROM t GROUP BY GROUPING SETS ((1), (c), ()) ORDER BY ALL;
+----
+2	42
+2	42
+3	42
+3	42
+4	42
+4	42
+NULL	42
+
+# a plain expression equal to a referenced entry's expression names the entry's group
+query II
+SELECT s AS c, count(*) FROM t GROUP BY GROUPING SETS ((s), (c)) ORDER BY ALL;
+----
+1	1
+1	1
+2	1
+2	1
+3	1
+3	1
+
+query II
+SELECT s AS c, count(*) FROM t GROUP BY GROUPING SETS ((c), (s)) ORDER BY ALL;
+----
+1	1
+1	1
+2	1
+2	1
+3	1
+3	1
+
+query II
+SELECT s + 1 AS c, count(*) FROM t GROUP BY GROUPING SETS ((s + 1), (c)) ORDER BY ALL;
+----
+2	1
+2	1
+3	1
+3	1
+4	1
+4	1
+
+query II
+SELECT s AS c, c + 0 AS d FROM t GROUP BY GROUPING SETS ((1), (s)) ORDER BY ALL;
+----
+1	1
+1	1
+2	2
+2	2
+3	3
+3	3
+
+query II
+SELECT s, s AS c FROM t GROUP BY GROUPING SETS ((s), (c), ()) ORDER BY ALL;
+----
+1	1
+1	1
+2	2
+2	2
+3	3
+3	3
+NULL	NULL
+
+query III
+SELECT s AS c, GROUPING(s) AS gs, GROUPING(c) AS gc FROM t GROUP BY GROUPING SETS ((s), (c), ()) ORDER BY ALL;
+----
+1	0	0
+1	0	0
+2	0	0
+2	0	0
+3	0	0
+3	0	0
+NULL	1	1
+
+query II
+SELECT s, GROUPING(s) FROM t GROUP BY ROLLUP (s, 1) ORDER BY ALL;
+----
+1	0
+1	0
+2	0
+2	0
+3	0
+3	0
+NULL	1
+
+query II
+SELECT s AS c, count(*) FROM t GROUP BY GROUPING SETS ((s), (c), ()) HAVING c >= 2 ORDER BY ALL;
+----
+2	1
+2	1
+3	1
+3	1
+
+# ORDER BY an expression equal to an entry that joined the group of a plain expression
+query II
+SELECT s AS c, count(*) AS n FROM t GROUP BY GROUPING SETS ((s), (c), ()) ORDER BY s DESC NULLS LAST, n;
+----
+3	1
+3	1
+2	1
+2	1
+1	1
+1	1
+NULL	3
+
+# several entries of one group in one set, read by GROUPING
+query IIII
+SELECT s AS c, s + 1 AS d, GROUPING(s, c, d) AS g, count(*) FROM t GROUP BY GROUPING SETS ((s, c), (t.s), (s + 1, 2), (d), ()) ORDER BY ALL;
+----
+1	NULL	1	1
+1	NULL	1	1
+2	NULL	1	1
+2	NULL	1	1
+3	NULL	1	1
+3	NULL	1	1
+NULL	2	6	1
+NULL	2	6	1
+NULL	3	6	1
+NULL	3	6	1
+NULL	4	6	1
+NULL	4	6	1
+NULL	NULL	7	3
+
+# GROUPING() without arguments covers the groups, one per class
+query II
+SELECT s AS c, GROUPING() AS g FROM t GROUP BY ROLLUP (s, c) ORDER BY ALL;
+----
+1	0
+1	0
+2	0
+2	0
+3	0
+3	0
+NULL	1
+
+query II
+SELECT GROUPING() AS g, count(*) FROM t GROUP BY CUBE (s, t.s) ORDER BY ALL;
+----
+0	1
+0	1
+0	1
+0	1
+0	1
+0	1
+0	1
+0	1
+0	1
+1	3
+
+query II
+SELECT s AS c, count(*) FROM t GROUP BY GROUPING SETS ((c), (s)) QUALIFY row_number() OVER (PARTITION BY s ORDER BY c) = 1 ORDER BY ALL;
+----
+1	1
+2	1
+3	1
+
+# a subquery reads the group of the enclosing query
+query II
+SELECT s + 1 AS c, (SELECT (s + 1) * 2) AS e FROM t GROUP BY GROUPING SETS ((1), (s + 1)) ORDER BY ALL;
+----
+2	4
+2	4
+3	6
+3	6
+4	8
+4	8
+
+# an entry holding a subquery and an equal subquery are one group
+query II
+SELECT (SELECT 1) AS c, count(*) FROM t GROUP BY GROUPING SETS ((c), ((SELECT 1))) ORDER BY ALL;
+----
+1	3
+1	3
+
+# a volatile entry and an equal plain expression are one group, as an unreferenced entry reads that group
+query II
+SELECT random() < 2 AS r, count(*) FROM t GROUP BY GROUPING SETS ((r), (random() < 2)) ORDER BY ALL;
+----
+true	3
+true	3
+
+# two plain expressions equal after column qualification are one group
+query II
+SELECT s, count(*) FROM t GROUP BY GROUPING SETS ((s), (t.s)) ORDER BY ALL;
+----
+1	1
+1	1
+2	1
+2	1
+3	1
+3	1
+
+# entries equal to a plain expression all join its group; without one, two entries are two groups
+query II
+SELECT s AS c, s AS d FROM t GROUP BY GROUPING SETS ((s), (c), (d)) ORDER BY ALL;
+----
+1	1
+1	1
+1	1
+2	2
+2	2
+2	2
+3	3
+3	3
+3	3
+
+query II
+SELECT s AS c, s AS d FROM t GROUP BY GROUPING SETS ((c), (d), (s)) ORDER BY ALL;
+----
+1	1
+1	1
+1	1
+2	2
+2	2
+2	2
+3	3
+3	3
+3	3
+
+query II
+SELECT s AS c, s AS d FROM t GROUP BY GROUPING SETS ((c), (d)) ORDER BY ALL;
+----
+1	NULL
+2	NULL
+3	NULL
+NULL	1
+NULL	2
+NULL	3
+
+# a collated column and its alias are one group
+statement ok
+CREATE TABLE v (w VARCHAR COLLATE NOCASE);
+
+statement ok
+INSERT INTO v VALUES ('B'), ('b'), ('a');
+
+query II
+SELECT lower(x), n FROM (SELECT w AS x, count(*) AS n FROM v GROUP BY GROUPING SETS ((w), (x))) ORDER BY ALL;
+----
+a	1
+a	1
+b	2
+b	2
+
+# a plain list with a repeated reference has one group and no constant group
+query III
+SELECT s + 1 AS c, 42 AS k, count(*) FROM t GROUP BY 1, c ORDER BY ALL;
+----
+2	42	1
+3	42	1
+4	42	1
+
+query II
+EXPLAIN SELECT s + 1 AS c, count(*) FROM t GROUP BY 1, c;
+----
+physical_plan	<REGEX>:(?s).*Groups: #0 .*
+
+statement error
+SELECT s FROM t GROUP BY GROUPING SETS ((1), (5));
+----
+GROUP BY term out of range - should be between 1 and 1
+
+# the entries are checked in order, so the out of range position is reported before the ambiguous column
+statement ok
+CREATE TABLE u AS SELECT 1 AS s;
+
+statement error
+SELECT t.s FROM t, u GROUP BY 5, s;
+----
+GROUP BY term out of range - should be between 1 and 1
+
+# subqueries that differ in an inner alias or in GROUP BY ALL are different expressions, never one group
+query I
+SELECT (SELECT x FROM (SELECT 1 AS x, 2 AS y)) AS c GROUP BY (SELECT x FROM (SELECT 1 AS y, 2 AS x)), c;
+----
+1
+
+query I
+SELECT (SELECT x FROM (SELECT 1 AS x, 2 AS y)) AS c GROUP BY (SELECT x FROM (SELECT 1 AS y, 2 AS x));
+----
+1
+
+query II
+SELECT (SELECT x FROM (SELECT 1 AS x, 2 AS y)) AS c, GROUPING(c) AS g GROUP BY GROUPING SETS (((SELECT x FROM (SELECT 1 AS y, 2 AS x))), (c)) ORDER BY ALL;
+----
+1	0
+NULL	1
+
+statement ok
+CREATE TABLE w1 AS SELECT 1 AS s FROM range(2);
+
+statement error
+SELECT (SELECT s FROM w1 HAVING count(*) > 0) AS c GROUP BY (SELECT s FROM w1 GROUP BY ALL HAVING count(*) > 0), c;
+----
+must appear in the GROUP BY clause
+
+# a correlated subquery that differs from the group only in its alias is not that group
+statement error
+SELECT (SELECT s AS a) FROM t GROUP BY (SELECT s AS b);
+----
+must appear in the GROUP BY clause
+
+query I
+SELECT (SELECT s AS a) AS x FROM t GROUP BY (SELECT s AS a) ORDER BY ALL;
+----
+1
+2
+3
+
+# ORDER BY a subquery that differs from a select entry in an inner alias is not that entry
+query I
+SELECT (SELECT x FROM (SELECT s AS x, -s AS y)) AS c FROM t ORDER BY (SELECT x FROM (SELECT s AS y, -s AS x));
+----
+3
+2
+1
+
+# a materialized CTE and its not materialized twin are different subqueries
+statement ok
+CREATE SEQUENCE seq2;
+
+query I
+SELECT (WITH q AS MATERIALIZED (SELECT nextval('seq2') AS v) SELECT a.v = b.v FROM q a, q b) AS c GROUP BY (WITH q AS NOT MATERIALIZED (SELECT nextval('seq2') AS v) SELECT a.v = b.v FROM q a, q b), c;
+----
+true
+
+query II
+SELECT (WITH q AS MATERIALIZED (SELECT nextval('seq2') AS v) SELECT a.v = b.v FROM q a, q b) AS c, GROUPING(c) AS g GROUP BY GROUPING SETS (((WITH q AS NOT MATERIALIZED (SELECT nextval('seq2') AS v) SELECT a.v = b.v FROM q a, q b)), (c)) ORDER BY ALL;
+----
+true	0
+NULL	1

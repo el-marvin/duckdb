@@ -32,6 +32,9 @@ struct SelectBindState {
 	bool has_compound_groups = false;
 	unordered_map<ProjectionIndex, ProjectionIndex> collated_groups;
 	unordered_map<idx_t, ProjectionIndex> grouped_select_entries;
+	//! Select list expressions that joined the group of an equal GROUP BY expression, kept alive because
+	//! projection_map refers to them
+	vector<unique_ptr<ParsedExpression>> replaced_select_expressions;
 
 public:
 	unique_ptr<ParsedExpression> BindAlias(idx_t index);

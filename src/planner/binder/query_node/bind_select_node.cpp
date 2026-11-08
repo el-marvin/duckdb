@@ -603,14 +603,10 @@ BoundStatement Binder::BindSelectNode(SelectNode &statement, BoundStatement from
 		// bind any star expressions in the WHERE clause
 		BindWhereStarExpression(statement.where_clause);
 	}
+	GroupBinder::ReplaceSelectRefs(*this, statement, bind_state);
 	for (idx_t i = 0; i < statement.groups.group_expressions.size(); i++) {
-		auto &grp = statement.groups.group_expressions[i];
-		ExpressionBinder::QualifyColumnNames(*this, grp);
-
-		GroupBinder::ReplaceSelectRef(statement, bind_state, ProjectionIndex(i), grp);
-
 		// set up a mapping of expression -> group index so we can map expressions in the select list / having to groups
-		bind_state.AddGroup(grp->Copy(), ProjectionIndex(i));
+		bind_state.AddGroup(statement.groups.group_expressions[i]->Copy(), ProjectionIndex(i));
 	}
 
 	if (statement.qualify) {
