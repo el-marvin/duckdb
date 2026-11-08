@@ -35,6 +35,9 @@ bool SelectBinder::TryResolveAliasReference(ColumnRefExpression &colref, idx_t d
 		                      "not yet supported.",
 		                      alias_name);
 	}
+	if (TryBindSelectEntryGroup(colref, alias_index, depth, result)) {
+		return true;
+	}
 	auto copied_unbound = node.bind_state.BindAlias(alias_index);
 	result = BindExpression(copied_unbound, depth, false);
 	return true;

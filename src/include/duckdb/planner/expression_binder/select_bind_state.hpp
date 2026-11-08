@@ -31,7 +31,7 @@ struct SelectBindState {
 	//! Whether any group is an expression other than a plain column reference
 	bool has_compound_groups = false;
 	unordered_map<ProjectionIndex, ProjectionIndex> collated_groups;
-	unordered_set<idx_t> used_group_aliases;
+	unordered_map<idx_t, ProjectionIndex> grouped_select_entries;
 
 public:
 	unique_ptr<ParsedExpression> BindAlias(idx_t index);

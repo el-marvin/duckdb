@@ -101,6 +101,12 @@ public:
 		return false;
 	}
 
+	//! Binds a reference to the select list entry at select_index as the group that entry became, if this binder
+	//! reads groups and the entry is one
+	virtual bool TryBindSelectEntryGroup(ParsedExpression &expr, idx_t select_index, idx_t depth, BindResult &result) {
+		return false;
+	}
+
 	virtual bool IsLateralBinder() const {
 		return false;
 	}

@@ -46,6 +46,11 @@ bool ColumnAliasBinder::BindAlias(ExpressionBinder &enclosing_binder, unique_ptr
 		return false;
 	}
 
+	// two entries with equal expressions are two groups, so a grouped entry is not found again by its expression
+	if (enclosing_binder.TryBindSelectEntryGroup(expr, alias_entry->second, depth, result)) {
+		return true;
+	}
+
 	// We found an alias, so we copy the alias expression into this expression.
 	auto original_expr = bind_state.BindAlias(alias_entry->second);
 	expr_ptr = std::move(original_expr);

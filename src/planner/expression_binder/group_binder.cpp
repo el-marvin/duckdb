@@ -45,6 +45,7 @@ void GroupBinder::ReplaceSelectRef(SelectNode &node, SelectBindState &bind_state
                                    unique_ptr<ParsedExpression> &expr_ptr) {
 	auto &expr = *expr_ptr;
 	idx_t select_list_idx;
+	Identifier alias_name;
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::COLUMN_REF: {
 		// root is a column - check if it refers to an alias in the select list
@@ -52,14 +53,13 @@ void GroupBinder::ReplaceSelectRef(SelectNode &node, SelectBindState &bind_state
 		if (!IsPotentialAlias(colref)) {
 			return;
 		}
-		auto &alias_name = colref.GetColumnName();
+		alias_name = colref.GetColumnName();
 		auto entry = bind_state.alias_map.find(alias_name);
 		if (entry == bind_state.alias_map.end()) {
 			// no matching alias found
 			return;
 		}
 		select_list_idx = entry->second;
-		bind_state.group_alias_map[alias_name] = group_index;
 		break;
 	}
 	case ExpressionClass::CONSTANT: {
@@ -84,8 +84,14 @@ void GroupBinder::ReplaceSelectRef(SelectNode &node, SelectBindState &bind_state
 	// it will then instead refer to the group entry
 
 	// check if we already have a reference to this group
-	auto &used_aliases = bind_state.used_group_aliases;
-	if (used_aliases.find(select_list_idx) != used_aliases.end()) {
+	auto &grouped_entries = bind_state.grouped_select_entries;
+	auto grouped_entry = grouped_entries.find(select_list_idx);
+	bool is_repeated = grouped_entry != grouped_entries.end();
+	if (!alias_name.empty()) {
+		// the alias names the group of its entry, not the constant that replaces a repeated reference below
+		bind_state.group_alias_map[alias_name] = is_repeated ? grouped_entry->second : group_index;
+	}
+	if (is_repeated) {
 		// the alias has already been bound to before!
 		// this happens if we group on the same alias twice
 		// e.g. GROUP BY k, k or GROUP BY 1, 1
@@ -102,8 +108,7 @@ void GroupBinder::ReplaceSelectRef(SelectNode &node, SelectBindState &bind_state
 	// now replace the original expression in the select list with a reference to this group
 	bind_state.group_alias_map[Identifier(to_string(select_list_idx))] = group_index;
 	node.select_list[select_list_idx] = make_uniq<ColumnRefExpression>(Identifier(to_string(select_list_idx)));
-	// insert into the set of used aliases
-	used_aliases.insert(select_list_idx);
+	grouped_entries[select_list_idx] = group_index;
 }
 
 bool GroupBinder::TryResolveAliasReference(ColumnRefExpression &colref, idx_t depth, bool root_expression,

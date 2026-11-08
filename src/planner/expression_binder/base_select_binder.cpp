@@ -118,6 +118,21 @@ ProjectionIndex BaseSelectBinder::TryBindGroup(ParsedExpression &expr) {
 	return ProjectionIndex();
 }
 
+bool BaseSelectBinder::TryBindSelectEntryGroup(ParsedExpression &expr, idx_t select_index, idx_t depth,
+                                               BindResult &result) {
+	// inside an aggregate the alias reads the input rows, so it expands to its expression
+	if (inside_aggregate) {
+		return false;
+	}
+	auto &grouped_entries = node.bind_state.grouped_select_entries;
+	auto entry = grouped_entries.find(select_index);
+	if (entry == grouped_entries.end()) {
+		return false;
+	}
+	result = BindGroup(expr, depth, entry->second);
+	return true;
+}
+
 BindResult BaseSelectBinder::BindColumnRef(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth, bool root_expression) {
 	return ExpressionBinder::BindExpression(expr_ptr, depth);
 }

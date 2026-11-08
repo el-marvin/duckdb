@@ -1,0 +1,295 @@
+# name: test/sql/aggregate/group/group_by_select_reference.test
+# description: A GROUP BY reference to a select entry names that entry's group, and its alias reads that group
+# group: [group]
+
+statement ok
+CREATE TABLE t AS SELECT range AS s FROM range(1, 4);
+
+statement ok
+CREATE SEQUENCE q;
+
+# two equal volatile entries are two groups, read by position
+query I
+SELECT count(*) FROM (SELECT s + random() AS r, s + random() AS r2 FROM t GROUP BY 1, 2 HAVING r = r2);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s + random() AS r, s + random() AS r2 FROM t GROUP BY 1, 2 HAVING r <> r2);
+----
+3
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY 1, 2 HAVING b = c);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY 1, 2 HAVING alias.b = alias.c);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY 2, 1 HAVING b = c);
+----
+0
+
+# the same entries grouped by alias, read through alias.b
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY b, c HAVING b = c);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY b, c HAVING alias.b = alias.c);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s + random() AS r, s + random() AS r2 FROM t GROUP BY r, r2 HAVING alias.r = alias.r2);
+----
+0
+
+# a lateral alias in the select list reads the group of its entry
+query I
+SELECT bool_or(e) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, b = c AS e FROM t GROUP BY 1, 2);
+----
+false
+
+query I
+SELECT bool_or(e) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, alias.b = alias.c AS e FROM t GROUP BY 1, 2);
+----
+false
+
+query I
+SELECT bool_or(e) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, alias.b = alias.c AS e FROM t GROUP BY b, c);
+----
+false
+
+query I
+SELECT bool_or(e) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, b = c AS e FROM t GROUP BY b, c);
+----
+false
+
+# ORDER BY over the aliases: b = c is false for every row, so the rows sort by -s
+query I
+SELECT s FROM (SELECT s, s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY 1, 2, 3 ORDER BY CASE WHEN b = c THEN s ELSE -s END LIMIT 1);
+----
+3
+
+query I
+SELECT s FROM (SELECT s, s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY s, b, c ORDER BY CASE WHEN alias.b = alias.c THEN s ELSE -s END LIMIT 1);
+----
+3
+
+# QUALIFY over the aliases
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, row_number() OVER () AS n FROM t GROUP BY 1, 2 QUALIFY b = c);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, row_number() OVER () AS n FROM t GROUP BY b, c QUALIFY alias.b = alias.c);
+----
+0
+
+# a correlated subquery and a lambda body read the groups of the entries
+query I
+SELECT bool_or(e) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, (SELECT b = c) AS e FROM t GROUP BY 1, 2);
+----
+false
+
+query I
+SELECT bool_or(e) FROM (SELECT s + random() AS r, s + random() AS r2, (SELECT alias.r = alias.r2) AS e FROM t GROUP BY 1, 2);
+----
+false
+
+query I
+SELECT bool_or(e) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c, list_transform([0], lambda x: x + b = c)[1] AS e FROM t GROUP BY 1, 2);
+----
+false
+
+# under ROLLUP and CUBE each grouping set reads the group of each entry
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY ROLLUP (1, 2) HAVING b = c);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY ROLLUP (1, 2) HAVING b IS NOT NULL AND c IS NULL);
+----
+3
+
+query I
+SELECT count(*) FROM (SELECT s + random() AS r, s + random() AS r2 FROM t GROUP BY CUBE (1, 2) HAVING r IS NULL AND r2 IS NULL);
+----
+1
+
+# two equal entries that are not volatile are two groups as well, which grouping sets show
+query II
+SELECT s + 1 AS c, s + 1 AS d FROM t GROUP BY GROUPING SETS ((1), (d)) HAVING c IS NULL ORDER BY 2;
+----
+NULL	2
+NULL	3
+NULL	4
+
+query III
+SELECT s + 1 AS c, s + 1 AS d, c IS NULL AS e FROM t GROUP BY GROUPING SETS ((1), (2)) ORDER BY ALL;
+----
+2	NULL	false
+3	NULL	false
+4	NULL	false
+NULL	2	true
+NULL	3	true
+NULL	4	true
+
+# a subquery alias beside the volatile aliases
+query I
+SELECT q FROM (SELECT (SELECT max(s) FROM t) - s AS q, s * 0 + nextval('q') AS b, s * 0 + nextval('q') AS c FROM t GROUP BY 1, 2, 3 HAVING q >= 1 AND b <> c) ORDER BY q;
+----
+1
+2
+
+# a repeated reference to one entry is one group, and the alias reads the entry's group
+query I
+SELECT s + 1 AS c FROM t GROUP BY 1, c HAVING c > 2 ORDER BY 1;
+----
+3
+4
+
+query I
+SELECT s + 1 AS c FROM t GROUP BY c, 1 HAVING c > 2 ORDER BY 1;
+----
+3
+4
+
+query I
+SELECT s + 1 AS c FROM t GROUP BY 1, 1 HAVING c > 2 ORDER BY 1;
+----
+3
+4
+
+query I
+SELECT s + 1 AS c FROM t GROUP BY c, c HAVING c > 2 ORDER BY 1;
+----
+3
+4
+
+query I
+SELECT s + 1 AS c FROM t GROUP BY 1, c HAVING alias.c > 2 ORDER BY 1;
+----
+3
+4
+
+query II
+SELECT s + 1 AS c, s AS d FROM t GROUP BY 1, d, c HAVING c > 2 AND d < 3 ORDER BY 1;
+----
+3	2
+
+query II
+SELECT s + 1 AS c, row_number() OVER (ORDER BY c DESC) AS n FROM t GROUP BY 1, c QUALIFY c > 2 ORDER BY 1;
+----
+3	2
+4	1
+
+query II
+SELECT s + 1 AS c, c * 10 AS e FROM t GROUP BY 1, c ORDER BY 1;
+----
+2	20
+3	30
+4	40
+
+# the same inside a table macro
+statement ok
+CREATE MACRO m(k) AS TABLE SELECT s + k AS c FROM t GROUP BY 1, c HAVING c > k + 1;
+
+query I
+SELECT * FROM m(5) ORDER BY ALL;
+----
+7
+8
+
+# GROUPING of the alias reads the entry's group, not the repeated one
+query II
+SELECT s + 1 AS c, GROUPING(c) AS g FROM t GROUP BY ROLLUP (1, c) ORDER BY ALL;
+----
+2	0
+2	0
+3	0
+3	0
+4	0
+4	0
+NULL	1
+
+query II
+SELECT s + 1 AS c, GROUPING(c) AS g FROM t GROUP BY ROLLUP (c, 1) ORDER BY ALL;
+----
+2	0
+2	0
+3	0
+3	0
+4	0
+4	0
+NULL	1
+
+# a repeated volatile entry is still one group
+query I
+SELECT count(*) FROM (SELECT s * 0 + nextval('q') AS b FROM t GROUP BY 1, b HAVING b = b);
+----
+3
+
+# inside an aggregate the alias still evaluates its expression over the input rows
+query II
+SELECT s + 1 AS c, sum(c) FROM t GROUP BY 1 ORDER BY 1;
+----
+2	2
+3	3
+4	4
+
+query I
+SELECT bool_or(n = b) FROM (SELECT s * 0 + nextval('q') AS b, sum(b) AS n FROM t GROUP BY 1);
+----
+false
+
+# WHERE runs before grouping and expands the alias
+query I
+SELECT s + 1 AS c FROM t WHERE c > 2 GROUP BY 1 ORDER BY 1;
+----
+3
+4
+
+# a correlated subquery in the select list reads the group
+query II
+SELECT s + 1 AS c, (SELECT c) AS d FROM t GROUP BY 1 ORDER BY 1;
+----
+2	2
+3	3
+4	4
+
+# a collated group read through its alias
+statement ok
+CREATE TABLE v (w VARCHAR COLLATE NOCASE);
+
+statement ok
+INSERT INTO v VALUES ('B'), ('b'), ('a');
+
+query II
+SELECT lower(x), n FROM (SELECT w AS x, count(*) AS n FROM v GROUP BY 1 HAVING x = 'b');
+----
+b	2
+
+query II
+SELECT lower(y), n FROM (SELECT w AS x, w AS y, count(*) AS n FROM v GROUP BY GROUPING SETS ((1), (2)) HAVING x IS NULL) ORDER BY ALL;
+----
+a	1
+b	2
+
+# a column named like the alias is still the column
+statement ok
+CREATE TABLE p AS SELECT range AS a, range * 10 AS b FROM range(1, 4);
+
+query I
+SELECT a + 100 AS b FROM p GROUP BY 1, p.b HAVING b > 15 ORDER BY 1;
+----
+102
+103
