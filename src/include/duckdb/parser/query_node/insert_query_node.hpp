@@ -46,6 +46,8 @@ public:
 
 	//! keep track of optional returningList if statement contains a RETURNING keyword
 	vector<unique_ptr<ParsedExpression>> returning_list;
+	//! The RETURNING list was added by the trigger expansion to read back the changed rows, not written by the user
+	bool trigger_generated_returning = false;
 
 	unique_ptr<OnConflictInfo> on_conflict_info;
 	unique_ptr<TableRef> table_ref;

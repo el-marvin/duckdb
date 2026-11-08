@@ -64,6 +64,7 @@ Binder::Binder(ClientContext &context, shared_ptr<Binder> parent_p, BinderType b
 	if (parent) {
 		entry_retriever.Inherit(parent->entry_retriever);
 		inside_subquery = parent->inside_subquery;
+		binds_fired_trigger_body = parent->binds_fired_trigger_body;
 
 		// We have to inherit macro and lambda parameter bindings and from the parent binder, if there is a parent.
 		macro_binding = parent->macro_binding;
@@ -623,13 +624,23 @@ void Binder::BindDeleteIndexColumns(TableCatalogEntry &table, LogicalGet &get, v
 	}
 }
 
-BoundStatement Binder::BindReturning(vector<unique_ptr<ParsedExpression>> returning_list, TableCatalogEntry &table,
-                                     const Identifier &alias, TableIndex update_table_index,
+shared_ptr<Binder> Binder::CreateReturningBinder(bool trigger_generated) {
+	if (trigger_generated) {
+		return Binder::CreateBinder(context);
+	}
+	auto binder = Binder::CreateBinder(context, this);
+	// No outer row is in scope: a write correlated only through its RETURNING list would run once, not once per row.
+	binder->active_binders.clear();
+	return binder;
+}
+
+BoundStatement Binder::BindReturning(vector<unique_ptr<ParsedExpression>> returning_list, bool trigger_generated,
+                                     TableCatalogEntry &table, const Identifier &alias, TableIndex update_table_index,
                                      unique_ptr<LogicalOperator> child_operator, virtual_column_map_t virtual_columns) {
 	vector<LogicalType> types;
 	vector<Identifier> names;
 
-	auto binder = Binder::CreateBinder(context);
+	auto binder = CreateReturningBinder(trigger_generated);
 
 	vector<ColumnIndex> bound_columns;
 	idx_t column_count = 0;

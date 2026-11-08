@@ -160,6 +160,7 @@ unique_ptr<QueryNode> InsertQueryNode::Copy() const {
 	for (auto &expr : returning_list) {
 		result->returning_list.push_back(expr->Copy());
 	}
+	result->trigger_generated_returning = trigger_generated_returning;
 	if (table_ref) {
 		result->table_ref = table_ref->Copy();
 	}

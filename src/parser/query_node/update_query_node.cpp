@@ -77,6 +77,7 @@ unique_ptr<QueryNode> UpdateQueryNode::Copy() const {
 	for (auto &expr : returning_list) {
 		result->returning_list.push_back(expr->Copy());
 	}
+	result->trigger_generated_returning = trigger_generated_returning;
 	result->set_info = set_info->Copy();
 	result->prioritize_table_when_binding = prioritize_table_when_binding;
 	CopyProperties(*result);

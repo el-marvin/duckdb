@@ -454,8 +454,8 @@ BoundStatement Binder::BindNode(MergeQueryNode &node) {
 		// add the merge_action virtual column
 		virtual_column_map_t virtual_columns;
 		virtual_columns.insert(make_pair(VIRTUAL_COLUMN_START, TableColumn("merge_action", LogicalType::VARCHAR)));
-		return BindReturning(std::move(node.returning_list), table, table_alias, merge_table_index,
-		                     std::move(index_as_logicaloperator), std::move(virtual_columns));
+		return BindReturning(std::move(node.returning_list), node.trigger_generated_returning, table, table_alias,
+		                     merge_table_index, std::move(index_as_logicaloperator), std::move(virtual_columns));
 	}
 
 	BoundStatement result;

@@ -32,6 +32,8 @@ public:
 	unique_ptr<TableRef> from_table;
 	//! keep track of optional returningList if statement contains a RETURNING keyword
 	vector<unique_ptr<ParsedExpression>> returning_list;
+	//! The RETURNING list was added by the trigger expansion to read back the changed rows, not written by the user
+	bool trigger_generated_returning = false;
 	//! The SET clause
 	unique_ptr<UpdateSetInfo> set_info;
 	//! bind the same way as ALTER TABLE expressions (table catalog preferred)

@@ -41,6 +41,8 @@ public:
 	map<MergeActionCondition, vector<unique_ptr<MergeIntoAction>>> actions;
 	//! keep track of optional returningList if statement contains a RETURNING keyword
 	vector<unique_ptr<ParsedExpression>> returning_list;
+	//! The RETURNING list was added by the trigger expansion to read back the changed rows, not written by the user
+	bool trigger_generated_returning = false;
 
 public:
 	string ToString() const override;

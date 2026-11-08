@@ -678,6 +678,7 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 
 	// move over extra properties
 	merge_into->node->returning_list = std::move(node.returning_list);
+	merge_into->node->trigger_generated_returning = node.trigger_generated_returning;
 	return merge_into;
 }
 
@@ -795,7 +796,7 @@ BoundStatement Binder::BindNode(InsertQueryNode &node) {
 		insert->table_index = insert_table_index;
 		unique_ptr<LogicalOperator> index_as_logicaloperator = std::move(insert);
 
-		return BindReturning(std::move(node.returning_list), table,
+		return BindReturning(std::move(node.returning_list), node.trigger_generated_returning, table,
 		                     node.table_ref ? node.table_ref->alias : Identifier(), insert_table_index,
 		                     std::move(index_as_logicaloperator));
 	}

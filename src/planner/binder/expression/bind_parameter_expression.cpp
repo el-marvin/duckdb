@@ -10,8 +10,13 @@
 namespace duckdb {
 
 BindResult ExpressionBinder::BindExpression(ParameterExpression &expr, idx_t depth) {
-	auto parameters = binder.GetParameters();
 	auto parameter_id = expr.Identifier();
+	// A stored trigger body names a user variable with $name, never a parameter of the statement that fires it.
+	bool fired_trigger_body = binder.BindsFiredTriggerBody();
+	optional_ptr<BoundParameterMap> parameters;
+	if (!fired_trigger_body) {
+		parameters = binder.GetParameters();
+	}
 
 	if (parameters) {
 		// Check if a parameter value has already been supplied (named params take precedence)
@@ -33,14 +38,22 @@ BindResult ExpressionBinder::BindExpression(ParameterExpression &expr, idx_t dep
 		}
 	}
 	// No explicit parameter value supplied; fall back to a user variable of the same name.
-	if (binder.GetBindingMode() != BindingMode::PREPARE &&
+	if ((fired_trigger_body || binder.GetBindingMode() != BindingMode::PREPARE) &&
 	    PreparedStatement::AllowsUserVariableFallback(parameter_id)) {
 		Value variable_value;
 		if (ClientConfig::GetConfig(context).GetUserVariable(parameter_id, variable_value)) {
+			if (fired_trigger_body) {
+				// A prepared firing statement reads the variable again at each EXECUTE.
+				binder.SetAlwaysRequireRebind();
+			}
 			auto constant = make_uniq<BoundConstantExpression>(variable_value);
 			constant->SetAlias(expr.GetAlias());
 			return BindResult(std::move(constant));
 		}
+	}
+	if (fired_trigger_body) {
+		throw InvalidInputException("Values were not provided for the following parameters: %s",
+		                            parameter_id.GetIdentifierName());
 	}
 	if (!parameters) {
 		throw BinderException("Unexpected prepared parameter. This type of statement can't be prepared!");

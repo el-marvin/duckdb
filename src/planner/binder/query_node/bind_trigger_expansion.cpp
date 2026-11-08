@@ -236,6 +236,19 @@ static vector<unique_ptr<ParsedExpression>> &GetDMLReturningList(QueryNode &node
 	}
 }
 
+static bool &GetDMLTriggerGeneratedReturning(QueryNode &node) {
+	switch (node.type) {
+	case QueryNodeType::INSERT_QUERY_NODE:
+		return node.Cast<InsertQueryNode>().trigger_generated_returning;
+	case QueryNodeType::UPDATE_QUERY_NODE:
+		return node.Cast<UpdateQueryNode>().trigger_generated_returning;
+	case QueryNodeType::DELETE_QUERY_NODE:
+		return node.Cast<DeleteQueryNode>().trigger_generated_returning;
+	default:
+		throw InternalException("GetDMLTriggerGeneratedReturning: unexpected node type");
+	}
+}
+
 static Identifier GetTableAlias(const QueryNode &node, const Identifier &fallback) {
 	switch (node.type) {
 	case QueryNodeType::INSERT_QUERY_NODE: {
@@ -405,6 +418,7 @@ static unique_ptr<SelectNode> BuildTriggerChain(const QueryNode &node, const Tab
 	auto base_node = node.Copy();
 	auto &base_returning = GetDMLReturningList(*base_node);
 	base_returning.push_back(make_uniq<StarExpression>());
+	GetDMLTriggerGeneratedReturning(*base_node) = true;
 	identifier_set_t injected_names;
 	for (auto &vc : injected_virtuals) {
 		base_returning.push_back(make_uniq<ColumnRefExpression>(vc.second));
@@ -484,7 +498,8 @@ BoundStatement Binder::ExpandTriggers(QueryNode &node, TableCatalogEntry &table,
 	// the no-trigger path (rejects aggregates/subqueries/windows, resolves qualified columns, virtual
 	// vs real rowid).  bound_columns is the identity over all logical columns (generated included)
 	// because our RETURNING * child materialises every logical column in order.
-	auto returning_binder_owner = Binder::CreateBinder(context);
+	D_ASSERT(!GetDMLTriggerGeneratedReturning(node));
+	auto returning_binder_owner = CreateReturningBinder(false);
 	vector<Identifier> col_names;
 	vector<LogicalType> col_types;
 	vector<ColumnIndex> bound_columns;
@@ -628,6 +643,7 @@ void Binder::PrepareFiredTriggerBody(const SchemaCatalogEntry &trigger_schema) {
 
 shared_ptr<Binder> Binder::CreateTriggerBodyScope(Binder &parent, const Identifier &transition_source) {
 	auto scope = CreateBinder(parent.context, &parent, BinderType::TRIGGER_BODY_BINDER);
+	scope->binds_fired_trigger_body = true;
 	if (!transition_source.empty()) {
 		scope->trigger_transition_source = BindingAlias(transition_source);
 	}
@@ -649,6 +665,7 @@ BoundStatement Binder::ExpandRowTriggers(QueryNode &node, vector<unique_ptr<Pars
 	D_ASSERT(!triggers.empty());
 	D_ASSERT(returning_list.empty());
 	returning_list.push_back(make_uniq<StarExpression>());
+	GetDMLTriggerGeneratedReturning(node) = true;
 
 	auto uuid_suffix = UUID::ToString(UUID::GenerateRandomUUID());
 	Identifier base_cte_name(TRIGGER_BASE_CTE_PREFIX + uuid_suffix);

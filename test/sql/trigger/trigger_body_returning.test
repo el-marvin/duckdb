@@ -1,0 +1,913 @@
+# name: test/sql/trigger/trigger_body_returning.test
+# description: A RETURNING list binds with the catalog lookups of its statement, in a trigger body too; the RETURNING * the trigger expansion adds records nothing
+# group: [trigger]
+
+require noforcestorage
+
+statement ok
+CREATE MACRO trigger_deps(trg) AS TABLE
+SELECT e.name, d.deptype
+FROM duckdb_dependencies() d
+JOIN duckdb_triggers() t ON t.trigger_oid = d.refobjid
+JOIN (
+	SELECT table_oid AS oid, table_name AS name FROM duckdb_tables()
+	UNION ALL
+	SELECT sequence_oid, sequence_name FROM duckdb_sequences()
+	UNION ALL
+	SELECT type_oid, type_name FROM duckdb_types() WHERE NOT internal
+	UNION ALL
+	SELECT function_oid, function_name FROM duckdb_functions() WHERE NOT internal
+) e ON e.oid = d.objid
+WHERE t.trigger_name = trg
+ORDER BY ALL;
+
+# A statement body's RETURNING list makes the trigger depend on the macro it calls
+statement ok
+CREATE TABLE c(id INTEGER);
+
+statement ok
+CREATE TABLE log(id INTEGER);
+
+statement ok
+CREATE MACRO f(x) AS x + 1;
+
+statement ok
+CREATE TRIGGER sc AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO log VALUES (2) RETURNING f(id);
+
+query II
+FROM trigger_deps('sc');
+----
+c	a
+f	n
+log	n
+
+statement error
+DROP MACRO f;
+----
+trigger "sc" on table "c" depends on macro function "f"
+
+statement ok
+INSERT INTO c VALUES (1);
+
+query I
+FROM log;
+----
+2
+
+statement ok
+DROP TRIGGER sc ON c;
+
+statement ok
+DROP MACRO f;
+
+statement ok
+INSERT INTO c VALUES (2);
+
+query I
+SELECT count(*) FROM c;
+----
+2
+
+# DROP ... CASCADE takes the trigger with the macro
+statement ok
+CREATE MACRO f(x) AS x + 1;
+
+statement ok
+CREATE TRIGGER sc AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO log VALUES (2) RETURNING f(id);
+
+statement ok
+DROP MACRO f CASCADE;
+
+query I
+SELECT count(*) FROM duckdb_triggers() WHERE trigger_name = 'sc';
+----
+0
+
+statement ok
+INSERT INTO c VALUES (3);
+
+query I
+SELECT count(*) FROM log;
+----
+1
+
+# FOR EACH ROW bodies: INSERT with NEW, DELETE with OLD
+statement ok
+CREATE TABLE r(id INTEGER);
+
+statement ok
+CREATE TABLE rlog(id INTEGER);
+
+statement ok
+CREATE MACRO fr(x) AS x * 10;
+
+statement ok
+CREATE MACRO fd(x) AS x * 100;
+
+statement ok
+CREATE TRIGGER ri AFTER INSERT ON r FOR EACH ROW INSERT INTO rlog VALUES (NEW.id) RETURNING fr(id);
+
+statement ok
+CREATE TRIGGER rd AFTER DELETE ON r FOR EACH ROW DELETE FROM rlog WHERE id = OLD.id RETURNING fd(id);
+
+query II
+FROM trigger_deps('ri');
+----
+fr	n
+r	a
+rlog	n
+
+query II
+FROM trigger_deps('rd');
+----
+fd	n
+r	a
+rlog	n
+
+statement error
+DROP MACRO fr;
+----
+trigger "ri" on table "r" depends on macro function "fr"
+
+statement error
+DROP MACRO fd;
+----
+trigger "rd" on table "r" depends on macro function "fd"
+
+statement ok
+INSERT INTO r VALUES (1), (2), (3);
+
+statement ok
+DELETE FROM r WHERE id = 2;
+
+query I
+SELECT id FROM rlog ORDER BY id;
+----
+1
+3
+
+# NEW or OLD stay out of a RETURNING list: a write correlated only there would run once for all firing rows
+statement error
+CREATE TRIGGER rn AFTER INSERT ON r FOR EACH ROW INSERT INTO rlog VALUES (1) RETURNING NEW.id;
+----
+Referenced table "NEW" not found
+
+statement error
+CREATE TRIGGER rn AFTER INSERT ON r FOR EACH ROW INSERT INTO rlog VALUES (NEW.id) RETURNING NEW.id;
+----
+Referenced table "NEW" not found
+
+statement error
+CREATE TRIGGER rn AFTER DELETE ON r FOR EACH ROW INSERT INTO rlog VALUES (OLD.id) RETURNING OLD.id;
+----
+Referenced table "OLD" not found
+
+# A BEFORE body, UPDATE and DELETE bodies, and a function, a user type and a sequence in RETURNING
+statement ok
+CREATE TABLE s1(id INTEGER);
+
+statement ok
+CREATE TABLE s1log(id INTEGER, n INTEGER);
+
+statement ok
+CREATE MACRO fb(x) AS x - 1;
+
+statement ok
+CREATE MACRO fu(x) AS x + 100;
+
+statement ok
+CREATE FUNCTION fdel(x) AS x * 2;
+
+statement ok
+CREATE TYPE mood AS ENUM ('ok', 'bad');
+
+statement ok
+CREATE SEQUENCE sq;
+
+statement ok
+CREATE TRIGGER s1b BEFORE INSERT ON s1 FOR EACH STATEMENT INSERT INTO s1log VALUES (0, 0) RETURNING fb(id);
+
+statement ok
+CREATE TRIGGER s1u AFTER INSERT ON s1 FOR EACH STATEMENT UPDATE s1log SET n = n + 1 RETURNING fu(n), 'ok'::mood;
+
+statement ok
+CREATE TRIGGER s1d AFTER DELETE ON s1 FOR EACH STATEMENT DELETE FROM s1log WHERE n > 5 RETURNING fdel(id), nextval('sq');
+
+query II
+FROM trigger_deps('s1b');
+----
+fb	n
+s1	a
+s1log	n
+
+query II
+FROM trigger_deps('s1u');
+----
+fu	n
+mood	n
+s1	a
+s1log	n
+
+query II
+FROM trigger_deps('s1d');
+----
+fdel	n
+s1	a
+s1log	n
+sq	n
+
+statement error
+DROP TYPE mood;
+----
+trigger "s1u" on table "s1" depends on type "mood"
+
+statement error
+DROP SEQUENCE sq;
+----
+trigger "s1d" on table "s1" depends on sequence "sq"
+
+statement ok
+INSERT INTO s1 VALUES (1);
+
+statement ok
+INSERT INTO s1 VALUES (2);
+
+query II
+SELECT id, n FROM s1log ORDER BY n;
+----
+0	1
+0	2
+
+statement ok
+DELETE FROM s1;
+
+query I
+SELECT count(*) FROM s1log;
+----
+2
+
+# An upsert body binds through the MERGE rewrite and records its RETURNING list too
+statement ok
+CREATE TABLE u(id INTEGER);
+
+statement ok
+CREATE TABLE ukeys(id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE MACRO fv(x) AS x * 3;
+
+statement ok
+CREATE TRIGGER su AFTER INSERT ON u FOR EACH STATEMENT
+	INSERT INTO ukeys SELECT id, 0 FROM u ON CONFLICT DO UPDATE SET v = v + 1 RETURNING fv(v);
+
+query II
+FROM trigger_deps('su');
+----
+fv	n
+u	a
+ukeys	n
+
+statement error
+DROP MACRO fv;
+----
+trigger "su" on table "u" depends on macro function "fv"
+
+statement ok
+INSERT INTO u VALUES (1);
+
+statement ok
+INSERT INTO u VALUES (2);
+
+query II
+SELECT id, v FROM ukeys ORDER BY id;
+----
+1	1
+2	0
+
+# A MERGE INTO body's RETURNING list, merge_action included
+statement ok
+CREATE TABLE m(id INTEGER);
+
+statement ok
+CREATE TABLE mk(id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE MACRO fm(x) AS x + 5;
+
+statement ok
+CREATE TRIGGER sm AFTER INSERT ON m FOR EACH STATEMENT
+	MERGE INTO mk USING (SELECT id FROM m) src ON mk.id = src.id
+	WHEN MATCHED THEN UPDATE SET v = v + 1 WHEN NOT MATCHED THEN INSERT VALUES (src.id, 0)
+	RETURNING merge_action, fm(v);
+
+query II
+FROM trigger_deps('sm');
+----
+fm	n
+m	a
+mk	n
+
+statement error
+DROP MACRO fm;
+----
+trigger "sm" on table "m" depends on macro function "fm"
+
+statement ok
+INSERT INTO m VALUES (1);
+
+statement ok
+INSERT INTO m VALUES (2);
+
+query II
+SELECT id, v FROM mk ORDER BY id;
+----
+1	1
+2	0
+
+# The body's RETURNING resolves bare names in the trigger's schema, whoever fires it
+statement ok
+CREATE SCHEMA sch;
+
+statement ok
+CREATE MACRO sch.only_s() AS 's';
+
+statement ok
+CREATE MACRO main.twice() AS 'main';
+
+statement ok
+CREATE MACRO sch.twice() AS 's';
+
+statement ok
+CREATE SEQUENCE main.bq START 100;
+
+statement ok
+CREATE SEQUENCE sch.bq START 200;
+
+statement ok
+CREATE TABLE sch.t(id INTEGER);
+
+statement ok
+CREATE TABLE sch.t2(id INTEGER);
+
+statement ok
+CREATE TABLE sch.tlog(v VARCHAR);
+
+statement ok
+CREATE TABLE sch.t3(id INTEGER);
+
+statement ok
+CREATE TRIGGER s3 AFTER INSERT ON sch.t3 FOR EACH STATEMENT INSERT INTO sch.tlog VALUES ('t3');
+
+statement ok
+SET search_path = 'sch';
+
+statement ok
+CREATE TRIGGER st AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO tlog VALUES ('a') RETURNING only_s(), twice(), nextval('bq');
+
+statement ok
+CREATE TRIGGER rt AFTER INSERT ON t2 FOR EACH ROW INSERT INTO tlog VALUES (NEW.id::VARCHAR) RETURNING twice(), nextval('bq');
+
+# The written table has a statement trigger, so this list binds in the expansion of the body's own INSERT
+statement ok
+CREATE TRIGGER sx AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO t3 VALUES (3) RETURNING only_s(), twice();
+
+statement ok
+RESET search_path;
+
+query II
+FROM trigger_deps('st');
+----
+bq	n
+only_s	n
+t	a
+tlog	n
+twice	n
+
+query II
+FROM trigger_deps('rt');
+----
+bq	n
+t2	a
+tlog	n
+twice	n
+
+query II
+FROM trigger_deps('sx');
+----
+only_s	n
+t	a
+t3	n
+twice	n
+
+statement ok
+INSERT INTO sch.t VALUES (1);
+
+statement ok
+DROP MACRO main.twice;
+
+statement ok
+DROP SEQUENCE main.bq;
+
+statement error
+DROP MACRO sch.twice;
+----
+depends on macro function "twice"
+
+statement error
+DROP SEQUENCE sch.bq;
+----
+depends on sequence "bq"
+
+statement ok
+INSERT INTO sch.t2 VALUES (1);
+
+statement ok
+SET search_path = 'sch';
+
+statement ok
+INSERT INTO t VALUES (2);
+
+statement ok
+INSERT INTO t2 VALUES (2);
+
+statement ok
+RESET search_path;
+
+query T
+SELECT v FROM sch.tlog ORDER BY v;
+----
+1
+2
+a
+a
+t3
+t3
+
+query I
+SELECT count(*) FROM sch.t3;
+----
+2
+
+# The expansion's RETURNING * over a generated column calling a macro records nothing, in both creation orders
+statement ok
+CREATE MACRO fg(x) AS x * 7;
+
+statement ok
+CREATE TABLE gs(id INTEGER, n INTEGER, g INTEGER GENERATED ALWAYS AS (fg(id)));
+
+statement ok
+CREATE TABLE gk(id INTEGER PRIMARY KEY, n INTEGER, g INTEGER GENERATED ALWAYS AS (fg(id)));
+
+statement ok
+CREATE TABLE gw(id INTEGER);
+
+statement ok
+CREATE TABLE glog(id INTEGER);
+
+statement ok
+CREATE TRIGGER wi_first AFTER INSERT ON gw FOR EACH STATEMENT INSERT INTO gs SELECT id, 0 FROM gw;
+
+statement ok
+CREATE TRIGGER wu_first AFTER DELETE ON gw FOR EACH STATEMENT UPDATE gs SET n = n + 1;
+
+statement ok
+CREATE TRIGGER wk_first AFTER INSERT ON gw FOR EACH STATEMENT INSERT INTO gk SELECT id, 0 FROM gw ON CONFLICT DO UPDATE SET n = n + 1;
+
+statement ok
+CREATE TRIGGER gs_ins AFTER INSERT ON gs FOR EACH STATEMENT INSERT INTO glog VALUES (1);
+
+statement ok
+CREATE TRIGGER gs_upd AFTER UPDATE ON gs FOR EACH STATEMENT INSERT INTO glog VALUES (2);
+
+statement ok
+CREATE TRIGGER gk_ins AFTER INSERT ON gk FOR EACH STATEMENT INSERT INTO glog VALUES (3);
+
+statement ok
+CREATE TRIGGER wi_second AFTER INSERT ON gw FOR EACH STATEMENT INSERT INTO gs SELECT id, 0 FROM gw;
+
+statement ok
+CREATE TRIGGER wu_second AFTER DELETE ON gw FOR EACH STATEMENT UPDATE gs SET n = n + 1;
+
+statement ok
+CREATE TRIGGER wk_second AFTER INSERT ON gw FOR EACH STATEMENT INSERT INTO gk SELECT id, 0 FROM gw ON CONFLICT DO UPDATE SET n = n + 1;
+
+query TTT
+SELECT trigger_name, string_agg(name, ',' ORDER BY name), string_agg(deptype, ',' ORDER BY name)
+FROM (SELECT unnest(['wi_first', 'wi_second', 'wu_first', 'wu_second', 'wk_first', 'wk_second']) AS trigger_name) n,
+	LATERAL (FROM trigger_deps(n.trigger_name))
+GROUP BY ALL
+ORDER BY ALL;
+----
+wi_first	gs,gw	n,a
+wi_second	gs,gw	n,a
+wk_first	gk,gw	n,a
+wk_second	gk,gw	n,a
+wu_first	gs,gw	n,a
+wu_second	gs,gw	n,a
+
+statement ok
+INSERT INTO gw VALUES (1);
+
+statement ok
+DELETE FROM gw;
+
+query III
+SELECT id, n, g FROM gs ORDER BY ALL;
+----
+1	2	7
+1	2	7
+
+query II
+SELECT id, g FROM gk;
+----
+1	7
+
+query II
+SELECT id, count(*) FROM glog GROUP BY id ORDER BY id;
+----
+1	2
+2	2
+3	2
+
+# A writer's own RETURNING * over that generated column is the user's list, in both creation orders
+statement ok
+CREATE TABLE ga(id INTEGER, g INTEGER GENERATED ALWAYS AS (fg(id)));
+
+statement ok
+CREATE TRIGGER wa_first AFTER INSERT ON gw FOR EACH STATEMENT INSERT INTO ga SELECT id FROM gw RETURNING *;
+
+statement ok
+CREATE TRIGGER ga_ins AFTER INSERT ON ga FOR EACH STATEMENT INSERT INTO glog VALUES (4);
+
+statement ok
+CREATE TRIGGER wa_second AFTER INSERT ON gw FOR EACH STATEMENT INSERT INTO ga SELECT id FROM gw RETURNING *;
+
+query II
+FROM trigger_deps('wa_first');
+----
+fg	n
+ga	n
+gw	a
+
+query II
+FROM trigger_deps('wa_second');
+----
+fg	n
+ga	n
+gw	a
+
+statement ok
+INSERT INTO gw VALUES (2);
+
+query II
+SELECT id, g FROM ga ORDER BY ALL;
+----
+2	14
+2	14
+
+# UPDATE and DELETE lists bound in the expansion of a table with statement triggers are the user's too, the
+# generated column read by the DELETE's list included
+statement ok
+CREATE MACRO fx(x) AS x - 1;
+
+statement ok
+CREATE TRIGGER ga_upd AFTER UPDATE ON ga FOR EACH STATEMENT INSERT INTO glog VALUES (5);
+
+statement ok
+CREATE TRIGGER ga_del AFTER DELETE ON ga FOR EACH STATEMENT INSERT INTO glog VALUES (6);
+
+statement ok
+CREATE TRIGGER wa_upd AFTER DELETE ON gw FOR EACH STATEMENT UPDATE ga SET id = id + 1 RETURNING fx(id);
+
+statement ok
+CREATE TRIGGER wa_del AFTER DELETE ON gw FOR EACH STATEMENT DELETE FROM ga WHERE id > 100 RETURNING fx(g);
+
+query II
+FROM trigger_deps('wa_upd');
+----
+fx	n
+ga	n
+gw	a
+
+query II
+FROM trigger_deps('wa_del');
+----
+fg	n
+fx	n
+ga	n
+gw	a
+
+statement ok
+DELETE FROM gw;
+
+query II
+SELECT id, count(*) FROM glog WHERE id >= 5 GROUP BY id ORDER BY id;
+----
+5	1
+6	1
+
+# A temporary entry in a body's RETURNING list is refused, as in the rest of the body
+statement ok
+CREATE TEMP MACRO tmac(x) AS x;
+
+statement error
+CREATE TRIGGER tt AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO log VALUES (1) RETURNING tmac(id);
+----
+Trigger "tt" cannot reference "tmac" from a different catalog ("temp")
+
+statement ok
+ATTACH ':memory:' AS other;
+
+statement ok
+CREATE MACRO other.omac(x) AS x;
+
+statement error
+CREATE TRIGGER tt AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO log VALUES (1) RETURNING other.omac(id);
+----
+Trigger "tt" cannot reference "omac" from a different catalog ("other")
+
+# Outside triggers RETURNING resolves as before, and a prepared statement rebinds instead of recording
+statement ok
+CREATE TABLE p(id INTEGER PRIMARY KEY, v INTEGER);
+
+statement ok
+CREATE MACRO fp(x) AS x + 1000;
+
+query I
+INSERT INTO p VALUES (1, 1) RETURNING fp(v);
+----
+1001
+
+query I
+UPDATE p SET v = 2 RETURNING fp(v);
+----
+1002
+
+query TI
+MERGE INTO p USING (SELECT 2 AS id) src ON p.id = src.id WHEN NOT MATCHED THEN INSERT VALUES (src.id, 3) RETURNING merge_action, fp(v);
+----
+INSERT	1003
+
+query I
+INSERT INTO p VALUES (2, 4) ON CONFLICT DO UPDATE SET v = 4 RETURNING fp(v);
+----
+1004
+
+query I
+DELETE FROM p WHERE id = 2 RETURNING fp(v);
+----
+1004
+
+statement ok
+PREPARE pr AS INSERT INTO p VALUES (5, 5) RETURNING fp(v);
+
+statement ok
+DROP MACRO fp;
+
+statement error
+EXECUTE pr;
+----
+Scalar Function with name fp does not exist
+
+statement ok
+CREATE MACRO fp(x) AS x + 2000;
+
+query I
+EXECUTE pr;
+----
+2005
+
+# A prepared parameter in a RETURNING list binds like one in the rest of the statement
+statement ok
+PREPARE pi AS INSERT INTO p VALUES ($1, 0) RETURNING id + $2;
+
+query I
+EXECUTE pi(6, 10);
+----
+16
+
+statement ok
+PREPARE pu AS UPDATE p SET v = v + 1 WHERE id = $1 RETURNING v * $2;
+
+query I
+EXECUTE pu(6, 7);
+----
+7
+
+statement ok
+PREPARE pd AS DELETE FROM p WHERE id = $1 RETURNING id - $2;
+
+query I
+EXECUTE pd(6, 1);
+----
+5
+
+statement ok
+CREATE TRIGGER pt AFTER INSERT ON p FOR EACH STATEMENT INSERT INTO log VALUES (9);
+
+statement ok
+PREPARE pti AS INSERT INTO p VALUES ($1, 0) RETURNING id * $2;
+
+query I
+EXECUTE pti(7, 3);
+----
+21
+
+query I
+SELECT count(*) FROM log WHERE id = 9;
+----
+1
+
+# What RETURNING registers with its statement is kept: a sequence of another database is a second written database
+statement ok
+CREATE SEQUENCE other.oseq;
+
+statement error
+INSERT INTO p VALUES (8, 0) RETURNING nextval('other.oseq');
+----
+a single transaction can only write to a single attached database
+
+query I
+SELECT count(*) FROM p WHERE id = 8;
+----
+0
+
+statement ok
+INSERT INTO p VALUES (8, 0);
+
+# A prepared RETURNING reads a variable when executed, and a named parameter takes precedence over a variable
+statement ok
+SET VARIABLE rv = 1;
+
+statement ok
+PREPARE pv AS INSERT INTO p VALUES (9, 0) RETURNING getvariable('rv');
+
+statement ok
+SET VARIABLE rv = 2;
+
+query I
+EXECUTE pv;
+----
+2
+
+statement ok
+PREPARE pn AS INSERT INTO p VALUES (10, 0) RETURNING $rv;
+
+query I
+EXECUTE pn(rv := 9);
+----
+9
+
+# A trigger body's $name is the user variable, never a parameter of the statement that fires it
+statement ok
+SET VARIABLE bv = 5;
+
+statement ok
+CREATE TABLE bc(id INTEGER);
+
+statement ok
+CREATE TABLE br(id INTEGER);
+
+statement ok
+CREATE TABLE bl(k VARCHAR, id INTEGER);
+
+statement ok
+CREATE TRIGGER b_val AFTER INSERT ON bc FOR EACH STATEMENT INSERT INTO bl VALUES ('val', $bv);
+
+statement ok
+CREATE TRIGGER b_sub AFTER INSERT ON bc FOR EACH STATEMENT INSERT INTO bl SELECT 'sub', a FROM (SELECT 10 AS a, $bv AS b);
+
+statement ok
+CREATE TRIGGER b_ret AFTER INSERT ON bc FOR EACH STATEMENT INSERT INTO bl VALUES ('ret', 20) RETURNING $bv;
+
+statement ok
+CREATE TRIGGER b_row AFTER INSERT ON br FOR EACH ROW INSERT INTO bl VALUES ('row', NEW.id + $bv);
+
+# A prepared firing statement without parameters reads the variable at EXECUTE
+statement ok
+PREPARE bp AS INSERT INTO bc VALUES (1);
+
+statement ok
+SET VARIABLE bv = 6;
+
+statement ok
+EXECUTE bp;
+
+# A named parameter of the firing statement does not reach the bodies
+statement ok
+PREPARE bq AS INSERT INTO bc VALUES ($bv);
+
+statement ok
+EXECUTE bq(bv := 7);
+
+statement ok
+PREPARE bpr AS INSERT INTO br VALUES ($bv);
+
+statement ok
+EXECUTE bpr(bv := 100);
+
+query TI
+SELECT k, id FROM bl ORDER BY ALL;
+----
+ret	20
+ret	20
+row	106
+sub	10
+sub	10
+val	6
+val	6
+
+query I
+SELECT id FROM bc ORDER BY id;
+----
+1
+7
+
+# The sequence a body names through a variable is the one it depends on, whatever the firing statement passes
+statement ok
+SET VARIABLE sq = 'bs1';
+
+statement ok
+CREATE SEQUENCE bs1;
+
+statement ok
+CREATE SEQUENCE bs2;
+
+statement ok
+CREATE TABLE bn(v VARCHAR);
+
+statement ok
+CREATE TRIGGER b_seq AFTER INSERT ON bn FOR EACH STATEMENT INSERT INTO bl SELECT 'seq', nextval($sq) RETURNING nextval($sq);
+
+query II
+FROM trigger_deps('b_seq');
+----
+bl	n
+bn	a
+bs1	n
+
+statement ok
+PREPARE bnp AS INSERT INTO bn VALUES ($sq);
+
+statement ok
+EXECUTE bnp(sq := 'bs2');
+
+query TI
+SELECT sequence_name, last_value IS NOT NULL FROM duckdb_sequences() WHERE sequence_name IN ('bs1', 'bs2') ORDER BY ALL;
+----
+bs1	true
+bs2	false
+
+query T
+FROM bn;
+----
+bs2
+
+# Without the variable the firing fails as an unprepared one does
+statement ok
+RESET VARIABLE bv;
+
+statement error
+EXECUTE bp;
+----
+Values were not provided for the following parameters: bv
+
+statement error
+INSERT INTO bc VALUES (3);
+----
+Values were not provided for the following parameters: bv
+
+query I
+SELECT count(*) FROM bc;
+----
+2
+
+# The recorded dependencies survive a restart
+load {TEST_DIR}/trigger_body_returning.db
+
+statement ok
+CREATE TABLE c(id INTEGER);
+
+statement ok
+CREATE TABLE log(id INTEGER);
+
+statement ok
+CREATE MACRO f(x) AS x + 1;
+
+statement ok
+CREATE TRIGGER sc AFTER INSERT ON c FOR EACH STATEMENT INSERT INTO log VALUES (2) RETURNING f(id);
+
+restart
+
+statement error
+DROP MACRO f;
+----
+trigger "sc" on table "c" depends on macro function "f"
+
+statement ok
+INSERT INTO c VALUES (1);
+
+query I
+FROM log;
+----
+2

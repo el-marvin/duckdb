@@ -85,6 +85,7 @@ unique_ptr<QueryNode> DeleteQueryNode::Copy() const {
 	for (auto &expr : returning_list) {
 		result->returning_list.push_back(expr->Copy());
 	}
+	result->trigger_generated_returning = trigger_generated_returning;
 	CopyProperties(*result);
 	return std::move(result);
 }
