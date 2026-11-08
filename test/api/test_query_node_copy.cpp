@@ -99,6 +99,7 @@ static shared_ptr<ExternalDependency> TestDependency(const shared_ptr<Dependency
 
 static void SetBaseProperties(TableRef &ref, const shared_ptr<ExternalDependency> &dependency) {
 	ref.alias = Identifier("ref_alias");
+	ref.column_name_alias = {Identifier("first_column"), Identifier("second_column")};
 	ref.query_location = QueryLocation(7, 3);
 	ref.sample = make_uniq<SampleOptions>(42);
 	ref.sample->sample_size = Value::BIGINT(10);
@@ -110,6 +111,7 @@ static void SetBaseProperties(TableRef &ref, const shared_ptr<ExternalDependency
 static void RequireCopiedBaseProperties(const TableRef &original, const TableRef &copy) {
 	REQUIRE(copy.type == original.type);
 	REQUIRE(copy.alias == original.alias);
+	REQUIRE(copy.column_name_alias == original.column_name_alias);
 	REQUIRE(copy.query_location.IsValid());
 	REQUIRE(copy.query_location.offset == original.query_location.offset);
 	REQUIRE(copy.query_location.length == original.query_location.length);

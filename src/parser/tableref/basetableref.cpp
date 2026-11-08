@@ -21,15 +21,13 @@ bool BaseTableRef::Equals(const TableRef &other_p) const {
 		return false;
 	}
 	auto &other = other_p.Cast<BaseTableRef>();
-	return other.GetQualifiedName() == GetQualifiedName() && column_name_alias == other.column_name_alias &&
-	       AtClause::Equals(at_clause.get(), other.at_clause.get());
+	return other.GetQualifiedName() == GetQualifiedName() && AtClause::Equals(at_clause.get(), other.at_clause.get());
 }
 
 unique_ptr<TableRef> BaseTableRef::Copy() {
 	auto copy = make_uniq<BaseTableRef>();
 
 	copy->SetQualifiedName(GetQualifiedName());
-	copy->column_name_alias = column_name_alias;
 	copy->at_clause = at_clause ? at_clause->Copy() : nullptr;
 	CopyProperties(*copy);
 

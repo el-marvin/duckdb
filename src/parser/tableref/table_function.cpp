@@ -19,7 +19,8 @@ bool TableFunctionRef::Equals(const TableRef &other_p) const {
 		return false;
 	}
 	auto &other = other_p.Cast<TableFunctionRef>();
-	return bind_info == other.bind_info && function->Equals(*other.function);
+	return bind_info == other.bind_info && with_ordinality == other.with_ordinality &&
+	       function->Equals(*other.function);
 }
 
 const unique_ptr<ParsedExpression> &TableFunctionRef::SerializableFunction() const {
@@ -34,7 +35,6 @@ unique_ptr<TableRef> TableFunctionRef::Copy() {
 
 	copy->function = function->Copy();
 	copy->bind_info = bind_info;
-	copy->column_name_alias = column_name_alias;
 	copy->with_ordinality = with_ordinality;
 	CopyProperties(*copy);
 

@@ -41,19 +41,9 @@ bool SampleOptions::Equals(SampleOptions *a, SampleOptions *b) {
 	if (!a || !b) {
 		return false;
 	}
-	// if only one is valid, they are not equal
-	if (a->seed.IsValid() != b->seed.IsValid()) {
-		return false;
-	}
-	// if both are invalid, then they are technically the same
-	if (!a->seed.IsValid() && !b->seed.IsValid()) {
-		return true;
-	}
-	if (a->sample_size != b->sample_size || a->is_percentage != b->is_percentage || a->method != b->method ||
-	    a->sample_rate != b->sample_rate || a->seed.GetIndex() != b->seed.GetIndex()) {
-		return false;
-	}
-	return true;
+	return Value::NotDistinctFrom(a->sample_size, b->sample_size) && a->is_percentage == b->is_percentage &&
+	       a->method == b->method && a->sample_rate == b->sample_rate && a->seed == b->seed &&
+	       a->repeatable == b->repeatable;
 }
 
 void SampleOptions::Verify() const {
