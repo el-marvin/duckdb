@@ -67,7 +67,7 @@ static unique_ptr<SetTypesMatcher> GetSmallIntegerTypesMatcher() {
 	return make_uniq<SetTypesMatcher>(std::move(types));
 }
 
-//! AVG(x) -> SUM(x) / COUNT(x)
+//! AVG(x) -> SUM(x) and COUNT(x), divided as the avg aggregate divides them
 class AvgRewriteRule : public AggregateRewriteRule {
 public:
 	AvgRewriteRule(Optimizer &optimizer, LogicalOperator &root)
@@ -159,10 +159,15 @@ public:
 		return count_arg;
 	}
 
-	unique_ptr<Expression> CreateProjectionExpression(const LogicalType &, unique_ptr<Expression> aggr_ref,
+	unique_ptr<Expression> CreateProjectionExpression(const LogicalType &aggr_type, unique_ptr<Expression> aggr_ref,
 	                                                  vector<unique_ptr<Expression>> additional_expressions) override {
-		// SUM(x) / COUNT(x): additional_expressions[0] is the COUNT(x) ref
-		return optimizer.BindScalarFunction("/", std::move(aggr_ref), std::move(additional_expressions[0]));
+		// additional_expressions[0] is the COUNT(x) ref
+		if (aggr_type.id() == LogicalTypeId::DOUBLE) {
+			return optimizer.BindScalarFunction("/", std::move(aggr_ref), std::move(additional_expressions[0]));
+		}
+		// A DOUBLE division would round the exact integer or DECIMAL sum before dividing it
+		return optimizer.BindScalarFunction("__internal_exact_average", std::move(aggr_ref),
+		                                    std::move(additional_expressions[0]));
 	}
 
 private:

@@ -1,0 +1,331 @@
+# name: test/sql/aggregate/aggregates/test_avg_rewrite_exact.test
+# description: An avg planned as sum and count gives the DOUBLE nearest to sum / count, as the avg aggregate does
+# group: [aggregates]
+
+# Results are compared as text, because the test runner accepts a DOUBLE result within a tolerance. The optimizer plans
+# an ungrouped avg, and a grouped avg next to a sum or count it can share, from sum(x) and count(x); a grouped avg on
+# its own keeps the avg aggregate. Both must round the exact quotient once.
+
+statement ok
+SET explain_output = 'optimized_only';
+
+# 0.01 / 17, which a DOUBLE sum divided by a DOUBLE count gives as 0.0005882352941176471
+statement ok
+CREATE TABLE reported AS SELECT 0.01::DECIMAL(15,2) v UNION ALL SELECT 0 FROM range(16);
+
+query I
+SELECT avg(v)::VARCHAR FROM reported
+----
+0.000588235294117647
+
+query I
+SELECT avg(v)::VARCHAR FROM reported GROUP BY 1 = 1
+----
+0.000588235294117647
+
+query II
+SELECT avg(v)::VARCHAR, sum(v) FROM reported GROUP BY 1 = 1
+----
+0.000588235294117647	0.01
+
+query II
+EXPLAIN SELECT avg(v) AS a FROM reported
+----
+logical_opt	<REGEX>:.*__internal_exact_average.*
+
+query II
+EXPLAIN SELECT avg(v) AS a FROM reported
+----
+logical_opt	<!REGEX>:.*avg\(.*
+
+# m - 1/3 with m = (2**53 + 1) * 2**71, just below a DOUBLE midpoint, which a DOUBLE sum rounds up to
+statement ok
+CREATE TABLE midpoint AS
+SELECT unnest([m, m, m - 1]) x FROM (SELECT 21267647932558656327644154399308120064::HUGEINT m);
+
+query III
+SELECT
+	(SELECT avg(x)::VARCHAR FROM midpoint),
+	(SELECT avg(x)::VARCHAR FROM midpoint GROUP BY 1 = 1),
+	(SELECT avg(x)::VARCHAR FROM midpoint GROUP BY 1 = 1 HAVING sum(x) > 0)
+----
+2.1267647932558654e+37	2.1267647932558654e+37	2.1267647932558654e+37
+
+# A sum beyond 2**64, of either sign, divided by 3
+statement ok
+CREATE TABLE wide AS
+SELECT unnest([1267650600232743049243165696766, 0, 0])::HUGEINT x, -x AS y;
+
+query II
+SELECT avg(x)::VARCHAR, avg(y)::VARCHAR FROM wide
+----
+4.22550200077581e+29	-4.22550200077581e+29
+
+query I
+SELECT avg(x)::VARCHAR FROM wide GROUP BY 1 = 1
+----
+4.22550200077581e+29
+
+# Every integer width: rows hi, 1 and 0. Below BIGINT the sum and the count are exact doubles; from BIGINT on
+# 2**53 + 1 is not, and its exact average 3002399751580331 is what the DOUBLE route misses by 0.5.
+statement ok
+CREATE TABLE integers(
+	ti TINYINT, si SMALLINT, i INTEGER, bi BIGINT, hi HUGEINT,
+	uti UTINYINT, usi USMALLINT, ui UINTEGER, ubi UBIGINT, uhi UHUGEINT);
+
+statement ok
+INSERT INTO integers VALUES
+	(127, 32767, 2147483647, 9007199254740992, 9007199254740992,
+	 255, 65535, 4294967295, 9007199254740992, 9007199254740992),
+	(1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+	(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+query IIIIIIIIII
+SELECT avg(ti)::VARCHAR, avg(si)::VARCHAR, avg(i)::VARCHAR, avg(bi)::VARCHAR, avg(hi)::VARCHAR,
+	avg(uti)::VARCHAR, avg(usi)::VARCHAR, avg(ui)::VARCHAR, avg(ubi)::VARCHAR, avg(uhi)::VARCHAR
+FROM integers
+----
+42.666666666666664	10922.666666666666	715827882.6666666	3002399751580331.0	3002399751580331.0	85.33333333333333	21845.333333333332	1431655765.3333333	3002399751580331.0	3002399751580330.5
+
+# Grouped, the avgs of columns without NULLs share one count(*), so they are planned from sum and count too
+query IIIIIIIIII
+SELECT avg(ti)::VARCHAR, avg(si)::VARCHAR, avg(i)::VARCHAR, avg(bi)::VARCHAR, avg(hi)::VARCHAR,
+	avg(uti)::VARCHAR, avg(usi)::VARCHAR, avg(ui)::VARCHAR, avg(ubi)::VARCHAR, avg(uhi)::VARCHAR
+FROM integers GROUP BY 1 = 1
+----
+42.666666666666664	10922.666666666666	715827882.6666666	3002399751580331.0	3002399751580331.0	85.33333333333333	21845.333333333332	1431655765.3333333	3002399751580331.0	3002399751580330.5
+
+# A lone grouped avg keeps the avg aggregate
+query I
+SELECT avg(bi)::VARCHAR FROM integers GROUP BY 1 = 1
+----
+3002399751580331.0
+
+query I
+SELECT avg(hi)::VARCHAR FROM integers GROUP BY 1 = 1
+----
+3002399751580331.0
+
+query II
+EXPLAIN SELECT avg(hi) AS a FROM integers GROUP BY 1 = 1
+----
+logical_opt	<REGEX>:.*avg\(hi\).*
+
+# avg over UHUGEINT is avg over DOUBLE: the DOUBLE sum 2**53 + 1 rounds to 2**53 on both paths
+query II
+EXPLAIN SELECT avg(uhi) AS a FROM integers
+----
+logical_opt	<REGEX>:.*"/".*
+
+query II
+EXPLAIN SELECT avg(uhi) AS a FROM integers
+----
+logical_opt	<!REGEX>:.*__internal_exact_average.*
+
+# avg(x + 1): the sum the avg rule introduces is then rewritten into sum(x) + count(x) * 1
+statement ok
+CREATE TABLE shifted AS SELECT unnest([9007199254740991, 0, -1])::BIGINT x;
+
+query I
+SELECT avg(x + 1)::VARCHAR FROM shifted
+----
+3002399751580331.0
+
+query I
+SELECT avg(x + 1)::VARCHAR FROM shifted GROUP BY 1 = 1
+----
+3002399751580331.0
+
+query II
+EXPLAIN SELECT avg(x + 1) AS a FROM shifted
+----
+logical_opt	<REGEX>:.*__internal_exact_average.*"\+".*"\*".*
+
+# DECIMAL widths: one row of a few units and 24 zero rows, so the average is a few units divided by 25
+statement ok
+CREATE TABLE decimals(
+	d4_1 DECIMAL(4,1), d4_4 DECIMAL(4,4), d9_4 DECIMAL(9,4), d18_2 DECIMAL(18,2), d18_9 DECIMAL(18,9),
+	d38_2 DECIMAL(38,2), d38_10 DECIMAL(38,10), d38_28 DECIMAL(38,28), d38_38 DECIMAL(38,38));
+
+statement ok
+INSERT INTO decimals VALUES
+	(0.7, 0.0003, 0.0003, 0.07, 0.000000001, 0.07, 0.0000000007, 0.0000000000000000000000000001,
+	 0.00000000000000000000000000000000000003);
+
+statement ok
+INSERT INTO decimals SELECT 0, 0, 0, 0, 0, 0, 0, 0, 0 FROM range(24);
+
+query IIIIIIIII
+SELECT avg(d4_1)::VARCHAR, avg(d4_4)::VARCHAR, avg(d9_4)::VARCHAR, avg(d18_2)::VARCHAR, avg(d18_9)::VARCHAR,
+	avg(d38_2)::VARCHAR, avg(d38_10)::VARCHAR, avg(d38_28)::VARCHAR, avg(d38_38)::VARCHAR
+FROM decimals
+----
+0.028	1.2e-05	1.2e-05	0.0028	4e-11	0.0028	2.8e-11	4e-30	1.2e-39
+
+query IIIIIIIII
+SELECT avg(d4_1)::VARCHAR, avg(d4_4)::VARCHAR, avg(d9_4)::VARCHAR, avg(d18_2)::VARCHAR, avg(d18_9)::VARCHAR,
+	avg(d38_2)::VARCHAR, avg(d38_10)::VARCHAR, avg(d38_28)::VARCHAR, avg(d38_38)::VARCHAR
+FROM decimals GROUP BY 1 = 1
+----
+0.028	1.2e-05	1.2e-05	0.0028	4e-11	0.0028	2.8e-11	4e-30	1.2e-39
+
+# With NULLs each avg has a count(x) of its own: ungrouped it is still planned from sum and count, grouped it shares
+# nothing and stays the avg aggregate
+statement ok
+INSERT INTO decimals SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL FROM range(5);
+
+query IIIIIIIIII
+SELECT avg(d4_1)::VARCHAR, avg(d4_4)::VARCHAR, avg(d9_4)::VARCHAR, avg(d18_2)::VARCHAR, avg(d18_9)::VARCHAR,
+	avg(d38_2)::VARCHAR, avg(d38_10)::VARCHAR, avg(d38_28)::VARCHAR, avg(d38_38)::VARCHAR, count(*)
+FROM decimals
+----
+0.028	1.2e-05	1.2e-05	0.0028	4e-11	0.0028	2.8e-11	4e-30	1.2e-39	30
+
+query IIIIIIIII
+SELECT avg(d4_1)::VARCHAR, avg(d4_4)::VARCHAR, avg(d9_4)::VARCHAR, avg(d18_2)::VARCHAR, avg(d18_9)::VARCHAR,
+	avg(d38_2)::VARCHAR, avg(d38_10)::VARCHAR, avg(d38_28)::VARCHAR, avg(d38_38)::VARCHAR
+FROM decimals GROUP BY 1 = 1
+----
+0.028	1.2e-05	1.2e-05	0.0028	4e-11	0.0028	2.8e-11	4e-30	1.2e-39
+
+query II
+EXPLAIN SELECT avg(d4_1) AS a1, avg(d38_38) AS a2 FROM decimals GROUP BY 1 = 1
+----
+logical_opt	<REGEX>:.*avg\(d4_1\).*avg\(d38_38\).*
+
+query II
+EXPLAIN SELECT avg(d4_1) AS a1, avg(d38_38) AS a2, count(*) AS c FROM decimals
+----
+logical_opt	<REGEX>:.*count\(d4_1\).*count\(d38_38\).*
+
+# 2**53 + 1 units in DECIMAL(38, 0), (38, 10) and (38, 20), and 38 digit DECIMAL(38, 38) values
+query III
+SELECT avg(x)::VARCHAR, avg(x::DECIMAL(38,10))::VARCHAR, avg(x::DECIMAL(38,20))::VARCHAR
+FROM (VALUES (9007199254740992::DECIMAL(38,0)), (1), (0)) t(x)
+----
+3002399751580331.0	3002399751580331.0	3002399751580331.0
+
+query I
+SELECT avg(x)::VARCHAR
+FROM (VALUES
+	(0.46653904788695052770238784589311675542::DECIMAL(38,38)),
+	(0.40229373793880192386932909542227067186::DECIMAL(38,38)),
+	(0::DECIMAL(38,38))
+) t(x)
+----
+0.2896109286085842
+
+# Empty and all NULL inputs
+query III
+SELECT avg(d38_2), avg(d4_1), avg(d38_38) FROM decimals WHERE d4_1 > 1
+----
+NULL	NULL	NULL
+
+query II
+SELECT avg(x), avg(y) FROM (VALUES (NULL::HUGEINT, NULL::DECIMAL(38,2))) t(x, y)
+----
+NULL	NULL
+
+# FILTER and window avgs keep the avg aggregate, and agree
+query III
+SELECT avg(v) FILTER (WHERE v IS NOT NULL)::VARCHAR, avg(v)::VARCHAR, avg(v) FILTER (WHERE v >= 0) = avg(v)
+FROM reported
+----
+0.000588235294117647	0.000588235294117647	true
+
+query II
+EXPLAIN SELECT avg(v) FILTER (WHERE v >= 0) AS a FROM reported
+----
+logical_opt	<REGEX>:.*avg\(v\).*
+
+query I
+SELECT DISTINCT (avg(v) OVER ())::VARCHAR FROM reported
+----
+0.000588235294117647
+
+# avg over DOUBLE is still planned as sum / count, with "/" as its finalizer divides
+statement ok
+CREATE TABLE doubles AS SELECT unnest([0.1, 0.2, 0.4])::DOUBLE x;
+
+query I
+SELECT avg(x)::VARCHAR FROM doubles
+----
+0.23333333333333336
+
+query I
+SELECT avg(x)::VARCHAR FROM doubles GROUP BY 1 = 1
+----
+0.23333333333333336
+
+query II
+EXPLAIN SELECT avg(x) AS a FROM doubles
+----
+logical_opt	<REGEX>:.*"/".*
+
+query II
+EXPLAIN SELECT avg(x) AS a FROM doubles
+----
+logical_opt	<!REGEX>:.*__internal_exact_average.*
+
+# A TPC-H Q1 shaped query keeps one sum per argument and one count_star, and averages as the avg aggregate does
+statement ok
+CREATE TABLE lineitem AS
+SELECT (i % 2)::INTEGER flag, (CASE WHEN i < 2 THEN 0.01 ELSE 0 END)::DECIMAL(15,2) qty,
+	(i * 1.37)::DECIMAL(15,2) price
+FROM range(34) t(i);
+
+query IIIIII
+SELECT flag, sum(qty), sum(price), avg(qty)::VARCHAR, avg(price)::VARCHAR, count(*)
+FROM lineitem GROUP BY flag ORDER BY flag
+----
+0	0.01	372.64	0.000588235294117647	21.92	17
+1	0.01	395.93	0.000588235294117647	23.29	17
+
+query II
+SELECT flag, avg(qty)::VARCHAR FROM lineitem GROUP BY flag ORDER BY flag
+----
+0	0.000588235294117647
+1	0.000588235294117647
+
+query II
+SELECT flag, avg(price)::VARCHAR FROM lineitem GROUP BY flag ORDER BY flag
+----
+0	21.92
+1	23.29
+
+query II
+EXPLAIN SELECT flag, sum(qty) AS s1, sum(price) AS s2, avg(qty) AS a1, avg(price) AS a2, count(*) AS c
+FROM lineitem GROUP BY flag
+----
+logical_opt	<!REGEX>:.*avg\(.*
+
+query II
+EXPLAIN SELECT flag, sum(qty) AS s1, sum(price) AS s2, avg(qty) AS a1, avg(price) AS a2, count(*) AS c
+FROM lineitem GROUP BY flag
+----
+logical_opt	<REGEX>:.*__internal_exact_average.*__internal_exact_average.*
+
+query II
+EXPLAIN SELECT flag, sum(qty) AS s1, sum(price) AS s2, avg(qty) AS a1, avg(price) AS a2, count(*) AS c
+FROM lineitem GROUP BY flag
+----
+logical_opt	<!REGEX>:.*(sum|sum_no_overflow)\(qty\).*(sum|sum_no_overflow)\(qty\).*
+
+query II
+EXPLAIN SELECT flag, sum(qty) AS s1, sum(price) AS s2, avg(qty) AS a1, avg(price) AS a2, count(*) AS c
+FROM lineitem GROUP BY flag
+----
+logical_opt	<!REGEX>:.*count.*count.*
+
+# The function the rewrite plans, called directly: a count of 0 averages no rows, a negative count is no count
+query IIIIII
+SELECT __internal_exact_average(1::HUGEINT, 3)::VARCHAR, __internal_exact_average(0.1::DECIMAL(4,1), 3)::VARCHAR,
+	__internal_exact_average(NULL::HUGEINT, 3), __internal_exact_average(1::HUGEINT, NULL),
+	__internal_exact_average(1::HUGEINT, 0), __internal_exact_average(0.01::DECIMAL(38,2), 17)::VARCHAR
+----
+0.3333333333333333	0.03333333333333333	NULL	NULL	NULL	0.000588235294117647
+
+statement error
+SELECT __internal_exact_average(1::HUGEINT, -1)
+----
+the count -1 is negative

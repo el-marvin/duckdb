@@ -31,6 +31,16 @@ struct MeanFun {
 	static constexpr const char *Name = "mean";
 };
 
+struct InternalExactAverageFun {
+	static constexpr const char *Name = "__internal_exact_average";
+	static constexpr const char *Parameters = "sum,count";
+	static constexpr const char *Description = "";
+	static constexpr const char *Example = "";
+	static constexpr const char *Categories = "";
+
+	static ScalarFunctionSet GetFunctions();
+};
+
 struct CorrFun {
 	static constexpr const char *Name = "corr";
 	static constexpr const char *Parameters = "y,x";

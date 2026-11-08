@@ -6,8 +6,11 @@
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/likely.hpp"
+#include "duckdb/common/types/decimal.hpp"
+#include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 
 #include <cmath>
 
@@ -185,6 +188,34 @@ double GetExactAverage(hugeint_t sum, uint64_t count, optional_ptr<FunctionData>
 	quotient.lower |= uint64_t((remainders[0] | remainders[1] | remainders[2]) != 0);
 	const double result = std::ldexp(Uhugeint::Cast<double>(quotient), exponent);
 	return negative ? -result : result;
+}
+
+void ExactAverageFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &bind_data = state.expr.Cast<BoundFunctionExpression>().BindInfo();
+	BinaryExecutor::Execute<hugeint_t, int64_t, double>(
+	    args.data[0], args.data[1], result, args.size(), [&](hugeint_t sum, int64_t count) -> optional<double> {
+		    if (count == 0) {
+			    return nullopt;
+		    }
+		    if (count < 0) {
+			    throw InvalidInputException("%s: the count %lld is negative", InternalExactAverageFun::Name, count);
+		    }
+		    return GetExactAverage(sum, UnsafeNumericCast<uint64_t>(count), bind_data);
+	    });
+}
+
+void ResolveExactDecimalAverageTypes(ResolveScalarFunctionTypesInput &input) {
+	auto &sum_type = input.GetArgumentType(0);
+	uint32_t width, scale;
+	if (!sum_type.GetDecimalProperties(width, scale)) {
+		throw BinderException("%s: cannot average a sum of type %s", InternalExactAverageFun::Name,
+		                      sum_type.ToString());
+	}
+	input.GetBoundFunction().GetArguments()[0] = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, scale);
+}
+
+unique_ptr<FunctionData> BindExactDecimalAverage(BindScalarFunctionInput &input) {
+	return make_uniq<AverageDecimalBindData>(DecimalType::GetScale(input.GetBoundFunction().GetArguments()[0]));
 }
 
 struct IntegerAverageOperation : public BaseSumOperation<AverageSetOperation, RegularAdd> {
@@ -736,6 +767,23 @@ AggregateFunctionSet AvgFun::GetFunctions() {
 	avg.AddFunction(time_ns_avg);
 
 	return avg;
+}
+
+ScalarFunctionSet InternalExactAverageFun::GetFunctions() {
+	ScalarFunctionSet set(InternalExactAverageFun::Name);
+	ScalarFunction hugeint_average({}, LogicalType::DOUBLE, ExactAverageFunction);
+	hugeint_average.GetSignature().AddParameter("sum", LogicalType::HUGEINT).AddParameter("count", LogicalType::BIGINT);
+	hugeint_average.SetFallible();
+	set.AddFunction(hugeint_average);
+
+	ScalarFunction decimal_average({}, LogicalType::DOUBLE, ExactAverageFunction, BindExactDecimalAverage);
+	decimal_average.GetSignature()
+	    .AddParameter("sum", LogicalTypeId::DECIMAL)
+	    .AddParameter("count", LogicalType::BIGINT);
+	decimal_average.SetResolveTypesCallback(ResolveExactDecimalAverageTypes);
+	decimal_average.SetFallible();
+	set.AddFunction(decimal_average);
+	return set;
 }
 
 AggregateFunction FAvgFun::GetFunction() {

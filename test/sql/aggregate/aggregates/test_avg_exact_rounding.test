@@ -3,7 +3,8 @@
 # group: [aggregates]
 
 # Results are compared as text, because the test runner accepts a DOUBLE result within a tolerance. Every avg here is
-# grouped, windowed or finalized from a state, since an ungrouped avg is planned as sum / count.
+# grouped, windowed or finalized from a state, so it reaches the aggregate's finalizer; an ungrouped avg is planned
+# from sum and count (test_avg_rewrite_exact.test).
 
 # 2**126 + 2**73 + 1 is just above a DOUBLE midpoint, so one row averages to the value rounded up, as the cast does
 statement ok

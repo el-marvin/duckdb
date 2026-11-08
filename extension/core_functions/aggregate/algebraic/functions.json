@@ -8,6 +8,13 @@
         "aliases": ["mean"]
     },
     {
+        "name": "__internal_exact_average",
+        "parameters": "sum,count",
+        "description": "",
+        "example": "",
+        "type": "scalar_function_set"
+    },
+    {
         "name": "corr",
         "parameters": "y,x",
         "description": "Returns the correlation coefficient for non-NULL pairs in a group.",

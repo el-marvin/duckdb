@@ -201,12 +201,15 @@ TEST_CASE("Aggregate rewrites keep the definition of the aggregates they introdu
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO integers VALUES (1, 1), (1, NULL), (2, 3)"));
 
 	con.BeginTransaction();
-	// avg(x) is rewritten into sum(x) / count(x)
+	// avg(x) is rewritten into sum(x) and count(x), divided by __internal_exact_average
 	{
 		auto functions = PlanIdentityFunctions(con, "SELECT avg(i) FROM integers");
 		auto &count = RequireIdentityFunction(functions, "count");
 		REQUIRE(count.is_aggregate);
 		REQUIRE(count.return_type == LogicalType::BIGINT);
+		auto &average = RequireIdentityFunction(functions, "__internal_exact_average");
+		REQUIRE(!average.is_aggregate);
+		REQUIRE(average.return_type == LogicalType::DOUBLE);
 		REQUIRE(FindIdentityFunction(functions, "avg").IsValid() == false);
 		// statistics propagation may swap sum for its no-overflow implementation
 		REQUIRE((FindIdentityFunction(functions, "sum").IsValid() ||
