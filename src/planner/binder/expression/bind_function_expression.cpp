@@ -165,11 +165,13 @@ ListReduceRebindResult MaybeRebindListReduceLambda(ClientContext &context, idx_t
 		}
 	}
 
+	// operator== ignores collations, but a collated accumulator changes how the body compares strings
+	const auto &first_bind_accumulator_type = has_initial ? function_child_types[2] : list_child_type;
+	if (accumulator_type.EqualsIncludingCollation(first_bind_accumulator_type)) {
+		return result;
+	}
+
 	if (has_initial) {
-		// operator== ignores collations, but a collated accumulator changes how the body compares strings
-		if (accumulator_type.EqualsIncludingCollation(function_child_types[2])) {
-			return result;
-		}
 		D_ASSERT(lambda_expr_copy);
 		auto rebind_child_types = function_child_types;
 		rebind_child_types[2] = accumulator_type;
@@ -185,7 +187,7 @@ ListReduceRebindResult MaybeRebindListReduceLambda(ClientContext &context, idx_t
 		CastDecimalLambdaToAccumulatorType(context, bind_lambda_result, accumulator_type);
 		result.did_rebind = true;
 		result.capture_child_types = std::move(rebind_child_types);
-	} else if (accumulator_type != list_child_type) {
+	} else {
 		if (!lambda_expr_copy) {
 			throw InternalException("list_reduce lambda copy is missing for rebind");
 		}

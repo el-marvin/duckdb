@@ -253,6 +253,138 @@ SELECT list_reduce(['A'], lambda acc, x: {'a': CASE WHEN acc.a = 'X' THEN 'hit' 
 ----
 {'a': hit}
 
+# without an initial value the accumulator starts as the element type, and the collation the body adds decides too
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase) AS r);
+----
+hit	VARCHAR('nocase')
+
+query II
+SELECT list_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase), list_reduce(['A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase, 'x');
+----
+hit	hit
+
+query I
+SELECT list_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END);
+----
+miss
+
+query I
+SELECT list_reduce(['x', 'A', 'B'], lambda acc, x: CASE WHEN acc = 'HIT' THEN 'again' ELSE 'hit' END COLLATE nocase);
+----
+again
+
+query I
+SELECT list_reduce(['x', 'A'], lambda acc, x: typeof(acc) COLLATE nocase);
+----
+VARCHAR('nocase')
+
+query I
+SELECT list_reduce(['x' COLLATE nocase, 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END);
+----
+hit
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce(['x' COLLATE nocase, 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE noaccent) AS r);
+----
+miss	VARCHAR('noaccent')
+
+query I
+SELECT list_reduce(['A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE noaccent, 'x' COLLATE nocase);
+----
+miss
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([['x'], ['A']], lambda acc, x: [CASE WHEN acc[1] = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase]) AS r);
+----
+[hit]	VARCHAR('nocase')[]
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 'x'}, {'a': 'A'}], lambda acc, x: {'a': CASE WHEN acc.a = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase}) AS r);
+----
+{'a': hit}	STRUCT(a VARCHAR('nocase'))
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 'x'}, {'a': 2, 'b': 'A'}], lambda acc, x: {'a': acc.a + x.a, 'b': CASE WHEN acc.b = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase}) AS r);
+----
+{'a': 3, 'b': hit}	STRUCT(a INTEGER, b VARCHAR('nocase'))
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce([{'a': 1, 'b': 'x'}, {'a': 2, 'b': 'A'}], lambda acc, x: {'a': acc.a + x.a * 0.5::DOUBLE, 'b': CASE WHEN acc.b = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase}) AS r);
+----
+{'a': 2.0, 'b': hit}	STRUCT(a DOUBLE, b VARCHAR('nocase'))
+
+query II
+SELECT list_reduce(['x', 'A'], lambda acc, x, i: CASE WHEN acc = 'X' THEN 'hit' || i ELSE 'miss' END COLLATE nocase), list_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = c THEN 'hit' ELSE 'miss' END COLLATE nocase) FROM (SELECT 'X' AS c);
+----
+hit2	hit
+
+query III
+SELECT reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase), array_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase), list_reduce(['x', 'A']::VARCHAR[2], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase);
+----
+hit	hit	hit
+
+query II
+SELECT l, list_reduce(l, lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase) FROM (VALUES (['x', 'A']), (['y', 'B']), (NULL), (['X'])) t(l) ORDER BY ALL;
+----
+[X]	X
+[x, A]	hit
+[y, B]	miss
+NULL	NULL
+
+statement error
+SELECT list_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = (x COLLATE noaccent) THEN 'hit' ELSE 'miss' END COLLATE nocase);
+----
+Cannot combine types with different collation!
+
+statement error
+SELECT list_reduce(['A'], lambda acc, x: CASE WHEN acc = (x COLLATE noaccent) THEN 'hit' ELSE 'miss' END COLLATE nocase, 'x');
+----
+Cannot combine types with different collation!
+
+statement ok
+CREATE TABLE tc (l VARCHAR('nocase')[]);
+
+statement ok
+INSERT INTO tc VALUES (['x', 'X']), (['x', 'A']);
+
+query II
+SELECT l, list_reduce(l, lambda acc, x: CASE WHEN acc = x THEN 'same' ELSE 'diff' END) FROM tc ORDER BY ALL;
+----
+[x, A]	diff
+[x, X]	same
+
+statement error
+SELECT list_reduce(l, lambda acc, x: CASE WHEN acc = x THEN 'same' ELSE 'diff' END COLLATE noaccent) FROM tc;
+----
+Cannot combine types with different collation!
+
+statement error
+SELECT list_reduce(l, lambda acc, x: CASE WHEN acc = x THEN 'same' ELSE 'diff' END COLLATE noaccent, 'x' COLLATE nocase) FROM tc;
+----
+Cannot combine types with different collation!
+
+query I
+SELECT list_reduce(['x', 'A'], lambda acc, x: CASE WHEN len(list_filter(['X', 'Y'], lambda y: y = acc)) > 0 THEN 'hit' ELSE 'miss' END COLLATE nocase);
+----
+hit
+
+query II
+SELECT r, typeof(r) FROM (SELECT list_reduce(['q', 'r', 's'], lambda o, y: CASE WHEN o = 'HIT' THEN 'again' ELSE list_reduce(['x', 'A'], lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase) END) AS r);
+----
+again	VARCHAR('nocase')
+
+query I
+SELECT list_reduce(['x', 'A'], lambda acc, x: list_reduce(['1', '2'], lambda a2, y: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END) COLLATE nocase);
+----
+hit
+
+query I
+SELECT list_reduce(['a', 'b'], lambda acc1, x1: list_reduce(['a', 'b'], lambda acc2, x2: list_reduce(['a', 'b'], lambda acc3, x3: list_reduce(['a', 'b'], lambda acc4, x4: list_reduce(['a', 'b'], lambda acc5, x5: list_reduce(['a', 'b'], lambda acc6, x6: list_reduce(['a', 'b'], lambda acc7, x7: list_reduce(['x', 'A'], lambda acc8, x8: CASE WHEN acc8 = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase)))))))) AS r
+----
+hit
+
 # nested calls whose inner bodies reference the outer accumulator
 
 query II
@@ -296,3 +428,8 @@ query II
 EXPLAIN SELECT list_reduce(l, lambda acc, x: list_reduce([x], lambda a2, y: a2 + y + acc, 0), 0) FROM t;
 ----
 physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: list_reduce\(list_value\(x\), lambda a2, y: \(\(a2 \+ y\) \+ acc\), CAST\(0 AS INTEGER\), x, acc\), 0\).*
+
+query II
+EXPLAIN SELECT list_reduce(l, lambda acc, x: CASE WHEN acc = 'X' THEN 'hit' ELSE 'miss' END COLLATE nocase) FROM (VALUES (['x', 'A'])) t(l);
+----
+physical_plan	<REGEX>:.*list_reduce\(l, lambda acc, x: CASE  WHEN \(\(lower\(acc\) = lower\('X'\)\)\).*
