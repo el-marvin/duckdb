@@ -5,6 +5,9 @@
 # the scan gives dictionary and FSST vectors only from segments of the default block size
 require block_size 262144
 
+# 25,000 rows carrying strings of up to 100 KB do not fit a 32 bit address space
+require 64bit
+
 # a long string, a non-ASCII one, an inlined one, an empty one and NULL, each repeated over three output chunks
 statement ok
 CREATE TABLE strs AS SELECT * FROM (VALUES (1, repeat('ab', 50000)), (2, repeat('é', 30000)), (3, 'short'), (4, ''), (5, NULL)) t(id, s);
