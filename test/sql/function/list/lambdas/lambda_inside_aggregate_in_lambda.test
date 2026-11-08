@@ -1,0 +1,240 @@
+# name: test/sql/function/list/lambdas/lambda_inside_aggregate_in_lambda.test
+# description: A lambda inside an aggregate or window that sits in a lambda body captures over its own scope
+# group: [lambdas]
+
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES (1, 10, 7), (2, 20, 8), (3, 30, 9)) v(i, s, x);
+
+# a lambda inside a window or an aggregate inside a lambda body
+query II
+SELECT i, list_transform([1], lambda x: first(list_transform([s], lambda y: y + 1)) OVER (ORDER BY i)) FROM t ORDER BY i;
+----
+1	[[11]]
+2	[[11]]
+3	[[11]]
+
+query I
+SELECT list_transform([1], lambda x: first(list_transform([s], lambda y: y + 1) ORDER BY i)) FROM t;
+----
+[[11]]
+
+query I
+SELECT list_transform([1], lambda e: count(list_transform([1], lambda x: 1))) FROM range(2);
+----
+[2]
+
+query II
+SELECT i, list_transform([1], lambda x: max(list_transform([s], lambda y: y + 1)) OVER ()) FROM t ORDER BY i;
+----
+1	[[31]]
+2	[[31]]
+3	[[31]]
+
+# an inner lambda without captures
+query I
+SELECT list_transform([1], lambda x: max(list_transform([1], lambda y: y + 1))) FROM t;
+----
+[[2]]
+
+# the outer parameter next to the aggregate, and NULL elements of the outer list
+query I
+SELECT list_transform([1, 2], lambda x: x + sum(len(list_transform([s, s], lambda y: y + s)))) FROM t;
+----
+[7, 8]
+
+query I
+SELECT list_transform([1, NULL], lambda x: x + sum(len(list_filter([s, NULL], lambda y: y IS NOT NULL)))) FROM t;
+----
+[4, NULL]
+
+query I
+SELECT list_transform(NULL::INTEGER[], lambda x: x + sum(len(list_transform([s], lambda y: y + s)))) FROM t;
+----
+NULL
+
+# nested lambdas two deep around the aggregate, and nested lambdas inside it
+query I
+SELECT list_transform([1], lambda a: list_transform([2, 3], lambda b: a + b + count(list_transform([s], lambda c: c + s)))) FROM t;
+----
+[[6, 7]]
+
+query I
+SELECT list_transform([1], lambda a: sum(len(list_transform([[s]], lambda b: list_transform(b, lambda c: c + len(b) + s))))) FROM t;
+----
+[3]
+
+query I
+SELECT list_transform([[1]], lambda a: list_transform(a, lambda b: b + sum(list_sum(list_transform([s], lambda c: list_sum(list_transform([c, i], lambda d: d + c + s))))))) FROM t;
+----
+[[307]]
+
+query I
+SELECT list_transform([1], lambda x: x + sum(list_reduce([s, i], lambda a, b: a + b + s))) FROM t;
+----
+[127]
+
+query I
+SELECT [x + count(list_transform([s], lambda y: y)) FOR x IN [1, 2]] FROM t;
+----
+[4, 5]
+
+# the other clauses of an aggregate and of a window
+query I
+SELECT list_transform([1], lambda x: x + count(*) FILTER (WHERE list_contains(list_transform([s], lambda y: y + i), 22))) FROM t;
+----
+[2]
+
+query I
+SELECT list_transform([1], lambda x: x + first(s ORDER BY list_transform([s], lambda y: -y))) FROM t;
+----
+[31]
+
+query II
+SELECT i, list_transform([1], lambda x: x + row_number() OVER (ORDER BY list_transform([s], lambda y: -y))) FROM t ORDER BY i;
+----
+1	[4]
+2	[3]
+3	[2]
+
+query II
+SELECT i, list_transform([1], lambda x: x + count(*) OVER (PARTITION BY list_transform([i % 2], lambda y: y + s - s))) FROM t ORDER BY i;
+----
+1	[3]
+2	[2]
+3	[3]
+
+# an aggregate inside a window inside a lambda body, with a lambda inside the aggregate
+query II
+SELECT i, list_transform([1], lambda x: x + first(sum(len(list_transform([s], lambda y: y + s)))) OVER ()) FROM t GROUP BY i ORDER BY i;
+----
+1	[2]
+2	[2]
+3	[2]
+
+# closed lambdas with two parameters
+query I
+SELECT list_reduce([1, 2], lambda acc, e: acc + e + sum(len(list_transform([s], lambda y: y + s)))) FROM t;
+----
+6
+
+query I
+SELECT list_transform([5, 6], lambda e, idx: e * 100 + idx * 10 + sum(list_sum(list_transform([s], lambda y: y // 10 + s - s)))) FROM t;
+----
+[516, 626]
+
+# an aggregate inside a lambda inside a window inside a lambda body: the two boundaries close different bindings
+query II
+SELECT i, list_transform([1], lambda a: a + list_sum(first(list_transform([1], lambda b: b + sum(list_sum(list_transform([s], lambda c: c + s))))) OVER (ORDER BY i))) FROM t GROUP BY i ORDER BY i;
+----
+1	[22]
+2	[22]
+3	[22]
+
+# a window inside a lambda inside a window is a nested window
+statement error
+SELECT first(list_transform([1], lambda y: y + first(s) OVER ())) OVER () FROM t;
+----
+window function calls cannot be nested
+
+# an inner lambda that references the outer parameter inside the aggregate or window is a binder error
+statement error
+SELECT list_transform([1], lambda x: first(list_transform([s], lambda y: y + x))) FROM t;
+----
+aggregate functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: first(list_transform([s], lambda y: y + x)) OVER ()) FROM t;
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda a: list_transform([2], lambda b: count(list_transform([s], lambda c: c + a)))) FROM t;
+----
+aggregate functions cannot reference lambda parameters
+
+# the clauses that bind with the aggregates of the query
+query I
+SELECT i FROM t GROUP BY i HAVING list_transform([1], lambda x: x + sum(len(list_transform([s], lambda y: y + s))))[1] = 2 ORDER BY i;
+----
+1
+2
+3
+
+query I
+SELECT i FROM t QUALIFY list_transform([1], lambda x: x + max(len(list_transform([s], lambda y: y + s))) OVER ())[1] = 2 ORDER BY i;
+----
+1
+2
+3
+
+# a macro whose body holds the shape
+statement ok
+CREATE MACRO add_count(l, c) AS list_transform(l, lambda x: x + sum(len(list_transform([c], lambda y: y + c))));
+
+query I
+SELECT add_count([1], s) FROM t;
+----
+[4]
+
+# MATCH_RECOGNIZE: a DEFINE aggregate or navigation is computed over the rows of the match
+statement error
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: sum(v) > 0)));
+----
+aggregate functions cannot reference lambda parameters
+
+statement error
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: count(v) > 0)));
+----
+aggregate functions cannot reference lambda parameters
+
+statement error
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: FIRST(v) > 0)));
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: LAST(s + v) > 0)));
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: PREV(v) IS NULL)));
+----
+window functions cannot reference lambda parameters
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: v + sum(s) > 0)));
+----
+3
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS sum(s) < 40);
+----
+1
+2
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: v + sum(len(list_transform([s], lambda y: y + s))) < 4)));
+----
+1
+2
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: LAST(list_sum(list_transform([s], lambda y: y + s))) = 20 * v)));
+----
+1
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS c PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], lambda v: coalesce(PREV(list_sum(list_transform([s], lambda y: y + s))), 0) < 30 * v)));
+----
+2
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES list_transform([1], lambda v: v + sum(len(list_transform([s], lambda y: y + s)))) AS c PATTERN (A+) DEFINE A AS true);
+----
+[4]
+
+query I rowsort
+SELECT * FROM t MATCH_RECOGNIZE (ORDER BY i MEASURES list_transform([1], lambda v: v + LAST(list_sum(list_transform([s], lambda y: y + s)))) AS c PATTERN (A+) DEFINE A AS true);
+----
+[61]

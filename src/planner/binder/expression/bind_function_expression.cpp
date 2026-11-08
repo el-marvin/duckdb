@@ -592,7 +592,7 @@ BindResult ExpressionBinder::BindLambdaFunction(FunctionExpression &function, Sc
 	if (lambda_bindings) {
 		idx_t offset = 0;
 
-		for (idx_t i = lambda_bindings->size(); i > 0; i--) {
+		for (idx_t i = lambda_bindings->size(); i > inaccessible_lambda_binding_count; i--) {
 			auto &binding = (*lambda_bindings)[i - 1];
 			auto &column_names = binding.GetColumnNames();
 			auto &column_types = binding.GetColumnTypes();

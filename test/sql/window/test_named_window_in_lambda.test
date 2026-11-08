@@ -1,0 +1,72 @@
+# name: test/sql/window/test_named_window_in_lambda.test
+# description: A named window used inside a lambda body: its expressions are copied into the window at parse time
+# group: [window]
+
+statement ok
+CREATE TABLE t AS SELECT * FROM (VALUES (1, 10, 7), (2, 20, 8), (3, 30, 9)) v(i, s, x);
+
+# the copied ORDER BY and PARTITION BY bind in the lambda body, where the parameter x hides the column x
+statement error
+SELECT list_transform([1], lambda x: first(x) OVER w) FROM t WINDOW w AS (ORDER BY x);
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: first(s) OVER w) FROM t WINDOW w AS (ORDER BY x);
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: count(*) OVER w) FROM t WINDOW w AS (PARTITION BY x);
+----
+window functions cannot reference lambda parameters
+
+statement error
+SELECT list_transform([1], lambda x: first(s) OVER (w ORDER BY x)) FROM t WINDOW w AS (PARTITION BY i);
+----
+window functions cannot reference lambda parameters
+
+# the qualified column is the table's
+query II
+SELECT i, list_transform([1], lambda x: first(s) OVER w) FROM t WINDOW w AS (ORDER BY t.x DESC) ORDER BY i;
+----
+1	[30]
+2	[30]
+3	[30]
+
+query II
+SELECT i, list_transform([1], lambda x: x + count(*) OVER w) FROM t WINDOW w AS (PARTITION BY t.x % 2) ORDER BY i;
+----
+1	[3]
+2	[2]
+3	[3]
+
+query II
+SELECT i, list_transform([1], lambda x: first(s) OVER (w ORDER BY t.x DESC)) FROM t WINDOW w AS (PARTITION BY i % 2) ORDER BY i;
+----
+1	[30]
+2	[20]
+3	[30]
+
+# a parameter with another name leaves the column in scope
+query II
+SELECT i, list_transform([1], lambda y: first(s) OVER w) FROM t WINDOW w AS (ORDER BY x DESC) ORDER BY i;
+----
+1	[30]
+2	[30]
+3	[30]
+
+query II
+SELECT i, list_transform([1, 2], lambda y: y * row_number() OVER w) FROM t WINDOW w AS (ORDER BY x) ORDER BY i;
+----
+1	[1, 2]
+2	[2, 4]
+3	[3, 6]
+
+# outside a lambda body the named window is unchanged
+query II
+SELECT i, first(s) OVER w FROM t WINDOW w AS (ORDER BY x DESC) ORDER BY i;
+----
+1	30
+2	30
+3	30

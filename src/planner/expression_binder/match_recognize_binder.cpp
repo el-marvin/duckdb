@@ -630,6 +630,7 @@ BindResult MatchRecognizeDefineBinder::BindAggregate(FunctionExpression &expr, A
 	const MatchRecognizeIsSymbol is_symbol = [&](const string &name) {
 		return symbols.count(name) > 0;
 	};
+	InaccessibleLambdaBindings inaccessible_lambdas(*this, "aggregate functions");
 	unique_ptr<ParsedExpression> inner;
 	if (!arguments.empty()) {
 		MatchRecognizeRejectNavigationInAggregate(arguments[0].GetExpression(), function_name);
@@ -791,6 +792,7 @@ BindResult MatchRecognizeDefineBinder::BindNavigated(unique_ptr<ParsedExpression
 	if (step != 0) {
 		throw InternalException("MATCH_RECOGNIZE stepped a navigation that is not over CLASSIFIER()");
 	}
+	InaccessibleLambdaBindings inaccessible_lambdas(*this, "window functions");
 	BindResult bound;
 	{
 		const ScopedScope navigated(scope, MatchRecognizeScope::NAVIGATED);
