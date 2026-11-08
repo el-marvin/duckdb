@@ -7,6 +7,7 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/parser/common_table_expression_info.hpp"
 #include "duckdb/parser/result_modifier.hpp"
+#include "duckdb/parser/expression_util.hpp"
 namespace duckdb {
 
 CommonTableExpressionMap::CommonTableExpressionMap() {
@@ -137,25 +138,30 @@ bool QueryNode::Equals(const QueryNode *other) const {
 		return false;
 	}
 
+	// a CTE body sees only the CTEs defined before it, so the definition order is part of the query
+	auto other_entry = other->cte_map.map.begin();
 	for (auto &entry : cte_map.map) {
-		auto other_entry = other->cte_map.map.find(entry.first);
-		if (other_entry == other->cte_map.map.end()) {
+		auto &cte = *entry.second;
+		auto &other_cte = *other_entry->second;
+		if (entry.first != other_entry->first) {
 			return false;
 		}
-
-		if (entry.second->aliases != other->cte_map.map.at(entry.first)->aliases) {
+		if (cte.aliases != other_cte.aliases) {
 			return false;
 		}
-		if (!ParsedExpression::ListEquals(entry.second->key_targets, other_entry->second->key_targets)) {
+		if (!ExpressionUtil::ListEqualsWithAliases(cte.key_targets, other_cte.key_targets)) {
 			return false;
 		}
-		if (!ParsedExpression::ListEquals(entry.second->payload_aggregates, other_entry->second->payload_aggregates)) {
+		if (!ParsedExpression::ListEquals(cte.payload_aggregates, other_cte.payload_aggregates)) {
 			return false;
 		}
-		if (!entry.second->query_node ||
-		    !entry.second->query_node->Equals(other->cte_map.map.at(entry.first)->query_node.get())) {
+		if (cte.materialized != other_cte.materialized) {
 			return false;
 		}
+		if (!cte.query_node || !cte.query_node->Equals(other_cte.query_node.get())) {
+			return false;
+		}
+		++other_entry;
 	}
 	return true;
 }

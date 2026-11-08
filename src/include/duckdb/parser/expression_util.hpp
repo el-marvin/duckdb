@@ -21,6 +21,9 @@ public:
 	static bool ListEquals(const vector<unique_ptr<ParsedExpression>> &a,
 	                       const vector<unique_ptr<ParsedExpression>> &b);
 	static bool ListEquals(const vector<unique_ptr<Expression>> &a, const vector<unique_ptr<Expression>> &b);
+	//! ListEqualsWithAliases: check if a list of two expressions is equal, aliases included (order is important)
+	static bool ListEqualsWithAliases(const vector<unique_ptr<ParsedExpression>> &a,
+	                                  const vector<unique_ptr<ParsedExpression>> &b);
 	//! SetEquals: check if two sets of expressions are equal (order is not important)
 	static bool SetEquals(const vector<unique_ptr<ParsedExpression>> &a, const vector<unique_ptr<ParsedExpression>> &b);
 	static bool SetEquals(const vector<unique_ptr<Expression>> &a, const vector<unique_ptr<Expression>> &b);
