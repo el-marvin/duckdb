@@ -89,6 +89,7 @@ void CatalogEntryRetriever::Inherit(const CatalogEntryRetriever &parent) {
 	this->callback = parent.callback;
 	this->search_path = parent.search_path;
 	this->at_clause = parent.at_clause;
+	this->pending_entry = parent.pending_entry;
 }
 
 const CatalogSearchPath &CatalogEntryRetriever::GetSearchPath() const {
@@ -133,6 +134,40 @@ optional_ptr<BoundAtClause> CatalogEntryRetriever::GetAtClause() const {
 
 void CatalogEntryRetriever::SetAtClause(optional_ptr<BoundAtClause> at_clause_p) {
 	at_clause = at_clause_p;
+}
+
+optional_ptr<PendingCatalogEntry> CatalogEntryRetriever::GetPendingEntry() const {
+	return pending_entry;
+}
+
+void CatalogEntryRetriever::SetPendingEntry(optional_ptr<PendingCatalogEntry> pending_entry_p) {
+	pending_entry = pending_entry_p;
+}
+
+//! Scalar, aggregate and window functions and scalar macros share one name space in a schema
+static CatalogType NameSpaceOf(CatalogType type) {
+	switch (type) {
+	case CatalogType::SCALAR_FUNCTION_ENTRY:
+	case CatalogType::AGGREGATE_FUNCTION_ENTRY:
+	case CatalogType::WINDOW_FUNCTION_ENTRY:
+	case CatalogType::MACRO_ENTRY:
+		return CatalogType::SCALAR_FUNCTION_ENTRY;
+	default:
+		return type;
+	}
+}
+
+void CatalogEntryRetriever::FindPendingEntry(const EntryLookupInfo &lookup_info, CatalogEntryLookup &result) {
+	if (!pending_entry || result.schema.get() != &pending_entry->schema ||
+	    lookup_info.GetEntryIdentifier() != pending_entry->name ||
+	    NameSpaceOf(lookup_info.GetCatalogType()) != NameSpaceOf(pending_entry->type)) {
+		return;
+	}
+	pending_entry->reached = true;
+	if (pending_entry->entry) {
+		result.entry = pending_entry->entry;
+		result.error = ErrorData();
+	}
 }
 
 void CatalogEntryRetriever::SetCallback(catalog_entry_callback_t callback) {

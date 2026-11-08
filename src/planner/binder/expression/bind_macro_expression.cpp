@@ -197,6 +197,8 @@ MacroFunction &ExpressionBinder::UnfoldMacroExpression(FunctionExpression &funct
 	// qualify only the macro parameters with a new empty binder that only knows the macro binding
 	auto dummy_binder = Binder::CreateBinder(context);
 	dummy_binder->macro_binding = new_macro_binding.get();
+	// a dot call such as s.m(x) is rewritten unless s.m resolves, which a macro being created can decide
+	dummy_binder->entry_retriever.SetPendingEntry(binder.entry_retriever.GetPendingEntry());
 	ExpressionBinder::QualifyColumnNames(*dummy_binder, expr);
 
 	// now replace the parameters
@@ -213,6 +215,12 @@ BindResult ExpressionBinder::BindMacro(FunctionExpression &function, ScalarMacro
 
 	// unfold the macro expression
 	auto &member = UnfoldMacroExpression(function, macro_func, expr, depth);
+	auto pending = binder.entry_retriever.GetPendingEntry();
+	if (pending && &member == pending->bound_member.get()) {
+		// unfolding replaced the call expression, so the error carries no location
+		pending->bound_member_expanded = true;
+		throw BinderException("Macro \"%s\" expands itself", macro_func.name.GetIdentifierName());
+	}
 
 	// bind the unfolded macro
 	auto result = BindExpression(expr, depth);

@@ -53,6 +53,8 @@ BoundStatement Binder::BindNode(RecursiveCTENode &statement) {
 
 	// Create temporary binder to bind expressions
 	auto aggregate_binder = Binder::CreateBinder(context, nullptr);
+	// a macro being created must be visible to the aggregates, which may call it
+	aggregate_binder->entry_retriever.SetPendingEntry(entry_retriever.GetPendingEntry());
 	FunctionBinder function_binder(*aggregate_binder);
 	aggregate_binder->bind_context.AddGenericBinding(setop_index, statement.ctename, result.names, result.types);
 	ExpressionBinder expression_binder(*aggregate_binder, context);

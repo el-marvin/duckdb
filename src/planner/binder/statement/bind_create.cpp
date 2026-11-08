@@ -2,6 +2,8 @@
 #include "duckdb/catalog/catalog_entry/trigger_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/macro_catalog_entry.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/catalog/catalog_search_path.hpp"
 #include "duckdb/catalog/duck_catalog.hpp"
@@ -424,6 +426,44 @@ void Binder::CheckMacroStorageVersion(Catalog &catalog, const CreateMacroInfo &i
 	}
 }
 
+namespace {
+
+//! The scalar macro a CREATE MACRO stores, when it stores one
+unique_ptr<PendingCatalogEntry> StoredMacroLookup(ClientContext &context, CreateInfo &info) {
+	if (info.type != CatalogType::MACRO_ENTRY) {
+		return nullptr;
+	}
+	auto &path = info.GetQualifiedName().Path();
+	vector<Identifier> schema_path(path.begin() + 1, path.end() - 1);
+	auto schema = Catalog::GetSchema(context, path.front(), schema_path, OnEntryNotFound::RETURN_NULL);
+	if (!schema) {
+		return nullptr;
+	}
+	auto &name = info.GetQualifiedName().Name();
+	if (info.on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT) {
+		EntryLookupInfo existing_lookup(CatalogType::MACRO_ENTRY, QualifiedName(name));
+		if (schema->LookupEntry(schema->GetCatalogTransaction(context), existing_lookup)) {
+			return nullptr;
+		}
+	}
+	return make_uniq<PendingCatalogEntry>(*schema, name, CatalogType::MACRO_ENTRY);
+}
+
+struct PendingEntryScope {
+	PendingEntryScope(CatalogEntryRetriever &retriever, optional_ptr<PendingCatalogEntry> pending)
+	    : retriever(retriever), previous(retriever.GetPendingEntry()) {
+		retriever.SetPendingEntry(pending);
+	}
+	~PendingEntryScope() {
+		retriever.SetPendingEntry(previous);
+	}
+
+	CatalogEntryRetriever &retriever;
+	optional_ptr<PendingCatalogEntry> previous;
+};
+
+} // namespace
+
 SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 	//! Set to identify exact matches in macro overloads
 	struct VectorOfLogicalTypeHash {
@@ -456,6 +496,9 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 	// Bind the catalog/schema
 	SearchSchema(info);
 	auto &catalog = Catalog::GetCatalog(context, info.GetQualifiedName().Catalog());
+	auto stored_macro = StoredMacroLookup(context, info);
+	PendingEntryScope stored_macro_scope(entry_retriever, stored_macro.get());
+	vector<idx_t> members_reaching_name;
 
 	// Figure out if we can store typed macro parameters
 	auto &attached = catalog.GetAttached();
@@ -637,9 +680,68 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 		if (error.HasError() && error.Type() != ExceptionType::PARAMETER_NOT_RESOLVED) {
 			error.Throw();
 		}
+		if (stored_macro && stored_macro->reached) {
+			members_reaching_name.push_back(NumericCast<idx_t>(&function - base.macros.data()));
+			stored_macro->reached = false;
+		}
+	}
+	// only a member whose body reaches the macro's own name can expand itself once the macro is stored
+	if (!members_reaching_name.empty()) {
+		CheckMacroExpansionCycle(base, stored_macro->schema, members_reaching_name);
 	}
 
 	return BindCreateSchema(info);
+}
+
+void Binder::CheckMacroExpansionCycle(const CreateMacroInfo &info, SchemaCatalogEntry &schema,
+                                      const vector<idx_t> &members) {
+	auto stored_info = info.Copy();
+	auto stored = MacroCatalogEntry::Create(schema.ParentCatalog(), schema, stored_info->Cast<CreateMacroInfo>());
+	PendingCatalogEntry stored_lookup(schema, stored->name, CatalogType::MACRO_ENTRY);
+	stored_lookup.entry = stored.get();
+	auto check_binder = CreateBinder(context, this);
+	check_binder->SetCatalogLookupCallback(nullptr);
+	check_binder->entry_retriever.SetPendingEntry(&stored_lookup);
+	for (auto member_idx : members) {
+		auto &member = stored->macros[member_idx];
+		vector<LogicalType> types;
+		vector<Identifier> names;
+		for (idx_t param_idx = 0; param_idx < member->parameters.size(); param_idx++) {
+			types.emplace_back(member->types.empty() ? LogicalType::UNKNOWN : member->types[param_idx]);
+			names.emplace_back(member->parameters[param_idx]->Cast<ColumnRefExpression>().GetColumnName());
+		}
+		DummyBinding member_binding(types, names, info.GetFunctionName().GetIdentifierName());
+		check_binder->macro_binding = &member_binding;
+		stored_lookup.bound_member = member.get();
+		ErrorData error;
+		try {
+			BoundSelectNode sel_node;
+			SelectBinder binder(*check_binder, context, sel_node);
+			auto expression = member->Cast<ScalarMacroFunction>().expression->Copy();
+			ExpressionBinder::QualifyColumnNames(*check_binder, expression);
+			(void)binder.Bind(expression, 0, false);
+		} catch (const std::exception &ex) {
+			error = ErrorData(ex);
+		}
+		check_binder->macro_binding = nullptr;
+		stored_lookup.bound_member = nullptr;
+		if (stored_lookup.bound_member_expanded) {
+			throw BinderException("Cannot create macro \"%s\": its definition expands \"%s\" again, so a call would "
+			                      "never finish expanding",
+			                      info.GetFunctionName().GetIdentifierName(),
+			                      info.GetFunctionName().GetIdentifierName());
+		}
+		// any other error comes from the body calling the new definition, which the first binding accepted
+		switch (error.Type()) {
+		case ExceptionType::INTERRUPT:
+		case ExceptionType::INTERNAL:
+		case ExceptionType::FATAL:
+		case ExceptionType::OUT_OF_MEMORY:
+			error.Throw();
+		default:
+			break;
+		}
+	}
 }
 
 LogicalType Binder::BindLogicalType(const ParsedExpression &type_expr) {

@@ -1,0 +1,617 @@
+# name: test/sql/catalog/function/test_macro_expansion_cycle.test
+# description: A CREATE MACRO whose macro would expand its own member again is refused at the CREATE
+# group: [function]
+
+# a macro replaced by one that calls itself
+
+statement ok
+CREATE MACRO r(x) AS x + 1;
+
+statement error
+CREATE OR REPLACE MACRO r(x) AS r(x);
+----
+Binder Error: Cannot create macro "r": its definition expands "r" again
+
+# the refused statement leaves the old definition in place
+
+query I
+SELECT r(1);
+----
+2
+
+# with no r yet, the body's own name does not resolve, as before
+
+statement error
+CREATE MACRO r2(x) AS r2(x);
+----
+Catalog Error: Scalar Function with name r2 does not exist!
+
+# two and three macros: the statement that closes the cycle is refused
+
+statement ok
+CREATE MACRO b(x) AS x;
+
+statement ok
+CREATE MACRO a(x) AS b(x) + 1;
+
+statement error
+CREATE OR REPLACE MACRO b(x) AS a(x);
+----
+Binder Error: Cannot create macro "b": its definition expands "b" again
+
+query I
+SELECT a(1);
+----
+2
+
+statement ok
+CREATE MACRO c3(x) AS x;
+
+statement ok
+CREATE MACRO c2(x) AS c3(x) * 2;
+
+statement ok
+CREATE MACRO c1(x) AS c2(x) + 1;
+
+statement error
+CREATE OR REPLACE MACRO c3(x) AS c1(x) - 1;
+----
+Binder Error: Cannot create macro "c3": its definition expands "c3" again
+
+# the call can sit anywhere in the body: an argument, a CASE arm that never runs, a subquery, a lambda
+
+statement error
+CREATE OR REPLACE MACRO c3(x) AS abs(c1(x));
+----
+Binder Error: Cannot create macro "c3"
+
+statement error
+CREATE OR REPLACE MACRO c3(x) AS CASE WHEN false THEN c1(x) ELSE x END;
+----
+Binder Error: Cannot create macro "c3"
+
+statement error
+CREATE OR REPLACE MACRO c3(x) AS (SELECT c1(x));
+----
+Binder Error: Cannot create macro "c3"
+
+statement error
+CREATE OR REPLACE MACRO c3(x INT) AS list_transform([x], lambda y: c1(y))[1];
+----
+Binder Error: Cannot create macro "c3"
+
+query I
+SELECT c1(5);
+----
+11
+
+# a lambda over an untyped parameter binds only once the argument types are known, at the call, so the CREATE
+# cannot see its cycle and the call ends at the depth limit
+
+statement ok
+CREATE OR REPLACE MACRO c3(x) AS list_transform([x], lambda y: c1(y))[1];
+
+statement ok
+SET max_expression_depth=100;
+
+statement error
+SELECT c1(5);
+----
+Max expression depth limit of 100 exceeded
+
+statement ok
+RESET max_expression_depth;
+
+statement ok
+CREATE OR REPLACE MACRO c3(x) AS x;
+
+query I
+SELECT c1(5);
+----
+11
+
+# a generated column whose macro is shadowed by a temporary macro that reads the column
+
+statement ok
+CREATE MACRO gm(x) AS x + 1;
+
+statement ok
+CREATE TABLE gt(v INT, g INT GENERATED ALWAYS AS (gm(v)));
+
+statement ok
+INSERT INTO gt VALUES (1), (2);
+
+statement error
+CREATE TEMP MACRO gm(x) AS (SELECT max(g) FROM gt);
+----
+Binder Error: Cannot create macro "gm": its definition expands "gm" again
+
+query II
+SELECT v, g FROM gt ORDER BY v;
+----
+1	2
+2	3
+
+# the same through a macro in a schema that comes first in the search path
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+SET search_path = 's,main';
+
+statement error
+CREATE MACRO s.gm(x) AS (SELECT max(g) FROM main.gt);
+----
+Binder Error: Cannot create macro "gm": its definition expands "gm" again
+
+query II
+SELECT v, g FROM main.gt ORDER BY v;
+----
+1	2
+2	3
+
+# a macro in a schema that comes later does not shadow, so no cycle
+
+statement ok
+RESET search_path;
+
+statement ok
+CREATE MACRO s.gm(x) AS (SELECT max(g) FROM main.gt);
+
+query I
+SELECT s.gm(0);
+----
+3
+
+# a temporary macro over a regular one, called unqualified or as main.m, which finds temp.main first
+
+statement ok
+CREATE MACRO tm(x) AS x + 1;
+
+statement error
+CREATE TEMP MACRO tm(x) AS tm(x) * 10;
+----
+Binder Error: Cannot create macro "tm": its definition expands "tm" again
+
+statement error
+CREATE TEMP MACRO tm(x) AS main.tm(x) * 10;
+----
+Binder Error: Cannot create macro "tm": its definition expands "tm" again
+
+# a macro of the same name in another database is not shadowed by a temporary one
+
+statement ok
+ATTACH ':memory:' AS other_db;
+
+statement ok
+CREATE MACRO other_db.tm(x) AS x + 1;
+
+statement ok
+CREATE TEMP MACRO tm(x) AS other_db.tm(x) * 10;
+
+query I
+SELECT tm(1);
+----
+20
+
+statement ok
+DROP MACRO temp.main.tm;
+
+# a macro in an attached database, and a body that names the macro in another case
+
+statement ok
+CREATE MACRO other_db.am(x) AS x;
+
+statement ok
+CREATE MACRO other_db.an(x) AS other_db.am(x) + 1;
+
+statement error
+CREATE OR REPLACE MACRO other_db.am(x) AS other_db.an(x);
+----
+Binder Error: Cannot create macro "am": its definition expands "am" again
+
+statement error
+CREATE OR REPLACE MACRO R(x) AS r(x) + 1;
+----
+Binder Error: Cannot create macro "R": its definition expands "R" again
+
+query I
+SELECT other_db.an(1);
+----
+2
+
+# a macro named like a built in that calls the built in unqualified would call itself
+
+statement error
+CREATE MACRO "sum"(x) AS (CASE WHEN sum(x) IS NULL THEN 0 ELSE sum(x) END);
+----
+Binder Error: Cannot create macro "sum": its definition expands "sum" again
+
+statement ok
+CREATE MACRO "sum"(x) AS (CASE WHEN system.main.sum(x) IS NULL THEN 0 ELSE system.main.sum(x) END);
+
+query I
+SELECT sum(1);
+----
+1
+
+statement ok
+DROP MACRO "sum";
+
+# through a table macro and through a view
+
+statement ok
+CREATE MACRO vm(x) AS x;
+
+statement ok
+CREATE MACRO vtm(x) AS TABLE SELECT vm(x) AS y;
+
+statement error
+CREATE OR REPLACE MACRO vm(x) AS (SELECT y FROM vtm(x));
+----
+Binder Error: Cannot create macro "vm": its definition expands "vm" again
+
+statement ok
+CREATE VIEW vv AS SELECT vm(1) AS y;
+
+statement error
+CREATE OR REPLACE MACRO vm(x) AS (SELECT max(y) FROM vv);
+----
+Binder Error: Cannot create macro "vm": its definition expands "vm" again
+
+query I
+SELECT y FROM vv;
+----
+1
+
+# the macros a CHECK and a DEFAULT call: the statement that closes their cycle is refused
+
+statement ok
+CREATE MACRO kb(x) AS x;
+
+statement ok
+CREATE MACRO ka(x) AS kb(x) + 1;
+
+statement ok
+CREATE TABLE kt(v INT CHECK (ka(v) > 0), w INT DEFAULT ka(41));
+
+statement error
+CREATE TEMP MACRO kb(x) AS ka(x);
+----
+Binder Error: Cannot create macro "kb": its definition expands "kb" again
+
+statement ok
+INSERT INTO kt(v) VALUES (1);
+
+query II
+SELECT v, w FROM kt;
+----
+1	42
+
+# another member of the same macro is not the member being created, so the call terminates
+
+statement ok
+CREATE MACRO ov(x) AS x, (x, y) AS x + y;
+
+statement ok
+CREATE OR REPLACE MACRO ov(x) AS ov(x, 1), (x, y) AS x + y;
+
+query I
+SELECT ov(1);
+----
+2
+
+statement ok
+CREATE OR REPLACE MACRO ov(x, y, z) AS ov(ov(x, y), z), (x, y) AS x + y;
+
+query I
+SELECT ov(1, 2, 3);
+----
+6
+
+statement error
+CREATE OR REPLACE MACRO ov(x, y, z) AS ov(ov(x, y), z), (x, y) AS ov(x, y, 0);
+----
+Binder Error: Cannot create macro "ov": its definition expands "ov" again
+
+query I
+SELECT ov(1, 2, 3);
+----
+6
+
+# a body whose s.m(1) reads as a dot call on its parameter s until a macro s.m exists
+
+statement ok
+CREATE SCHEMA ds;
+
+statement ok
+CREATE MACRO dm(x INT, y INT) AS x + y;
+
+statement ok
+CREATE MACRO dwrap(ds INT) AS ds.dm(1);
+
+query I
+SELECT dwrap(2);
+----
+3
+
+statement error
+CREATE MACRO ds.dm(x INT) AS dwrap(1);
+----
+Binder Error: Cannot create macro "dm": its definition expands "dm" again
+
+query I
+SELECT dwrap(2);
+----
+3
+
+# a call in the aggregate of a recursive CTE with USING KEY
+
+statement ok
+CREATE MACRO km() AS 1;
+
+statement error
+CREATE OR REPLACE MACRO km() AS (WITH RECURSIVE r(k, v) USING KEY (k, max(km()) AS v) AS (VALUES (1, 1) UNION SELECT k, v FROM r WHERE false) SELECT max(v) FROM r);
+----
+Binder Error: Cannot create macro "km": its definition expands "km" again
+
+query I
+SELECT km();
+----
+1
+
+# a nested call in an argument is not a cycle
+
+statement ok
+CREATE MACRO inc(x) AS x + 1;
+
+statement ok
+CREATE OR REPLACE MACRO inc2(x) AS inc(inc(x));
+
+query I
+SELECT inc(inc(inc2(1)));
+----
+5
+
+# a replacement that calls the old name in another schema is not a cycle
+
+statement ok
+CREATE MACRO s.inc(x) AS x + 100;
+
+statement ok
+CREATE OR REPLACE MACRO inc(x) AS s.inc(x) + 1;
+
+query I
+SELECT inc(1);
+----
+102
+
+# IF NOT EXISTS over an existing macro stores nothing, so its body is not checked against itself
+
+statement ok
+CREATE MACRO IF NOT EXISTS inc(x) AS inc(x);
+
+query I
+SELECT inc(1);
+----
+102
+
+# a plain CREATE over an existing macro fails as before
+
+statement error
+CREATE MACRO inc(x) AS inc(x);
+----
+Catalog Error: Macro Function with name "inc" already exists!
+
+# a deep but finite chain of distinct macros still binds close to the depth limit when the check binds it again
+
+statement ok
+CREATE MACRO d0(x) AS x;
+
+statement ok
+CREATE MACRO d1(x) AS d0(x) + 1;
+
+statement ok
+CREATE MACRO d2(x) AS d1(x) + 1;
+
+statement ok
+CREATE MACRO d3(x) AS d2(x) + 1;
+
+statement ok
+CREATE MACRO d4(x) AS d3(x) + 1;
+
+statement ok
+CREATE MACRO d5(x) AS d4(x) + 1;
+
+statement ok
+CREATE MACRO d6(x) AS d5(x) + 1;
+
+statement ok
+CREATE MACRO d7(x) AS d6(x) + 1;
+
+statement ok
+CREATE MACRO d8(x) AS d7(x) + 1;
+
+statement ok
+CREATE MACRO d9(x) AS d8(x) + 1;
+
+statement ok
+CREATE MACRO d10(x) AS d9(x) + 1;
+
+statement ok
+CREATE MACRO d11(x) AS d10(x) + 1;
+
+statement ok
+CREATE MACRO d12(x) AS d11(x) + 1;
+
+statement ok
+CREATE MACRO d13(x) AS d12(x) + 1;
+
+statement ok
+CREATE MACRO d14(x) AS d13(x) + 1;
+
+statement ok
+CREATE MACRO d15(x) AS d14(x) + 1;
+
+statement ok
+CREATE MACRO d16(x) AS d15(x) + 1;
+
+statement ok
+CREATE MACRO d17(x) AS d16(x) + 1;
+
+statement ok
+CREATE MACRO d18(x) AS d17(x) + 1;
+
+statement ok
+CREATE MACRO d19(x) AS d18(x) + 1;
+
+statement ok
+CREATE MACRO d20(x) AS d19(x) + 1;
+
+statement ok
+CREATE MACRO d21(x) AS d20(x) + 1;
+
+statement ok
+CREATE MACRO d22(x) AS d21(x) + 1;
+
+statement ok
+CREATE MACRO d23(x) AS d22(x) + 1;
+
+statement ok
+CREATE MACRO d24(x) AS d23(x) + 1;
+
+statement ok
+CREATE MACRO d25(x) AS d24(x) + 1;
+
+statement ok
+CREATE MACRO d26(x) AS d25(x) + 1;
+
+statement ok
+CREATE MACRO d27(x) AS d26(x) + 1;
+
+statement ok
+CREATE MACRO d28(x) AS d27(x) + 1;
+
+statement ok
+CREATE MACRO d29(x) AS d28(x) + 1;
+
+statement ok
+CREATE MACRO d30(x) AS d29(x) + 1;
+
+statement ok
+CREATE MACRO d31(x) AS d30(x) + 1;
+
+statement ok
+CREATE MACRO d32(x) AS d31(x) + 1;
+
+statement ok
+CREATE MACRO d33(x) AS d32(x) + 1;
+
+statement ok
+CREATE MACRO d34(x) AS d33(x) + 1;
+
+statement ok
+CREATE MACRO d35(x) AS d34(x) + 1;
+
+statement ok
+CREATE MACRO d36(x) AS d35(x) + 1;
+
+statement ok
+CREATE MACRO d37(x) AS d36(x) + 1;
+
+statement ok
+CREATE MACRO d38(x) AS d37(x) + 1;
+
+statement ok
+CREATE MACRO d39(x) AS d38(x) + 1;
+
+statement ok
+CREATE MACRO d40(x) AS d39(x) + 1;
+
+statement ok
+CREATE MACRO top(x) AS x, (x, y) AS x + y;
+
+statement ok
+SET max_expression_depth=230;
+
+statement ok
+CREATE OR REPLACE MACRO top(x) AS top(x, d40(0)), (x, y) AS x + y;
+
+query I
+SELECT top(1);
+----
+41
+
+statement ok
+RESET max_expression_depth;
+
+# a cycle closed by a later SET search_path is not a CREATE, so it still ends at the depth limit when used
+
+statement ok
+CREATE MACRO pm(x) AS x + 1;
+
+statement ok
+CREATE TABLE pt(v INT, g INT GENERATED ALWAYS AS (pm(v)));
+
+statement ok
+INSERT INTO pt VALUES (1);
+
+statement ok
+CREATE MACRO s.pm(x) AS (SELECT max(g) FROM main.pt);
+
+statement ok
+SET search_path = 's,main';
+
+statement ok
+SET max_expression_depth=100;
+
+statement error
+SELECT g FROM main.pt;
+----
+Max expression depth limit of 100 exceeded
+
+statement ok
+RESET max_expression_depth;
+
+statement ok
+RESET search_path;
+
+query I
+SELECT g FROM main.pt;
+----
+2
+
+# the same cycle through a generated column, closed by a temporary macro whose body needs its argument's type before
+# it reaches the subquery: the CREATE cannot bind that far, so the cycle shows only at a read
+
+statement ok
+CREATE MACRO kv(d) AS d.f;
+
+statement ok
+CREATE TABLE ks(k BIGINT, y BIGINT GENERATED ALWAYS AS (kv({'f': k})));
+
+statement ok
+INSERT INTO ks(k) VALUES (1);
+
+statement ok
+CREATE TEMP MACRO kv(d) AS d.f + (SELECT count(y) FROM ks);
+
+statement ok
+SET max_expression_depth=100;
+
+statement error
+SELECT y FROM ks;
+----
+Max expression depth limit of 100 exceeded
+
+statement ok
+RESET max_expression_depth;
+
+statement ok
+DROP MACRO temp.main.kv;
+
+query I
+SELECT y FROM ks;
+----
+1

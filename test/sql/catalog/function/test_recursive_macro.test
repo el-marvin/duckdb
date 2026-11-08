@@ -5,16 +5,28 @@
 statement ok
 set enable_macro_dependencies=true
 
-statement ok
+statement error
 CREATE MACRO "sum"(x) AS (CASE WHEN sum(x) IS NULL THEN 0 ELSE sum(x) END);
+----
+Binder Error: Cannot create macro "sum": its definition expands "sum" again
+
+query I
+SELECT sum(1);
+----
+1
+
+# a body that needs its argument's type stops binding at CREATE before it reaches the call of sum, so this cycle
+# shows only at a call, where the expression depth limit ends it
+statement ok
+CREATE MACRO "sum"(x) AS x.f + sum(x);
 
 statement error
-SELECT sum(1);
+SELECT sum({'f': 1});
 ----
 Max expression depth limit
 
 statement error
-SELECT sum(1) WHERE 42=0
+SELECT sum({'f': 1}) WHERE 42=0
 ----
 Max expression depth limit
 
@@ -45,7 +57,7 @@ create macro m2(a) as m1(a)+1;
 statement error
 create or replace macro m1(a) as m2(a)+1;
 ----
-Catalog Error: CREATE OR REPLACE is not allowed to depend on itself
+Binder Error: Cannot create macro "m1": its definition expands "m1" again
 
 # also table macros
 statement ok
@@ -57,4 +69,4 @@ create macro m4(a) as table select m3(a);
 statement error
 create or replace macro m3(a) as (from m4(42));
 ----
-Catalog Error: CREATE OR REPLACE is not allowed to depend on itself
+Binder Error: Cannot create macro "m3": its definition expands "m3" again

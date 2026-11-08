@@ -708,6 +708,9 @@ private:
 	static void BindSchemaOrCatalog(CatalogEntryRetriever &retriever, QualifiedName &qualified_name);
 	Identifier BindCatalog(const Identifier &catalog_name);
 	SchemaCatalogEntry &BindCreateSchema(CreateInfo &info);
+	//! Refuse a scalar macro one of whose members, bound as the macro will be stored, expands itself
+	void CheckMacroExpansionCycle(const CreateMacroInfo &info, SchemaCatalogEntry &schema,
+	                              const vector<idx_t> &members);
 
 	vector<CatalogSearchEntry> GetSearchPath(Catalog &catalog, const vector<Identifier> &schema_path,
 	                                         bool default_schema_precedence = false);

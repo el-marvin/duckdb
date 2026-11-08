@@ -22,8 +22,28 @@ namespace duckdb {
 class ClientContext;
 class Catalog;
 class CatalogEntry;
+class MacroFunction;
 
 using catalog_entry_callback_t = std::function<void(CatalogEntry &)>;
+
+//! An entry the statement being bound creates, found where a lookup will find it once the statement has run
+struct PendingCatalogEntry {
+	PendingCatalogEntry(SchemaCatalogEntry &schema, Identifier name, CatalogType type)
+	    : schema(schema), name(std::move(name)), type(type) {
+	}
+
+	SchemaCatalogEntry &schema;
+	Identifier name;
+	CatalogType type;
+	//! The entry as it will be stored; while unset, a lookup only records that it would have found it
+	optional_ptr<CatalogEntry> entry;
+	//! Whether a lookup reached the schema before finding another entry of the name
+	bool reached = false;
+	//! The member of the entry being bound, whose expansion inside that binding is a cycle
+	optional_ptr<const MacroFunction> bound_member;
+	//! Whether binding expanded the bound member
+	bool bound_member_expanded = false;
+};
 
 // Wraps the Catalog::GetEntry method
 class CatalogEntryRetriever {
@@ -78,6 +98,11 @@ public:
 	optional_ptr<BoundAtClause> GetAtClause() const;
 	void SetAtClause(optional_ptr<BoundAtClause> at_clause);
 
+	optional_ptr<PendingCatalogEntry> GetPendingEntry() const;
+	void SetPendingEntry(optional_ptr<PendingCatalogEntry> pending_entry);
+	//! Applies the pending entry to the result of a lookup in one schema of the search
+	void FindPendingEntry(const EntryLookupInfo &lookup_info, CatalogEntryLookup &result);
+
 private:
 	optional_ptr<CatalogEntry> ReturnAndCallback(optional_ptr<CatalogEntry> result);
 
@@ -87,6 +112,7 @@ private:
 	ClientContext &context;
 	shared_ptr<CatalogSearchPath> search_path;
 	optional_ptr<BoundAtClause> at_clause;
+	optional_ptr<PendingCatalogEntry> pending_entry;
 };
 
 } // namespace duckdb

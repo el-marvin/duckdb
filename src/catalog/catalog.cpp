@@ -1043,10 +1043,11 @@ CatalogEntryLookup Catalog::TryLookupEntry(CatalogEntryRetriever &retriever, con
 		auto entries = GetCatalogEntries(retriever, GetName(), Identifier::InvalidSchema());
 		for (auto &entry : entries) {
 			auto transaction = GetCatalogTransaction(context);
-			auto result = TryLookupEntryInternal(
-			    transaction,
-			    EntryLookupInfo(lookup_info, QualifiedName::FromCatalogSchema(GetName(), entry.GetSchemaPath(),
-			                                                                  lookup_info.GetEntryIdentifier())));
+			EntryLookupInfo schema_lookup_info(
+			    lookup_info,
+			    QualifiedName::FromCatalogSchema(GetName(), entry.GetSchemaPath(), lookup_info.GetEntryIdentifier()));
+			auto result = TryLookupEntryInternal(transaction, schema_lookup_info);
+			retriever.FindPendingEntry(schema_lookup_info, result);
 			if (result.Found()) {
 				return result;
 			}
@@ -1057,6 +1058,7 @@ CatalogEntryLookup Catalog::TryLookupEntry(CatalogEntryRetriever &retriever, con
 	} else {
 		auto transaction = GetCatalogTransaction(context);
 		auto result = TryLookupEntryInternal(transaction, lookup_info);
+		retriever.FindPendingEntry(lookup_info, result);
 		if (result.Found()) {
 			return result;
 		}
@@ -1185,6 +1187,7 @@ CatalogEntryLookup Catalog::TryLookupEntry(CatalogEntryRetriever &retriever, con
 	for (auto &lookup : lookups) {
 		auto transaction = lookup.catalog.GetCatalogTransaction(context);
 		result = lookup.catalog.TryLookupEntryInternal(transaction, lookup.lookup_info);
+		retriever.FindPendingEntry(lookup.lookup_info, result);
 		if (result.Found()) {
 			break;
 		}
@@ -1326,6 +1329,7 @@ CatalogEntryLookup Catalog::TryLookupDefaultSchema(CatalogEntryRetriever &retrie
 		EntryLookupInfo default_schema_lookup(
 		    lookup_info, QualifiedName(catalog_entry->GetName(), *default_schema, lookup_info.GetEntryIdentifier()));
 		auto result = catalog_entry->TryLookupEntryInternal(transaction, default_schema_lookup);
+		retriever.FindPendingEntry(default_schema_lookup, result);
 		if (result.Found() || result.error.HasError()) {
 			return result;
 		}
