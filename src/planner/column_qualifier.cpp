@@ -300,26 +300,30 @@ optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &
 		new_colref = std::move(colref);
 	}
 	new_colref->ClearAlias();
-	// transform this into a function call on the column
-	// i.e. "x.lower()" becomes "lower(x)"
-	function.GetArgumentsMutable().insert(function.GetArgumentsMutable().begin(), std::move(new_colref));
-	function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Name()));
+	MakePlainCall(function, std::move(new_colref));
 	return func;
 }
 
+void ColumnQualifier::MakePlainCall(FunctionExpression &function, unique_ptr<ParsedExpression> receiver) {
+	function.GetArgumentsMutable().insert(function.GetArgumentsMutable().begin(), std::move(receiver));
+	function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Name()));
+}
+
 unique_ptr<ColumnRefExpression> ColumnQualifier::CreateDotCallReceiver(const QualifiedName &name) {
-	if (name.Catalog().empty()) {
-		return make_uniq<ColumnRefExpression>(name.Schema());
+	auto &path = name.Path();
+	return make_uniq<ColumnRefExpression>(vector<Identifier>(path.begin(), path.end() - 1));
+}
+
+bool ColumnQualifier::IsDotCall(Binder &binder, const FunctionExpression &function) {
+	if (function.GetQualifiedName().Schema().empty() || ExpressionBinder::IsUnnestFunction(function.FunctionName())) {
+		return false;
 	}
-	return make_uniq<ColumnRefExpression>(name.Schema(), name.Catalog());
+	return GetWrittenCallArguments(binder, function).dot_call;
 }
 
 unique_ptr<ColumnRefExpression> ColumnQualifier::GetDotCallReceiver(Binder &binder,
                                                                     const FunctionExpression &function) {
-	if (function.GetQualifiedName().Schema().empty() || ExpressionBinder::IsUnnestFunction(function.FunctionName())) {
-		return nullptr;
-	}
-	if (!GetWrittenCallArguments(binder, function).dot_call) {
+	if (!IsDotCall(binder, function)) {
 		return nullptr;
 	}
 	return CreateDotCallReceiver(function.GetQualifiedName());

@@ -249,6 +249,10 @@ public:
 	//! Enables special-handling of lambda parameters during macro replacement by tracking them in the lambda_params
 	//! vector.
 	void ReplaceMacroParametersInLambda(FunctionExpression &function, vector<identifier_set_t> &lambda_params);
+	//! Replaces macro parameters in the arguments, FILTER and ORDER BY of a call
+	void ReplaceMacroParametersInCall(FunctionExpression &function, vector<identifier_set_t> &lambda_params);
+	//! Replaces macro parameters in every expression of a query node and of its table references
+	void ReplaceMacroParametersInQueryNode(QueryNode &node, vector<identifier_set_t> &lambda_params);
 
 	static LogicalType GetExpressionReturnType(const Expression &expr);
 

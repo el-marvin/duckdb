@@ -3,6 +3,7 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
+#include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/unique_ptr.hpp"
@@ -13,6 +14,7 @@
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/expression/window_expression.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/planner/expression_binder.hpp"
@@ -33,45 +35,47 @@ void ExpressionBinder::ReplaceMacroParametersInLambda(FunctionExpression &functi
 	    });
 }
 
+static bool IsMacroParameter(DummyBinding &macro_binding, const ColumnRefExpression &col_ref,
+                             const vector<identifier_set_t> &lambda_params) {
+	if (LambdaExpression::IsLambdaParameter(lambda_params, col_ref.GetColumnName())) {
+		return false;
+	}
+	if (col_ref.IsQualified()) {
+		// the table qualifier is the component directly before the column name
+		auto &names = col_ref.ColumnNames();
+		return names[names.size() - 2].StartsWith(DummyBinding::DUMMY_NAME);
+	}
+	return macro_binding.HasMatchingBinding(col_ref.GetColumnName());
+}
+
 void ExpressionBinder::ReplaceMacroParameters(unique_ptr<ParsedExpression> &expr,
                                               vector<identifier_set_t> &lambda_params) {
 	switch (expr->GetExpressionClass()) {
 	case ExpressionClass::COLUMN_REF: {
 		// If the expression is a column reference, we replace it with its argument.
 		auto &col_ref = expr->Cast<ColumnRefExpression>();
-		if (LambdaExpression::IsLambdaParameter(lambda_params, col_ref.GetColumnName())) {
-			return;
-		}
-
-		bool bind_macro_parameter = false;
-		if (col_ref.IsQualified()) {
-			// the table qualifier is the component directly before the column name
-			auto &names = col_ref.ColumnNames();
-			if (names[names.size() - 2].StartsWith(DummyBinding::DUMMY_NAME)) {
-				bind_macro_parameter = true;
-			}
-		} else {
-			bind_macro_parameter = macro_binding->HasMatchingBinding(col_ref.GetColumnName());
-		}
-
-		if (bind_macro_parameter) {
+		if (IsMacroParameter(*macro_binding, col_ref, lambda_params)) {
 			D_ASSERT(macro_binding->HasMatchingBinding(col_ref.GetColumnName()));
 			expr = macro_binding->ParamToArg(col_ref);
 		}
 		return;
 	}
 	case ExpressionClass::FUNCTION: {
-		// Special-handling for lambdas, which are inside function expressions.
 		auto &function = expr->Cast<FunctionExpression>();
-		if (function.IsLambdaFunction()) {
-			return ReplaceMacroParametersInLambda(function, lambda_params);
+		// the dummy qualification, which makes a dot call on a parameter a plain call, does not enter subqueries or
+		// table macro bodies; the catalog lookup comes last, as it can fail on a call no bind reads (an unused CTE)
+		if (!function.GetQualifiedName().Schema().empty()) {
+			auto receiver = ColumnQualifier::CreateDotCallReceiver(function.GetQualifiedName());
+			if (IsMacroParameter(*macro_binding, *receiver, lambda_params) &&
+			    ColumnQualifier::IsDotCall(binder, function)) {
+				ColumnQualifier::MakePlainCall(function, std::move(receiver));
+			}
 		}
-		break;
+		return ReplaceMacroParametersInCall(function, lambda_params);
 	}
 	case ExpressionClass::SUBQUERY: {
 		auto &sq = (expr->Cast<SubqueryExpression>()).Subquery();
-		ParsedExpressionIterator::EnumerateQueryNodeChildren(
-		    *sq->node, [&](unique_ptr<ParsedExpression> &child) { ReplaceMacroParameters(child, lambda_params); });
+		ReplaceMacroParametersInQueryNode(*sq->node, lambda_params);
 		break;
 	}
 	default:
@@ -80,6 +84,35 @@ void ExpressionBinder::ReplaceMacroParameters(unique_ptr<ParsedExpression> &expr
 
 	ParsedExpressionIterator::EnumerateChildren(
 	    *expr, [&](unique_ptr<ParsedExpression> &child) { ReplaceMacroParameters(child, lambda_params); });
+}
+
+void ExpressionBinder::ReplaceMacroParametersInCall(FunctionExpression &function,
+                                                    vector<identifier_set_t> &lambda_params) {
+	// Special-handling for lambdas, which are inside function expressions.
+	if (function.IsLambdaFunction()) {
+		return ReplaceMacroParametersInLambda(function, lambda_params);
+	}
+	ParsedExpressionIterator::EnumerateChildren(
+	    function, [&](unique_ptr<ParsedExpression> &child) { ReplaceMacroParameters(child, lambda_params); });
+}
+
+void ExpressionBinder::ReplaceMacroParametersInQueryNode(QueryNode &node, vector<identifier_set_t> &lambda_params) {
+	// the table function binder never reads the call of a table function reference as a dot call
+	reference_set_t<unique_ptr<ParsedExpression>> table_function_calls;
+	ParsedExpressionIterator::EnumerateQueryNodeChildren(
+	    node, [](unique_ptr<ParsedExpression> &child) {},
+	    [&](TableRef &ref) {
+		    if (ref.type == TableReferenceType::TABLE_FUNCTION) {
+			    table_function_calls.insert(ref.Cast<TableFunctionRef>().function);
+		    }
+	    });
+	ParsedExpressionIterator::EnumerateQueryNodeChildren(node, [&](unique_ptr<ParsedExpression> &child) {
+		if (table_function_calls.count(child) && child->GetExpressionClass() == ExpressionClass::FUNCTION) {
+			ReplaceMacroParametersInCall(child->Cast<FunctionExpression>(), lambda_params);
+			return;
+		}
+		ReplaceMacroParameters(child, lambda_params);
+	});
 }
 
 // Find aggregate expression children

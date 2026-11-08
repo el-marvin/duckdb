@@ -49,8 +49,15 @@ public:
 	//! Whether argument index of the call binds as a lambda, filling in the parameter names it declares
 	static bool TryGetLambdaParameters(Binder &binder, const FunctionExpression &function, idx_t index,
 	                                   identifier_set_t &parameters);
-	//! The receiver of a dot call "x.lower()" as written, as a column reference, or nullptr if the call is not one
+	//! Whether the call is written on a column, as in "x.lower()", by the function lookup QualifyFunction does
+	static bool IsDotCall(Binder &binder, const FunctionExpression &function);
+	//! The receiver of a dot call "x.y.lower()" as written (every part of the name but the last), as a column
+	//! reference, or nullptr if the call is not one
 	static unique_ptr<ColumnRefExpression> GetDotCallReceiver(Binder &binder, const FunctionExpression &function);
+	//! The receiver the qualified call "x.y.lower()" has if it is a dot call
+	static unique_ptr<ColumnRefExpression> CreateDotCallReceiver(const QualifiedName &name);
+	//! Rewrites the dot call "x.lower()" into "lower(x)", with receiver as x
+	static void MakePlainCall(FunctionExpression &function, unique_ptr<ParsedExpression> receiver);
 	//! Visits the children of a call, handing each argument that binds as a lambda to lambda_callback instead
 	static void EnumerateCallChildren(
 	    Binder &binder, FunctionExpression &function,
@@ -74,7 +81,6 @@ private:
 	unique_ptr<ParsedExpression> QualifyColumnNameInternal(ColumnRefExpression &col_ref, ErrorData &error);
 	//! The dot call and lambda argument of the call as written, looked up once per function name and binder
 	static WrittenCallArguments GetWrittenCallArguments(Binder &binder, const FunctionExpression &function);
-	static unique_ptr<ColumnRefExpression> CreateDotCallReceiver(const QualifiedName &name);
 	//! The function entry of the call; dot_call says it is written on a column, as in "x.lower()"
 	static optional_ptr<CatalogEntry> FindFunction(Binder &binder, const FunctionExpression &function,
 	                                               const QualifiedName &name, bool &dot_call);

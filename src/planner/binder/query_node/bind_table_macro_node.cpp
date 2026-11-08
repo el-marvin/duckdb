@@ -43,8 +43,7 @@ unique_ptr<QueryNode> Binder::BindTableMacro(FunctionExpression &function, Table
 	vector<identifier_set_t> lambda_params;
 
 	auto node = macro_def.Cast<TableMacroFunction>().query_node->Copy();
-	ParsedExpressionIterator::EnumerateQueryNodeChildren(
-	    *node, [&](unique_ptr<ParsedExpression> &child) { eb.ReplaceMacroParameters(child, lambda_params); });
+	eb.ReplaceMacroParametersInQueryNode(*node, lambda_params);
 
 	return node;
 }

@@ -1,0 +1,374 @@
+# name: test/sql/function/list/lambdas/dot_call_receiver_name_parts.test
+# description: The receiver of a dot call is every part of its name but the last, and a macro parameter receiver is replaced wherever the plain argument is
+# group: [lambdas]
+
+statement ok
+CREATE TABLE ts AS SELECT 'K' AS k, {'f': 'ABC', 'g': {'h': 'GH'}} AS s, 'XYZ' AS f, 'HHH' AS h;
+
+statement ok
+CREATE SCHEMA sc;
+
+statement ok
+CREATE TABLE sc.ts AS SELECT {'f': 'SCF'} AS s;
+
+# one and two part receivers
+
+query TTTTTT
+SELECT k.lower(), lower(k), ts.k.lower(), lower(ts.k), s.f.lower(), lower(s.f) FROM ts;
+----
+k	k	k	k	abc	abc
+
+# three parts: table, column, field and column, field, field
+
+query TTTT
+SELECT ts.s.f.lower(), lower(ts.s.f), s.g.h.lower(), lower(s.g.h) FROM ts;
+----
+abc	abc	gh	gh
+
+# four and five parts
+
+query TT
+SELECT ts.s.g.h.lower(), lower(ts.s.g.h) FROM ts;
+----
+gh	gh
+
+query TT
+SELECT sc.ts.s.f.lower(), lower(sc.ts.s.f) FROM sc.ts;
+----
+scf	scf
+
+query TTTT
+SELECT memory.main.ts.k.lower(), lower(memory.main.ts.k), memory.main.ts.s.f.lower(), lower(memory.main.ts.s.f) FROM ts;
+----
+k	k	abc	abc
+
+query TT
+SELECT ts.s.f.lower().upper(), upper(lower(ts.s.f)) FROM ts;
+----
+ABC	ABC
+
+# clauses, among them a subquery WHERE, whose dot calls are rewritten only when it is bound
+
+query II
+SELECT (SELECT count(*) FROM ts WHERE ts.s.f.lower() = 'abc'), (SELECT count(*) FROM ts WHERE lower(ts.s.f) = 'abc');
+----
+1	1
+
+query T
+SELECT ts.s.f.lower() FROM ts GROUP BY lower(ts.s.f);
+----
+abc
+
+query T
+SELECT lower(ts.s.f) FROM ts GROUP BY ts.s.f.lower();
+----
+abc
+
+query I
+SELECT count(*) FROM ts GROUP BY s HAVING ts.s.f.lower() = 'abc' AND lower(ts.s.f) = 'abc';
+----
+1
+
+query I
+SELECT x FROM (VALUES (1, {'f': 'B'}, 'A'), (2, {'f': 'A'}, 'B')) t2(x, s, f) ORDER BY t2.s.f.lower();
+----
+2
+1
+
+query I
+SELECT x FROM (VALUES (1, {'f': 'B'}, 'A'), (2, {'f': 'A'}, 'B')) t2(x, s, f) ORDER BY lower(t2.s.f);
+----
+2
+1
+
+query TT
+SELECT (SELECT max(ts.s.f.lower())), (SELECT max(lower(ts.s.f))) FROM ts;
+----
+abc	abc
+
+query TT
+WITH c AS (SELECT {'f': 'CTE'} AS s) SELECT c.s.f.lower(), lower(c.s.f) FROM c;
+----
+cte	cte
+
+# a correlated subquery WHERE: the aggregate belongs to the outer query and the call matches the outer group
+
+statement ok
+CREATE TABLE o AS SELECT {'f': -3} AS s, 'Q' AS q;
+
+query II
+SELECT (SELECT 1 WHERE sum(o.s.f.abs()) > 0), (SELECT 1 WHERE sum(abs(o.s.f)) > 0) FROM o;
+----
+1	1
+
+query II
+SELECT (SELECT count(*) FROM range(1) WHERE o.s.f.abs() = 3), (SELECT count(*) FROM range(1) WHERE abs(o.s.f) = 3) FROM o GROUP BY abs(o.s.f);
+----
+1	1
+
+# a lambda parameter with fields, and one named like a table, which reads the table as its plain spelling does
+
+query TT
+SELECT list_transform([{'s': {'f': 'AB'}}], lambda x: x.s.f.lower()), list_transform([{'s': {'f': 'AB'}}], lambda x: lower(x.s.f)) FROM ts;
+----
+[ab]	[ab]
+
+query TT
+SELECT list_transform([{'s': {'f': 'AB'}}], lambda ts: ts.s.f.lower()), list_transform([{'s': {'f': 'AB'}}], lambda ts: lower(ts.s.f)) FROM ts;
+----
+[abc]	[abc]
+
+# a function in a nested schema is a schema call at any depth
+
+statement ok
+CREATE SCHEMA ns;
+
+statement ok
+CREATE SCHEMA ns.inner;
+
+statement ok
+CREATE MACRO ns.inner.twice(x) AS 2 * x;
+
+query II
+SELECT ns.inner.twice(4), memory.ns.inner.twice(4);
+----
+8	8
+
+# macro bodies: the expression level
+
+statement ok
+CREATE MACRO e_dot(p) AS p.abs();
+
+statement ok
+CREATE MACRO e_plain(p) AS abs(p);
+
+statement ok
+CREATE MACRO ef_dot(p) AS p.f.g.lower();
+
+statement ok
+CREATE MACRO ef_plain(p) AS lower(p.f.g);
+
+query IITT
+SELECT e_dot(-2), e_plain(-2), ef_dot({'f': {'g': 'CD'}, 'g': 'WRONG'}), ef_plain({'f': {'g': 'CD'}, 'g': 'WRONG'});
+----
+2	2	cd	cd
+
+# a subquery of the body: select list, WHERE, nested, CTE, method chain
+
+statement ok
+CREATE MACRO s_dot(p) AS (SELECT p.abs());
+
+statement ok
+CREATE MACRO s_plain(p) AS (SELECT abs(p));
+
+statement ok
+CREATE MACRO sw_dot(p) AS (SELECT count(*) FROM range(5) r(i) WHERE i < p.abs());
+
+statement ok
+CREATE MACRO sw_plain(p) AS (SELECT count(*) FROM range(5) r(i) WHERE i < abs(p));
+
+statement ok
+CREATE MACRO nest_dot(p) AS (SELECT (SELECT p.abs()));
+
+statement ok
+CREATE MACRO nest_plain(p) AS (SELECT (SELECT abs(p)));
+
+statement ok
+CREATE MACRO cte_dot(p) AS (WITH c AS (SELECT p.abs() AS v) SELECT v FROM c);
+
+statement ok
+CREATE MACRO cte_plain(p) AS (WITH c AS (SELECT abs(p) AS v) SELECT v FROM c);
+
+statement ok
+CREATE MACRO ch_dot(p) AS (SELECT p.lower().upper());
+
+statement ok
+CREATE MACRO ch_plain(p) AS (SELECT upper(lower(p)));
+
+query IIIIIIIITT
+SELECT s_dot(-2), s_plain(-2), sw_dot(-2), sw_plain(-2), nest_dot(-2), nest_plain(-2), cte_dot(-2), cte_plain(-2), ch_dot('aB'), ch_plain('aB');
+----
+2	2	2	2	2	2	2	2	AB	AB
+
+# two parameters, a default parameter, a macro calling a macro
+
+statement ok
+CREATE MACRO two_dot(p, q) AS (SELECT p.abs() * 10 + q.abs());
+
+statement ok
+CREATE MACRO two_plain(p, q) AS (SELECT abs(p) * 10 + abs(q));
+
+statement ok
+CREATE MACRO def_dot(p, q := -9) AS (SELECT q.abs());
+
+statement ok
+CREATE MACRO def_plain(p, q := -9) AS (SELECT abs(q));
+
+statement ok
+CREATE MACRO outer_dot(p) AS (SELECT s_dot(p) + p.abs());
+
+query IIIIIII
+SELECT two_dot(-2, -3), two_plain(-2, -3), def_dot(1), def_plain(1), def_dot(1, q := -4), def_plain(1, q := -4), outer_dot(-2);
+----
+23	23	9	9	4	4	4
+
+# table macros: select list, WHERE, subquery
+
+statement ok
+CREATE MACRO tm_dot(p) AS TABLE SELECT p.abs() AS v, (SELECT p.abs() + 1) AS w;
+
+statement ok
+CREATE MACRO tm_plain(p) AS TABLE SELECT abs(p) AS v, (SELECT abs(p) + 1) AS w;
+
+query II
+SELECT * FROM tm_dot(-2);
+----
+2	3
+
+query II
+SELECT * FROM tm_plain(-2);
+----
+2	3
+
+statement ok
+CREATE MACRO tmw_dot(p) AS TABLE SELECT i FROM range(5) r(i) WHERE i < p.abs();
+
+statement ok
+CREATE MACRO tmw_plain(p) AS TABLE SELECT i FROM range(5) r(i) WHERE i < abs(p);
+
+query I
+SELECT * FROM tmw_dot(-2);
+----
+0
+1
+
+query I
+SELECT * FROM tmw_plain(-2);
+----
+0
+1
+
+# lambdas in a macro body: expression level, in a subquery, a dot call taking a lambda, a shadowing parameter
+
+statement ok
+CREATE MACRO l_dot(p) AS list_transform([1, 2], lambda x: p.abs() + x);
+
+statement ok
+CREATE MACRO l_plain(p) AS list_transform([1, 2], lambda x: abs(p) + x);
+
+statement ok
+CREATE MACRO ls_dot(p) AS (SELECT list_transform([1, 2], lambda x: p.abs() + x));
+
+statement ok
+CREATE MACRO ls_plain(p) AS (SELECT list_transform([1, 2], lambda x: abs(p) + x));
+
+statement ok
+CREATE MACRO lt_dot(p) AS (SELECT p.list_transform(lambda x: x + 1));
+
+statement ok
+CREATE MACRO lt_plain(p) AS (SELECT list_transform(p, lambda x: x + 1));
+
+statement ok
+CREATE MACRO lsh_dot(p) AS (SELECT list_transform([-5], lambda p: p.abs()));
+
+statement ok
+CREATE MACRO lsh_plain(p) AS (SELECT list_transform([-5], lambda p: abs(p)));
+
+query TTTTTTTT
+SELECT l_dot(-2), l_plain(-2), ls_dot(-2), ls_plain(-2), lt_dot([1, 2]), lt_plain([1, 2]), lsh_dot(-2), lsh_plain(-2);
+----
+[3, 4]	[3, 4]	[3, 4]	[3, 4]	[2, 3]	[2, 3]	[5]	[5]
+
+# a parameter named like a caller table is the parameter; a qualified receiver reads the table as lower(p.c) does
+
+statement ok
+CREATE TABLE p AS SELECT -7 AS c;
+
+statement ok
+CREATE MACRO sq_dot(p) AS (SELECT p.c.abs());
+
+statement ok
+CREATE MACRO sq_plain(p) AS (SELECT abs(p.c));
+
+query IIIIIIII
+SELECT s_dot(-2), s_plain(-2), e_dot(-2), e_plain(-2), s_dot(c), s_plain(c), sq_dot(-2), sq_plain(-2) FROM p;
+----
+2	2	2	2	7	7	7	7
+
+# a parameter named like a caller column or a column of the body's own FROM is the parameter, as for the plain call
+
+query II
+SELECT s_dot(1), s_plain(1) FROM (VALUES (-9)) tp(p);
+----
+1	1
+
+statement ok
+CREATE MACRO tc(k) AS TABLE SELECT k.lower() AS d, lower(k) AS e FROM ts;
+
+query TT
+SELECT * FROM tc('ARG');
+----
+arg	arg
+
+# table macros: a table function argument, JOIN ON, a CTE, a lambda, an aggregate written as a dot call
+
+statement ok
+CREATE MACRO tm_more(p) AS TABLE
+WITH c AS (SELECT p.abs() AS v, abs(p) AS w)
+SELECT count(*) AS n, count(*) FILTER (WHERE a.i < abs(p)) AS m, any_value(c.v) AS v, any_value(c.w) AS w,
+	any_value(list_transform([1], lambda x: p.abs() + x)) AS l, any_value(list_transform([1], lambda x: abs(p) + x)) AS l2,
+	(SELECT p.sum() FROM range(3)) AS s, (SELECT sum(p) FROM range(3)) AS s2
+FROM range(p.abs()) a(i) JOIN range(abs(p)) b(j) ON a.i = b.j AND a.i < p.abs(), c;
+
+query IIIITTII
+SELECT * FROM tm_more(-2);
+----
+2	2	2	2	[3]	[3]	-6	-6
+
+# the call of a table function reference is never a dot call, also on a parameter
+
+statement ok
+CREATE MACRO tf_dot(p) AS TABLE FROM p.range(3);
+
+statement error
+SELECT * FROM tf_dot(1);
+----
+Table Function with name range does not exist
+
+# a schema named like the parameter that holds the function makes a schema call
+
+statement ok
+CREATE SCHEMA p;
+
+statement ok
+CREATE MACRO p.abs(x) AS 100 + x;
+
+statement ok
+CREATE MACRO sch_sub(p) AS (SELECT p.abs(1));
+
+statement ok
+CREATE MACRO sch_expr(p) AS p.abs(1);
+
+query II
+SELECT sch_sub(-2), sch_expr(-2);
+----
+101	101
+
+# a call that no bind reads, in an unused CTE, is not looked up when its receiver is no parameter
+
+statement ok
+CREATE MACRO unused_cte(p) AS (WITH unused AS (SELECT dup.abs(-3)) SELECT p);
+
+statement ok
+CREATE MACRO unused_cte_table(p) AS TABLE WITH unused AS (SELECT dup.abs(-3)) SELECT p;
+
+statement ok
+CREATE SCHEMA dup;
+
+statement ok
+ATTACH ':memory:' AS dup;
+
+query II
+SELECT unused_cte(1), (SELECT * FROM unused_cte_table(2));
+----
+1	2
