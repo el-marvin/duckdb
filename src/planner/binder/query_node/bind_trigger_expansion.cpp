@@ -158,26 +158,28 @@ static vector<Identifier> OldCaptureColumnNames(const TableCatalogEntry &table) 
 // Recursively replace references to generated columns with a copy of their generated expression, so the result
 // references only physical columns. This makes the recomputation independent of generated-column declaration
 // order (a generated column may reference another generated column declared later).
-static void InlineGeneratedColumnRefs(unique_ptr<ParsedExpression> &expr, const TableCatalogEntry &table) {
+static void InlineGeneratedColumnRefs(Binder &binder, unique_ptr<ParsedExpression> &expr,
+                                      const TableCatalogEntry &table) {
 	if (expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
 		auto &colref = expr->Cast<ColumnRefExpression>();
 		if (!colref.IsQualified() && table.GetColumns().ColumnExists(colref.GetColumnName())) {
 			auto &column = table.GetColumns().GetColumn(colref.GetColumnName());
 			if (column.Generated()) {
-				expr = column.GeneratedExpression().Copy();
-				InlineGeneratedColumnRefs(expr, table);
+				expr = binder.ResolveGeneratedExpressionNames(table.ParentSchema(), table.name, table.GetColumns(),
+				                                              column.GeneratedExpression());
+				InlineGeneratedColumnRefs(binder, expr, table);
 				return;
 			}
 		}
 	}
 	ParsedExpressionIterator::EnumerateChildren(
-	    *expr, [&](unique_ptr<ParsedExpression> &child) { InlineGeneratedColumnRefs(child, table); });
+	    *expr, [&](unique_ptr<ParsedExpression> &child) { InlineGeneratedColumnRefs(binder, child, table); });
 }
 
 // OLD transition alias for UPDATE: the base CTE exposes the pre-update physical columns under internal names.
 // Rename them back to the real column names and (re)compute generated columns over those OLD values. The result
 // exposes exactly the logical table columns, in table order — no rowid, physical-only, or capture columns.
-static unique_ptr<CommonTableExpressionInfo> MakeUpdateOldAliasCTE(const TableCatalogEntry &table,
+static unique_ptr<CommonTableExpressionInfo> MakeUpdateOldAliasCTE(Binder &binder, const TableCatalogEntry &table,
                                                                    const Identifier &base_cte_name,
                                                                    const vector<Identifier> &old_capture_names) {
 	// Inner select: rename each captured OLD physical column (exposed under its reserved name) to its real name.
@@ -210,8 +212,9 @@ static unique_ptr<CommonTableExpressionInfo> MakeUpdateOldAliasCTE(const TableCa
 	auto outer = make_uniq<SelectNode>();
 	for (auto &column : table.GetColumns().Logical()) {
 		if (column.Generated()) {
-			auto expr = column.GeneratedExpression().Copy();
-			InlineGeneratedColumnRefs(expr, table);
+			auto expr = binder.ResolveGeneratedExpressionNames(table.ParentSchema(), table.name, table.GetColumns(),
+			                                                   column.GeneratedExpression());
+			InlineGeneratedColumnRefs(binder, expr, table);
 			expr->SetAlias(column.Name());
 			outer->select_list.push_back(std::move(expr));
 		} else {
@@ -324,7 +327,8 @@ static vector<pair<column_t, Identifier>> ReferencedVirtualColumns(vector<unique
 	return result;
 }
 
-static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<TriggerCatalogEntry>> &after_triggers,
+static void AddAfterTriggerCTEs(Binder &binder, SelectNode &outer,
+                                const vector<const_reference<TriggerCatalogEntry>> &after_triggers,
                                 const Identifier &base_cte_name, const string &uuid_suffix,
                                 const identifier_set_t &injected_names, const TableCatalogEntry &table,
                                 const vector<Identifier> &old_capture_names) {
@@ -350,7 +354,7 @@ static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<
 		if (!trigger.referencing_old_table.empty() && body_map.find(trigger.referencing_old_table) == body_map.end()) {
 			// UPDATE captures OLD as reserved columns that must be renamed; INSERT/DELETE expose it as-is.
 			body_map[trigger.referencing_old_table] =
-			    update_old_capture ? MakeUpdateOldAliasCTE(table, base_cte_name, old_capture_names)
+			    update_old_capture ? MakeUpdateOldAliasCTE(binder, table, base_cte_name, old_capture_names)
 			                       : MakeTransitionTableAliasCTE(base_cte_name, injected_names);
 		}
 
@@ -360,7 +364,7 @@ static void AddAfterTriggerCTEs(SelectNode &outer, const vector<const_reference<
 
 // Build the trigger CTE chain as a SelectNode: BEFORE bodies → base DML → AFTER bodies.
 // For RETURNING the outer projection is a plain SELECT *, rebound through ReturningBinder later.
-static unique_ptr<SelectNode> BuildTriggerChain(const QueryNode &node, const TableCatalogEntry &table,
+static unique_ptr<SelectNode> BuildTriggerChain(Binder &binder, const QueryNode &node, const TableCatalogEntry &table,
                                                 const vector<const_reference<TriggerCatalogEntry>> &before_triggers,
                                                 const vector<const_reference<TriggerCatalogEntry>> &after_triggers,
                                                 const string &uuid_suffix, const Identifier &base_cte_name,
@@ -411,7 +415,8 @@ static unique_ptr<SelectNode> BuildTriggerChain(const QueryNode &node, const Tab
 	}
 	outer->cte_map.map[base_cte_name] = std::move(base_cte);
 
-	AddAfterTriggerCTEs(*outer, after_triggers, base_cte_name, uuid_suffix, injected_names, table, old_capture_names);
+	AddAfterTriggerCTEs(binder, *outer, after_triggers, base_cte_name, uuid_suffix, injected_names, table,
+	                    old_capture_names);
 	return outer;
 }
 
@@ -443,7 +448,7 @@ BoundStatement Binder::ExpandTriggers(QueryNode &node, TableCatalogEntry &table,
 	}
 
 	optional_ptr<QueryNode> capture_base;
-	auto outer = BuildTriggerChain(node, table, before_triggers, after_triggers, uuid_suffix, base_cte_name,
+	auto outer = BuildTriggerChain(*this, node, table, before_triggers, after_triggers, uuid_suffix, base_cte_name,
 	                               has_returning, injected_virtuals, old_capture_names, capture_base);
 	// Request OLD capture on the generated base UPDATE in scoped binder state, active only while binding this
 	// chain. BindNode(UpdateQueryNode) reads the request by node identity, so it never touches the parsed AST.

@@ -6,6 +6,7 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/planner/bind_context.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/bound_query_node.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_lambdaref_expression.hpp"
@@ -226,7 +227,7 @@ static void BakeTableName(ParsedExpression &root_expr, const BindingAlias &bindi
 	});
 }
 
-unique_ptr<ParsedExpression> TableBinding::ExpandGeneratedColumn(const Identifier &column_name) {
+unique_ptr<ParsedExpression> TableBinding::ExpandGeneratedColumn(Binder &binder, const Identifier &column_name) {
 	auto catalog_entry = GetStandardEntry();
 	D_ASSERT(catalog_entry); // Should only be called on a TableBinding
 
@@ -237,7 +238,9 @@ unique_ptr<ParsedExpression> TableBinding::ExpandGeneratedColumn(const Identifie
 	auto column_index = GetBindingIndex(column_name);
 	D_ASSERT(table_entry.GetColumn(LogicalIndex(column_index)).Generated());
 	// Get a copy of the generated column
-	auto expression = table_entry.GetColumn(LogicalIndex(column_index)).GeneratedExpression().Copy();
+	auto expression =
+	    binder.ResolveGeneratedExpressionNames(table_entry.ParentSchema(), table_entry.name, table_entry.GetColumns(),
+	                                           table_entry.GetColumn(LogicalIndex(column_index)).GeneratedExpression());
 	unordered_map<idx_t, Identifier> alias_map;
 	for (auto &entry : name_map) {
 		alias_map[entry.second] = entry.first;

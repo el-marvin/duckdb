@@ -25,6 +25,7 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/database_manager.hpp"
 
 namespace duckdb {
 
@@ -274,6 +275,144 @@ unique_ptr<BoundConstraint> Binder::BindConstraint(const Constraint &constraint,
 	}
 }
 
+static optional_ptr<CatalogEntry> LookupEntry(CatalogEntryRetriever &scope, CatalogType type,
+                                              const QualifiedName &name) {
+	QualifiedName bound_name;
+	try {
+		bound_name = Binder::BindTableName(scope, name);
+	} catch (const BinderException &) {
+		// the walk also reaches macro arguments the bind may never use, so a qualification that does not resolve is
+		// left as written for the bind to report
+		return nullptr;
+	}
+	return scope.GetEntry(EntryLookupInfo(type, bound_name), OnEntryNotFound::RETURN_NULL);
+}
+
+static QualifiedName EntryName(CatalogEntry &entry, const Identifier &name) {
+	return QualifiedName::FromCatalogSchema(entry.ParentCatalog().GetName(), entry.ParentSchema().GetSchemaPath(),
+	                                        name);
+}
+
+//! A lone qualifier that names an attached database is a catalog, as Binder::BindSchemaOrCatalog decides
+static bool CanBeDotCall(ClientContext &context, const QualifiedName &name) {
+	if (name.Schema().empty()) {
+		return false;
+	}
+	return !name.Catalog().empty() || !DatabaseManager::Get(context).GetDatabase(context, name.Schema());
+}
+
+//! ColumnQualifier::QualifyFunction reads x.f() and x.y.f(), whose qualification holds no f, as the calls f(x) and
+//! f(x.y). Read as the table's own scope reads it (CheckBinder), the receiver x.y is column y when x names the table
+//! and field y of column x otherwise. Only a physical column is written out: the column dependency manager never saw
+//! the receiver, so a generated one could close a cycle, and anything else may sit in a macro argument the bind
+//! never uses; both are left to the bind.
+static unique_ptr<ParsedExpression> DotCallReceiver(const QualifiedName &name, const Identifier &table_name,
+                                                    const ColumnList &columns) {
+	bool plain_column = name.Catalog().empty() || name.Catalog() == table_name;
+	auto &column_name = plain_column ? name.Schema() : name.Catalog();
+	if (!columns.ColumnExists(column_name) || columns.GetColumn(column_name).Generated()) {
+		return nullptr;
+	}
+	if (plain_column) {
+		return make_uniq<ColumnRefExpression>(name.Schema());
+	}
+	vector<unique_ptr<ParsedExpression>> children;
+	children.push_back(make_uniq<ColumnRefExpression>(name.Catalog()));
+	children.push_back(ConstantExpression::String(name.Schema().GetIdentifierName()));
+	return make_uniq<OperatorExpression>(ExpressionType::STRUCT_EXTRACT, std::move(children));
+}
+
+struct FunctionResolution {
+	optional_ptr<CatalogEntry> entry;
+	bool dot_call = false;
+
+	bool operator==(const FunctionResolution &other) const {
+		return entry == other.entry && dot_call == other.dot_call;
+	}
+};
+
+static FunctionResolution ResolveFunction(CatalogEntryRetriever &scope, const QualifiedName &name) {
+	FunctionResolution result;
+	result.entry = LookupEntry(scope, CatalogType::SCALAR_FUNCTION_ENTRY, name);
+	if (!result.entry && CanBeDotCall(scope.GetContext(), name)) {
+		result.entry = LookupEntry(scope, CatalogType::SCALAR_FUNCTION_ENTRY, QualifiedName(name.Name()));
+		result.dot_call = true;
+	}
+	return result;
+}
+
+struct GeneratedNameScopes {
+	CatalogEntryRetriever &table_scope;
+	CatalogEntryRetriever &reader_scope;
+	const Identifier &table_name;
+	const ColumnList &columns;
+};
+
+static void QualifyFunctionName(GeneratedNameScopes &scopes, FunctionExpression &function) {
+	auto &name = function.GetQualifiedName();
+	auto resolution = ResolveFunction(scopes.table_scope, name);
+	if (!resolution.entry || resolution == ResolveFunction(scopes.reader_scope, name)) {
+		return;
+	}
+	if (resolution.dot_call) {
+		auto receiver = DotCallReceiver(name, scopes.table_name, scopes.columns);
+		if (!receiver) {
+			return;
+		}
+		auto &arguments = function.GetArgumentsMutable();
+		arguments.insert(arguments.begin(), std::move(receiver));
+	}
+	function.SetQualifiedName(EntryName(*resolution.entry, name.Name()));
+}
+
+static void QualifyTypeName(GeneratedNameScopes &scopes, TypeExpression &type) {
+	auto &name = type.GetQualifiedName();
+	auto entry = LookupEntry(scopes.table_scope, CatalogType::TYPE_ENTRY, name);
+	if (!entry || entry == LookupEntry(scopes.reader_scope, CatalogType::TYPE_ENTRY, name)) {
+		return;
+	}
+	type.SetQualifiedName(EntryName(*entry, name.Name()));
+}
+
+static void QualifyEntryNames(GeneratedNameScopes &scopes, ParsedExpression &expr) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::FUNCTION:
+		QualifyFunctionName(scopes, expr.Cast<FunctionExpression>());
+		break;
+	case ExpressionClass::CAST:
+		QualifyEntryNames(scopes, expr.Cast<CastExpression>().TargetTypeMutable());
+		break;
+	case ExpressionClass::TYPE:
+		QualifyTypeName(scopes, expr.Cast<TypeExpression>());
+		break;
+	default:
+		break;
+	}
+	ParsedExpressionIterator::EnumerateChildren(expr,
+	                                            [&](ParsedExpression &child) { QualifyEntryNames(scopes, child); });
+}
+
+unique_ptr<ParsedExpression> Binder::ResolveGeneratedExpressionNames(const SchemaCatalogEntry &table_schema,
+                                                                     const Identifier &table_name,
+                                                                     const ColumnList &columns,
+                                                                     const ParsedExpression &expression) {
+	if (table_schema.ParentCatalog().IsTemporaryCatalog()) {
+		// the temporary schema is never put on a search path, so a temporary table, like a temporary view, resolves
+		// its names through the reader's path
+		return expression.Copy();
+	}
+	// Neither lookup runs the dependency callback: the bind of the result looks every name up again.
+	CatalogEntryRetriever table_scope(context);
+	table_scope.SetSearchPath(GetSearchPath(table_schema.ParentCatalog(), table_schema.GetSchemaPath(), true));
+	CatalogEntryRetriever reader_scope(context);
+	reader_scope.Inherit(entry_retriever);
+	reader_scope.SetCallback(nullptr);
+	GeneratedNameScopes scopes {table_scope, reader_scope, table_name, columns};
+	auto result = expression.Copy();
+	QualifyEntryNames(scopes, *result);
+	return result;
+}
+
 void Binder::BindGeneratedColumns(BoundCreateTableInfo &info) {
 	auto &base = info.base->Cast<CreateTableInfo>();
 
@@ -313,7 +452,8 @@ void Binder::BindGeneratedColumns(BoundCreateTableInfo &info) {
 		}
 		D_ASSERT(col.Generated());
 
-		auto expression = col.GeneratedExpression().Copy();
+		auto expression = binder->ResolveGeneratedExpressionNames(info.schema, base.GetTableName(), base.columns,
+		                                                          col.GeneratedExpression());
 
 		auto bound_expression = expr_binder.Bind(expression);
 		D_ASSERT(bound_expression);
@@ -327,10 +467,6 @@ void Binder::BindGeneratedColumns(BoundCreateTableInfo &info) {
 			col.SetType(bound_expression->GetReturnType());
 
 			// Update the type in the binding, for future expansions
-			table_binding->SetColumnType(i.index, col.Type());
-		} else if (col.Type().id() == LogicalTypeId::UNBOUND) {
-			// Bind column type
-			BindLogicalType(col.TypeMutable());
 			table_binding->SetColumnType(i.index, col.Type());
 		}
 
@@ -721,6 +857,16 @@ unique_ptr<BoundCreateTableInfo> Binder::BindCreateTableInfo(unique_ptr<CreateIn
 		for (idx_t i = 0; i < base.columns.PhysicalColumnCount(); i++) {
 			auto &column = base.columns.GetColumnMutable(PhysicalIndex(i));
 			type_binder->BindLogicalType(column.TypeMutable());
+		}
+		// A generated column's declared type is the target of the cast that wraps its expression, so it binds with
+		// the path the expression's names resolve in
+		auto generated_type_binder = Binder::CreateBinder(context, *this);
+		generated_type_binder->entry_retriever.SetSearchPath(
+		    GetSearchPath(result->schema.ParentCatalog(), result->schema.GetSchemaPath(), true));
+		for (auto &column : base.columns.Logical()) {
+			if (column.Generated()) {
+				generated_type_binder->BindLogicalType(base.columns.GetColumnMutable(column.Logical()).TypeMutable());
+			}
 		}
 
 		auto &config = DBConfig::Get(catalog.GetAttached());

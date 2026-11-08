@@ -820,14 +820,16 @@ void DataTable::VerifyAppendConstraints(ConstraintState &constraint_state, Clien
 		// Verify the generated columns against the inserted values.
 		auto binder = Binder::CreateBinder(context);
 		physical_index_set_t bound_columns;
-		CheckBinder generated_check_binder(*binder, context, table.name, table.GetColumns(), bound_columns);
+		CheckBinder generated_check_binder(*binder, context, table.name, table.GetColumns(), bound_columns,
+		                                   table.ParentSchema());
 		for (auto &col : table.GetColumns().Logical()) {
 			if (!col.Generated()) {
 				continue;
 			}
 			D_ASSERT(col.Type().id() != LogicalTypeId::ANY);
 			generated_check_binder.target_type = col.Type();
-			auto to_be_bound_expression = col.GeneratedExpression().Copy();
+			auto to_be_bound_expression = binder->ResolveGeneratedExpressionNames(
+			    table.ParentSchema(), table.name, table.GetColumns(), col.GeneratedExpression());
 			auto bound_expression = generated_check_binder.Bind(to_be_bound_expression);
 			VerifyGeneratedExpressionSuccess(context, table, chunk, *bound_expression, col.Oid());
 		}

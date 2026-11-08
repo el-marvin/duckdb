@@ -302,6 +302,12 @@ public:
 	unique_ptr<BoundConstraint> BindUniqueConstraint(const Constraint &constraint, const Identifier &table,
 	                                                 const ColumnList &columns);
 	static void VerifyConstraintCheckModeStorageVersion(const Constraint &constraint, Catalog &catalog, bool temporary);
+	//! A copy of a generated column's expression in which every function, macro and type name that this binder would
+	//! resolve to another entry than the table's schema does is qualified with the table's entry
+	unique_ptr<ParsedExpression> ResolveGeneratedExpressionNames(const SchemaCatalogEntry &table_schema,
+	                                                             const Identifier &table_name,
+	                                                             const ColumnList &columns,
+	                                                             const ParsedExpression &expression);
 
 	BoundStatement BindAlterAddIndex(BoundStatement &result, CatalogEntry &entry, unique_ptr<AlterInfo> alter_info);
 
@@ -709,7 +715,7 @@ private:
 	Identifier BindCatalog(const Identifier &catalog_name);
 	SchemaCatalogEntry &BindCreateSchema(CreateInfo &info);
 
-	vector<CatalogSearchEntry> GetSearchPath(Catalog &catalog, const vector<Identifier> &schema_path,
+	vector<CatalogSearchEntry> GetSearchPath(const Catalog &catalog, const vector<Identifier> &schema_path,
 	                                         bool default_schema_precedence = false);
 
 	BoundStatement BindSelectNode(SelectNode &statement, BoundStatement from_table);

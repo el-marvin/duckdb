@@ -199,7 +199,7 @@ vector<reference<Binding>> BindContext::GetMatchingBindings(const Identifier &co
 
 unique_ptr<ParsedExpression> BindContext::ExpandGeneratedColumn(TableBinding &table_binding,
                                                                 const Identifier &column_name) {
-	auto result = table_binding.ExpandGeneratedColumn(column_name);
+	auto result = table_binding.ExpandGeneratedColumn(binder, column_name);
 	result->SetAlias(column_name);
 	return result;
 }

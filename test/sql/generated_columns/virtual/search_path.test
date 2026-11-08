@@ -1,0 +1,813 @@
+# name: test/sql/generated_columns/virtual/search_path.test
+# description: A generated column resolves its function, macro and type names in its table's schema, whatever the reader's search path
+# group: [virtual]
+
+load {TEST_DIR}/generated_column_search_path.db
+
+statement ok
+CREATE SCHEMA s;
+
+# the reported case: a macro of s called by its bare name, used from a session on main
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE MACRO s.tenfold(x) AS x * 10;
+
+statement ok
+CREATE TABLE s.t10(v INTEGER, g INTEGER GENERATED ALWAYS AS (tenfold(v)));
+
+statement ok
+INSERT INTO s.t10 VALUES (1);
+
+statement ok
+RESET search_path;
+
+statement ok
+INSERT INTO s.t10 VALUES (2);
+
+query II
+SELECT v, g FROM s.t10 ORDER BY v;
+----
+1	10
+2	20
+
+query I
+SELECT g FROM s.t10 WHERE g > 15;
+----
+20
+
+# the same macro name in both schemas: the table's schema wins for every reader and writer
+
+statement ok
+CREATE MACRO s.f(x) AS x * 10;
+
+statement ok
+CREATE MACRO main.f(x) AS x * 1000;
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.t(id INTEGER, v INTEGER, g INTEGER GENERATED ALWAYS AS (f(v)));
+
+statement ok
+INSERT INTO s.t VALUES (1, 1);
+
+statement ok
+RESET search_path;
+
+statement ok
+INSERT INTO s.t VALUES (2, 2);
+
+query III
+SELECT * FROM s.t ORDER BY id;
+----
+1	1	10
+2	2	20
+
+query I
+SELECT id FROM s.t WHERE g = 20;
+----
+2
+
+query II
+SELECT id, (SELECT g) FROM s.t ORDER BY id;
+----
+1	10
+2	20
+
+query I
+SELECT g FROM s.t AS x WHERE x.id = 1;
+----
+10
+
+query I
+UPDATE s.t SET v = 3 WHERE id = 2 RETURNING g;
+----
+30
+
+query I
+DELETE FROM s.t WHERE id = 2 RETURNING g;
+----
+30
+
+statement ok
+CREATE TABLE main.copied AS SELECT * FROM s.t;
+
+query III
+SELECT * FROM main.copied;
+----
+1	1	10
+
+statement ok
+CREATE VIEW main.v_t AS SELECT id, g FROM s.t;
+
+query II
+SELECT * FROM main.v_t;
+----
+1	10
+
+# the table depends on the macro its expression resolves to
+
+statement error
+DROP MACRO s.f;
+----
+table "t" depends on macro function "f"
+
+statement ok
+DROP MACRO main.f;
+
+query I
+SELECT g FROM s.t;
+----
+10
+
+statement ok
+CREATE MACRO main.f(x) AS x * 1000;
+
+# a session whose path already resolves the names is unchanged: the expression text still matches the column
+
+statement ok
+SET search_path = 's';
+
+query II
+SELECT g, count(*) FROM t GROUP BY f(v);
+----
+10	1
+
+query II
+SELECT g, count(*) FROM t GROUP BY g;
+----
+10	1
+
+statement ok
+RESET search_path;
+
+# a macro of the default schema used by a table in main, read from a session on s that has its own macro of that name
+
+statement ok
+CREATE TABLE main.u(v INTEGER, g INTEGER GENERATED ALWAYS AS (f(v)));
+
+statement ok
+INSERT INTO main.u VALUES (1);
+
+statement ok
+SET search_path = 's';
+
+query II
+SELECT * FROM main.u;
+----
+1	1000
+
+statement ok
+INSERT INTO main.u VALUES (2);
+
+query II
+SELECT * FROM main.u ORDER BY v;
+----
+1	1000
+2	2000
+
+# a temporary macro of the name shadows it, as it does for a view
+
+statement ok
+CREATE TEMPORARY MACRO f(x) AS x * 7;
+
+query II
+SELECT * FROM main.u ORDER BY v;
+----
+1	7
+2	14
+
+statement ok
+DROP MACRO temp.f;
+
+statement ok
+RESET search_path;
+
+# user types, in a cast and as the declared type, and a list of one
+
+statement ok
+CREATE TYPE s.mood AS ENUM ('sad', 'ok');
+
+statement ok
+CREATE TYPE main.mood AS ENUM ('x', 'ok');
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.moods(m VARCHAR, c mood GENERATED ALWAYS AS (m::mood), l mood[] GENERATED ALWAYS AS ([m::mood]));
+
+statement ok
+INSERT INTO s.moods VALUES ('ok');
+
+statement ok
+RESET search_path;
+
+statement ok
+INSERT INTO s.moods VALUES ('sad');
+
+query III
+SELECT m, c, l FROM s.moods ORDER BY m;
+----
+ok	ok	[ok]
+sad	sad	[sad]
+
+statement error
+INSERT INTO s.moods VALUES ('happy');
+----
+Could not convert string 'happy' to ENUM
+
+# a nested macro, from a session on the table's schema
+
+statement ok
+CREATE MACRO s.inner_m(x) AS x + 1;
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE MACRO s.outer_m(x) AS inner_m(x) * 100;
+
+statement ok
+CREATE TABLE s.nested(v INTEGER, g INTEGER GENERATED ALWAYS AS (outer_m(v)));
+
+statement ok
+INSERT INTO s.nested VALUES (1);
+
+query II
+SELECT * FROM s.nested;
+----
+1	200
+
+statement ok
+RESET search_path;
+
+# CREATE from main with names only s holds resolves them in s, for the expression and the declared type
+
+statement ok
+CREATE TABLE s.from_main(v INTEGER, m VARCHAR, g INTEGER GENERATED ALWAYS AS (f(v)), c mood GENERATED ALWAYS AS (m::mood));
+
+statement ok
+INSERT INTO s.from_main VALUES (1, 'ok');
+
+query IIII
+SELECT * FROM s.from_main;
+----
+1	ok	10	ok
+
+# the stored expression is kept as written
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'from_main';
+----
+CREATE TABLE s.from_main(v INTEGER, m VARCHAR, g INTEGER GENERATED ALWAYS AS(f(v)), c ENUM('sad', 'ok') GENERATED ALWAYS AS(CAST(m AS mood)));
+
+# ALTER rebinds the generated columns in the table's schema
+
+statement ok
+ALTER TABLE s.t ADD COLUMN w INTEGER;
+
+statement ok
+ALTER TABLE s.t RENAME COLUMN w TO w2;
+
+query IIII
+SELECT * FROM s.t;
+----
+1	1	10	NULL
+
+statement error
+ALTER TABLE s.t ADD COLUMN g2 INTEGER GENERATED ALWAYS AS (f(v));
+----
+Adding generated columns after table creation is not supported yet
+
+# a nested schema, which cannot be on a search path
+
+statement ok
+CREATE SCHEMA s.inner;
+
+statement ok
+CREATE MACRO s.inner.f(x) AS x * 3;
+
+statement ok
+CREATE TABLE s.inner.tn(v INTEGER, g INTEGER GENERATED ALWAYS AS (f(v)));
+
+statement ok
+INSERT INTO s.inner.tn VALUES (1);
+
+query II
+SELECT * FROM s.inner.tn;
+----
+1	3
+
+# an attached catalog
+
+statement ok
+ATTACH ':memory:' AS db2;
+
+statement ok
+CREATE SCHEMA db2.s;
+
+statement ok
+CREATE MACRO db2.s.f(x) AS x * 5;
+
+statement ok
+USE db2.s;
+
+statement ok
+CREATE TABLE t(v INTEGER, g INTEGER GENERATED ALWAYS AS (f(v)));
+
+statement ok
+INSERT INTO t VALUES (1);
+
+statement ok
+USE generated_column_search_path;
+
+statement ok
+INSERT INTO db2.s.t VALUES (2);
+
+query II
+SELECT * FROM db2.s.t ORDER BY v;
+----
+1	5
+2	10
+
+statement ok
+SET search_path = 's';
+
+query II
+SELECT * FROM db2.s.t ORDER BY v;
+----
+1	5
+2	10
+
+statement ok
+RESET search_path;
+
+statement ok
+DETACH db2;
+
+# a generated column over another one, written from main, and an UPDATE trigger's OLD and NEW transition tables
+# both compute the columns in the table's schema
+
+statement ok
+CREATE TABLE s.trig(id INTEGER, v INTEGER, g INTEGER GENERATED ALWAYS AS (f(v)), g2 INTEGER GENERATED ALWAYS AS (f(g)));
+
+statement ok
+CREATE TABLE s.trig_log(old_g INTEGER, new_g INTEGER, old_g2 INTEGER, new_g2 INTEGER);
+
+statement ok
+INSERT INTO s.trig VALUES (1, 1);
+
+query IIII
+SELECT * FROM s.trig;
+----
+1	1	10	100
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TRIGGER trig_old_new AFTER UPDATE ON s.trig
+REFERENCING OLD TABLE AS o NEW TABLE AS n
+FOR EACH STATEMENT
+    INSERT INTO s.trig_log SELECT o.g, n.g, o.g2, n.g2 FROM o JOIN n ON o.id = n.id;
+
+statement ok
+RESET search_path;
+
+statement ok
+UPDATE s.trig SET v = 2;
+
+query IIII
+SELECT * FROM s.trig_log;
+----
+10	20	100	200
+
+# the clauses whose column references the binder qualifies before binding them, from main
+
+statement ok
+INSERT INTO s.t(id, v) VALUES (4, 4);
+
+query I
+SELECT id FROM s.t ORDER BY g DESC;
+----
+4
+1
+
+query II
+SELECT g, count(*) FROM s.t GROUP BY g ORDER BY g;
+----
+10	1
+40	1
+
+query I
+SELECT g FROM s.t GROUP BY g HAVING g > 20;
+----
+40
+
+query I
+SELECT id FROM s.t QUALIFY row_number() OVER (ORDER BY g DESC) = 1;
+----
+4
+
+# a table created from main depends on the entry its expression resolves to in its schema
+
+statement ok
+CREATE MACRO s.dep_f(x) AS x * 10;
+
+statement ok
+CREATE MACRO main.dep_f(x) AS x * 1000;
+
+statement ok
+CREATE TABLE s.dep(v INTEGER, g INTEGER GENERATED ALWAYS AS (dep_f(v)));
+
+statement error
+DROP MACRO s.dep_f;
+----
+table "dep" depends on macro function "dep_f"
+
+statement ok
+DROP MACRO main.dep_f;
+
+statement error
+DROP TYPE s.mood;
+----
+depends on type "mood"
+
+# the dot call form v.f() resolves f in the table's schema
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.dot(v INTEGER, g INTEGER GENERATED ALWAYS AS (v.f()));
+
+statement ok
+INSERT INTO s.dot VALUES (1);
+
+statement ok
+RESET search_path;
+
+statement ok
+INSERT INTO s.dot VALUES (2);
+
+query II
+SELECT * FROM s.dot ORDER BY v;
+----
+1	10
+2	20
+
+# a temporary table keeps the reader's path, as a temporary view does: its schema is never on a search path
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TEMPORARY TABLE temp_t(v INTEGER, g INTEGER GENERATED ALWAYS AS (f(v)));
+
+statement ok
+CREATE TEMPORARY VIEW temp_v AS SELECT f(1) AS f1;
+
+statement ok
+INSERT INTO temp_t VALUES (1);
+
+query III
+SELECT * FROM temp_t, temp_v;
+----
+1	10	10
+
+statement ok
+RESET search_path;
+
+query III
+SELECT * FROM temp_t, temp_v;
+----
+1	1000	1000
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE VIEW s.v_temp AS SELECT * FROM temp_t;
+
+statement ok
+RESET search_path;
+
+query II
+SELECT * FROM s.v_temp;
+----
+1	10
+
+statement ok
+DROP VIEW s.v_temp;
+
+# a dot call on a struct field resolves f in the table's schema too
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.dot_field(v STRUCT(a INTEGER), g INTEGER GENERATED ALWAYS AS (v.a.f()));
+
+statement ok
+INSERT INTO s.dot_field VALUES ({'a': 1});
+
+statement ok
+RESET search_path;
+
+statement ok
+INSERT INTO s.dot_field VALUES ({'a': 2});
+
+query I
+SELECT g FROM s.dot_field ORDER BY g;
+----
+10
+20
+
+# a two part receiver that names the table is the table's column, as the table's own scope reads it
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.dot_table(dot_table STRUCT(v INTEGER), v INTEGER, g INTEGER GENERATED ALWAYS AS (dot_table.v.f()));
+
+statement ok
+INSERT INTO s.dot_table VALUES ({'v': 9}, 1);
+
+statement ok
+RESET search_path;
+
+statement ok
+INSERT INTO s.dot_table VALUES ({'v': 9}, 2);
+
+query I
+SELECT g FROM s.dot_table ORDER BY g;
+----
+10
+20
+
+# a qualification the table's path finds ambiguous is left for the bind, which reads it as the session does
+
+statement ok
+ATTACH ':memory:' AS db3;
+
+statement ok
+ATTACH ':memory:' AS x;
+
+statement ok
+CREATE SCHEMA db3.x;
+
+statement ok
+CREATE MACRO x.main.xf() AS 10;
+
+statement ok
+CREATE TABLE db3.main.ambiguous(v INTEGER, g INTEGER GENERATED ALWAYS AS (x.xf()));
+
+statement ok
+INSERT INTO db3.main.ambiguous VALUES (1);
+
+query I
+SELECT g FROM db3.main.ambiguous;
+----
+10
+
+statement ok
+DETACH db3;
+
+statement ok
+DETACH x;
+
+# a macro argument the macro never uses is never resolved
+
+statement ok
+CREATE SCHEMA q;
+
+statement ok
+ATTACH ':memory:' AS q;
+
+statement ok
+CREATE MACRO keep_42(a) AS 42;
+
+statement ok
+CREATE TABLE unused_argument(v INTEGER, g INTEGER GENERATED ALWAYS AS (keep_42(q.missing())));
+
+statement ok
+INSERT INTO unused_argument VALUES (1);
+
+query I
+SELECT g FROM unused_argument;
+----
+42
+
+statement ok
+CREATE TABLE s.unused_dot_call(v INTEGER, g INTEGER GENERATED ALWAYS AS (keep_42(nope.f())));
+
+query I
+INSERT INTO s.unused_dot_call VALUES (1) RETURNING g;
+----
+42
+
+query I
+UPDATE s.unused_dot_call SET v = 2 RETURNING g;
+----
+42
+
+# a receiver that is the generated column itself, unused by the macro, under an UPDATE trigger's OLD image
+
+statement ok
+CREATE TABLE s.self_dot_call(v INTEGER, g INTEGER GENERATED ALWAYS AS (keep_42(g.f())));
+
+statement ok
+INSERT INTO s.self_dot_call VALUES (1);
+
+statement ok
+CREATE TABLE s.self_log(g INTEGER);
+
+statement ok
+CREATE TRIGGER self_old AFTER UPDATE ON s.self_dot_call
+REFERENCING OLD TABLE AS o
+FOR EACH STATEMENT INSERT INTO s.self_log SELECT g FROM o;
+
+statement ok
+UPDATE s.self_dot_call SET v = 2;
+
+query I
+SELECT * FROM s.self_log;
+----
+42
+
+# a CHECK constraint that reaches a generated column through a dot call receiver binds as before
+
+statement ok
+CREATE TABLE check_dot(v INTEGER, g INTEGER GENERATED ALWAYS AS (v + 1), CHECK (g.abs() > 0));
+
+statement ok
+INSERT INTO check_dot VALUES (1);
+
+statement error
+INSERT INTO check_dot VALUES (-1);
+----
+CHECK constraint failed
+
+statement ok
+DETACH q;
+
+# a qualifier that names an attached database is a catalog, not a dot call receiver
+
+statement ok
+ATTACH ':memory:' AS other;
+
+statement error
+CREATE TABLE s.not_dot(other INTEGER, g INTEGER GENERATED ALWAYS AS (other.f()));
+----
+Scalar Function with name f does not exist
+
+statement ok
+DETACH other;
+
+# a declared type agrees with the cast that wraps the expression when the table's schema lacks the type
+
+statement ok
+CREATE SCHEMA no_types;
+
+statement ok
+CREATE TYPE main.pick AS ENUM ('main', 'both');
+
+statement ok
+CREATE TYPE s.pick AS ENUM ('s', 'both');
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE no_types.x(v VARCHAR, g pick GENERATED ALWAYS AS (v));
+
+statement ok
+INSERT INTO no_types.x VALUES ('main');
+
+query II
+SELECT typeof(g), data_type FROM no_types.x, duckdb_columns() WHERE table_name = 'x' AND column_name = 'g';
+----
+ENUM('main', 'both')	ENUM('main', 'both')
+
+statement ok
+RESET search_path;
+
+# a unique index over a generated column checks the values the table's schema computes
+
+statement ok
+CREATE MACRO s.idx_f(x) AS x // 10;
+
+statement ok
+CREATE MACRO main.idx_f(x) AS x * 1000;
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.ix(v INTEGER, g INTEGER GENERATED ALWAYS AS (idx_f(v)));
+
+statement ok
+CREATE UNIQUE INDEX ix_g ON s.ix((g + 0));
+
+statement ok
+INSERT INTO s.ix VALUES (1);
+
+statement ok
+RESET search_path;
+
+# the expression is bound again after a restart
+
+restart
+
+query II
+SELECT * FROM s.t10 ORDER BY v;
+----
+1	10
+2	20
+
+statement ok
+INSERT INTO s.t10 VALUES (3);
+
+query III
+SELECT m, c, l FROM s.moods ORDER BY m;
+----
+ok	ok	[ok]
+sad	sad	[sad]
+
+statement error
+INSERT INTO s.ix VALUES (2);
+----
+Duplicate key
+
+statement ok
+INSERT INTO s.ix VALUES (10);
+
+query II
+SELECT * FROM s.ix ORDER BY v;
+----
+1	0
+10	1
+
+statement ok
+CHECKPOINT;
+
+restart
+
+query II
+SELECT * FROM s.t10 ORDER BY v;
+----
+1	10
+2	20
+3	30
+
+# EXPORT writes the expression as written, and IMPORT from a session on main recreates the table
+
+load {TEST_DIR}/generated_column_search_path_export.db
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE MACRO s.f(x) AS x * 10;
+
+statement ok
+CREATE MACRO main.f(x) AS x * 1000;
+
+statement ok
+CREATE TYPE s.mood AS ENUM ('sad', 'ok');
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE TABLE s.e(v INTEGER, m VARCHAR, g INTEGER GENERATED ALWAYS AS (f(v)), c mood GENERATED ALWAYS AS (m::mood));
+
+statement ok
+INSERT INTO s.e VALUES (1, 'ok');
+
+statement ok
+RESET search_path;
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/generated_column_search_path_export';
+
+load {TEST_DIR}/generated_column_search_path_import.db
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/generated_column_search_path_export';
+
+query I
+SELECT sql FROM duckdb_tables() WHERE table_name = 'e';
+----
+CREATE TABLE s.e(v INTEGER, m VARCHAR, g INTEGER GENERATED ALWAYS AS(f(v)), c ENUM('sad', 'ok') GENERATED ALWAYS AS(CAST(m AS mood)));
+
+query IIII
+SELECT * FROM s.e;
+----
+1	ok	10	ok
