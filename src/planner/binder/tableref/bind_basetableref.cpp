@@ -73,6 +73,11 @@ BoundStatement Binder::BindWithReplacementScan(ClientContext &context, BaseTable
 	if (!replacement_function) {
 		return BoundStatement();
 	}
+	if (ref.at_clause) {
+		throw BinderException(QueryErrorContext(ref.query_location),
+		                      "Replacement scan \"%s\" does not support time travel",
+		                      ReplacementScan::GetFullPath(ref.GetQualifiedName()));
+	}
 
 	if (!ref.alias.empty()) {
 		// user-provided alias overrides the default alias
@@ -153,6 +158,9 @@ BoundStatement Binder::Bind(BaseTableRef &ref) {
 	BindingAlias binding_alias(ref.GetQualifiedName().Schema(), ref.Table());
 	auto ctebinding = GetCTEBinding(binding_alias);
 	if (ctebinding && ctebinding->CanBeReferenced()) {
+		if (ref.at_clause) {
+			throw BinderException(error_context, "CTE %s does not support time travel", ref.Table());
+		}
 		ctebinding->Reference();
 
 		// There is a CTE binding in the BindContext.

@@ -1,0 +1,208 @@
+# name: test/sql/parser/table_at_clause_cte.test
+# description: An AT clause on a reference that does not resolve to a catalog table or view is refused
+# group: [parser]
+
+statement ok
+CREATE TABLE tbl AS SELECT 42 AS i
+
+statement ok
+CREATE VIEW v AS SELECT 1 AS a
+
+statement ok
+CREATE MACRO tm() AS TABLE SELECT 1 AS a
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => a)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => random()::BIGINT)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (TIMESTAMP => TIMESTAMP '2020-01-01')
+----
+CTE "t" does not support time travel
+
+# neither the CTE nor the value is bound once the source refuses the clause
+statement error
+WITH t AS (SELECT * FROM nonexistent) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => 'x'::INTEGER)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => (SELECT 1))
+----
+CTE "t" does not support time travel
+
+statement error
+WITH "a""b" AS (SELECT 1 AS a) SELECT * FROM "a""b" AT (VERSION => 1)
+----
+CTE "a""b" does not support time travel
+
+statement error
+WITH t(x) AS (SELECT 1) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT * FROM t AS u(b) AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS MATERIALIZED (SELECT 1 AS a) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS NOT MATERIALIZED (SELECT 1 AS a) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a), u AS (SELECT * FROM t AT (VERSION => 1)) SELECT * FROM u
+----
+CTE "t" does not support time travel
+
+statement error
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r AT (VERSION => 1) WHERE n < 3) SELECT * FROM r
+----
+CTE "r" does not support time travel
+
+statement error
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT * FROM r AT (VERSION => 1)
+----
+CTE "r" does not support time travel
+
+statement error
+WITH RECURSIVE r(n) USING KEY (n) AS (SELECT 1 UNION SELECT n + 1 FROM recurring.r AT (VERSION => 1) WHERE n < 3) SELECT * FROM r
+----
+CTE "r" does not support time travel
+
+# a CTE takes the name before the catalog, so its clause is refused even where the table would accept one
+statement error
+WITH tbl AS (SELECT 1 AS a) SELECT * FROM tbl AT (VERSION => 1)
+----
+CTE "tbl" does not support time travel
+
+# a qualified name is not a CTE reference
+statement error
+WITH tbl AS (SELECT 1 AS a) SELECT * FROM main.tbl AT (VERSION => 1)
+----
+Catalog type does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) SELECT (SELECT a FROM t AT (VERSION => 1))
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS i) INSERT INTO tbl SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS i) DELETE FROM tbl USING t AT (VERSION => 1) WHERE tbl.i = t.i
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS i) UPDATE tbl SET i = t.i FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+WITH t AS (SELECT 1 AS a) PIVOT t AT (VERSION => 1) ON a
+----
+CTE "t" does not support time travel
+
+statement error
+CREATE VIEW cte_view AS WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+CREATE MACRO cte_macro() AS TABLE WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => 1)
+----
+CTE "t" does not support time travel
+
+statement error
+PREPARE p AS WITH t AS (SELECT 1 AS a) SELECT * FROM t AT (VERSION => $1)
+----
+CTE "t" does not support time travel
+
+# a self reference without RECURSIVE is not a CTE reference: the name goes to the catalog with its clause
+statement error
+WITH t AS (SELECT * FROM t AT (VERSION => 1)) SELECT * FROM t
+----
+Catalog type does not support time travel
+
+query I
+WITH t AS (SELECT 1 AS a) SELECT * FROM t
+----
+1
+
+query I
+WITH tbl AS (SELECT 1 AS a) SELECT * FROM tbl
+----
+1
+
+query I
+SELECT * FROM tbl
+----
+42
+
+# a table, a view and a name the catalog resolves keep the catalog's answer
+statement error
+SELECT * FROM tbl AT (VERSION => 1)
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM v AT (VERSION => 1)
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM tm AT (VERSION => 1)
+----
+Catalog type does not support time travel
+
+statement error
+SELECT * FROM nonexistent AT (VERSION => 1)
+----
+Catalog type does not support time travel
+
+# other sources cannot carry an AT clause at all
+statement error
+SELECT * FROM (SELECT 1 AS a) sq AT (VERSION => 1)
+----
+syntax error at or near "AT"
+
+statement error
+SELECT * FROM (VALUES (1)) vals(a) AT (VERSION => 1)
+----
+syntax error at or near "AT"
+
+statement error
+SELECT * FROM range(3) AT (VERSION => 1)
+----
+syntax error at or near "AT"
+
+statement error
+SELECT * FROM tm() AT (VERSION => 1)
+----
+syntax error at or near "AT"
