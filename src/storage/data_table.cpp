@@ -828,7 +828,7 @@ void DataTable::VerifyAppendConstraints(ConstraintState &constraint_state, Clien
 			}
 			D_ASSERT(col.Type().id() != LogicalTypeId::ANY);
 			generated_check_binder.target_type = col.Type();
-			auto to_be_bound_expression = binder->ResolveGeneratedExpressionNames(
+			auto to_be_bound_expression = binder->ResolveTableExpressionNames(
 			    table.ParentSchema(), table.name, table.GetColumns(), col.GeneratedExpression());
 			auto bound_expression = generated_check_binder.Bind(to_be_bound_expression);
 			VerifyGeneratedExpressionSuccess(context, table, chunk, *bound_expression, col.Oid());

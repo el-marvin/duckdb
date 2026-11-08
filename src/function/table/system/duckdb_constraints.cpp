@@ -12,24 +12,17 @@
 #include "duckdb/parser/constraints/foreign_key_constraint.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/lambda_expression.hpp"
-#include "duckdb/planner/binder.hpp"
-#include "duckdb/planner/constraints/bound_check_constraint.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 
 namespace duckdb {
 
 struct ConstraintEntry {
-	ConstraintEntry(ClientContext &context, TableCatalogEntry &table) : table(table) {
-		if (!table.IsDuckTable()) {
-			return;
-		}
-		auto binder = Binder::CreateBinder(context);
-		bound_constraints = binder->BindConstraints(table.GetConstraints(), table.name, table.GetColumns());
+	explicit ConstraintEntry(TableCatalogEntry &table) : table(table) {
 	}
 
 	TableCatalogEntry &table;
-	vector<unique_ptr<BoundConstraint>> bound_constraints;
 };
 
 struct DuckDBConstraintsData : public GlobalTableFunctionState {
@@ -115,7 +108,7 @@ unique_ptr<GlobalTableFunctionState> DuckDBConstraintsInit(ClientContext &contex
 
 		sort(entries.begin(), entries.end(), [&](CatalogEntry &x, CatalogEntry &y) { return (x.name < y.name); });
 		for (auto &entry : entries) {
-			result->entries.emplace_back(context, entry.get().Cast<TableCatalogEntry>());
+			result->entries.emplace_back(entry.get().Cast<TableCatalogEntry>());
 		}
 	};
 

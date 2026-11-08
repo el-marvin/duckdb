@@ -913,7 +913,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::RemoveColumn(ClientContext &context, Re
 	auto adjusted_indices = column_dependencies.RemoveColumn(removed_index, columns.LogicalColumnCount());
 
 	auto binder = Binder::CreateBinder(context);
-	auto bound_constraints = binder->BindConstraints(constraints, name, columns);
+	auto bound_constraints = binder->BindConstraints(*this);
 
 	UpdateConstraintsOnColumnDrop(removed_index, adjusted_indices, info, *create_info, bound_constraints,
 	                              dropped_column_is_generated);
@@ -1244,7 +1244,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::ChangeColumnType(ClientContext &context
 	// Check if type is supported in this database version
 	CheckTypeIsSupported(info.target_type, catalog.GetAttached());
 
-	auto bound_constraints = binder->BindConstraints(constraints, name, columns);
+	auto bound_constraints = binder->BindConstraints(*this);
 	for (auto &col : columns.Logical()) {
 		auto copy = col.Copy();
 		if (change_idx == col.Logical()) {
@@ -1493,7 +1493,7 @@ unique_ptr<CatalogEntry> DuckTableEntry::AddConstraint(ClientContext &context, A
 	// We create a physical table with a new constraint and a new unique index.
 	const auto binder = Binder::CreateBinder(context);
 	const auto bound_constraint =
-	    binder->BindConstraint(*info.constraint, table_info.GetTableName(), table_info.columns);
+	    binder->BindConstraint(*info.constraint, schema, table_info.GetTableName(), table_info.columns);
 	const auto bound_create_info = binder->BindCreateTableInfo(std::move(create_info), schema, info.bind_mode);
 	SetAlterDependencies(context, *bound_create_info, info);
 

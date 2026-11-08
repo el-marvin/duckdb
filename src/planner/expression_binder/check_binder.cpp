@@ -8,7 +8,7 @@
 namespace duckdb {
 
 CheckBinder::CheckBinder(Binder &binder, ClientContext &context, Identifier table_p, const ColumnList &columns,
-                         physical_index_set_t &bound_columns, optional_ptr<const SchemaCatalogEntry> table_schema)
+                         physical_index_set_t &bound_columns, const SchemaCatalogEntry &table_schema)
     : ExpressionBinder(binder, context), table(std::move(table_p)), columns(columns), bound_columns(bound_columns),
       table_schema(table_schema) {
 	target_type = LogicalType::INTEGER;
@@ -60,9 +60,8 @@ BindResult CheckBinder::BindCheckColumn(ColumnRefExpression &colref) {
 	}
 	auto &col = columns.GetColumn(colref.ColumnNames()[0]);
 	if (col.Generated()) {
-		auto bound_expression = table_schema ? binder.ResolveGeneratedExpressionNames(*table_schema, table, columns,
-		                                                                              col.GeneratedExpression())
-		                                     : col.GeneratedExpression().Copy();
+		auto bound_expression =
+		    binder.ResolveTableExpressionNames(table_schema, table, columns, col.GeneratedExpression());
 		return BindExpression(bound_expression, 0, false);
 	}
 	bound_columns.insert(col.Physical());

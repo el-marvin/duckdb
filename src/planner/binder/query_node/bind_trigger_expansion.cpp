@@ -165,8 +165,8 @@ static void InlineGeneratedColumnRefs(Binder &binder, unique_ptr<ParsedExpressio
 		if (!colref.IsQualified() && table.GetColumns().ColumnExists(colref.GetColumnName())) {
 			auto &column = table.GetColumns().GetColumn(colref.GetColumnName());
 			if (column.Generated()) {
-				expr = binder.ResolveGeneratedExpressionNames(table.ParentSchema(), table.name, table.GetColumns(),
-				                                              column.GeneratedExpression());
+				expr = binder.ResolveTableExpressionNames(table.ParentSchema(), table.name, table.GetColumns(),
+				                                          column.GeneratedExpression());
 				InlineGeneratedColumnRefs(binder, expr, table);
 				return;
 			}
@@ -212,8 +212,8 @@ static unique_ptr<CommonTableExpressionInfo> MakeUpdateOldAliasCTE(Binder &binde
 	auto outer = make_uniq<SelectNode>();
 	for (auto &column : table.GetColumns().Logical()) {
 		if (column.Generated()) {
-			auto expr = binder.ResolveGeneratedExpressionNames(table.ParentSchema(), table.name, table.GetColumns(),
-			                                                   column.GeneratedExpression());
+			auto expr = binder.ResolveTableExpressionNames(table.ParentSchema(), table.name, table.GetColumns(),
+			                                               column.GeneratedExpression());
 			InlineGeneratedColumnRefs(binder, expr, table);
 			expr->SetAlias(column.Name());
 			outer->select_list.push_back(std::move(expr));

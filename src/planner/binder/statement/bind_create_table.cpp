@@ -89,28 +89,31 @@ static void VerifyCompressionType(ClientContext &context, optional_ptr<StorageMa
 
 vector<unique_ptr<BoundConstraint>> Binder::BindConstraints(ClientContext &context,
                                                             const vector<unique_ptr<Constraint>> &constraints,
+                                                            const SchemaCatalogEntry &table_schema,
                                                             const Identifier &table_name, const ColumnList &columns) {
 	auto binder = Binder::CreateBinder(context);
-	return binder->BindConstraints(constraints, table_name, columns);
+	return binder->BindConstraints(constraints, table_schema, table_name, columns);
 }
 
 vector<unique_ptr<BoundConstraint>> Binder::BindConstraints(const TableCatalogEntry &table) {
-	return BindConstraints(table.GetConstraints(), table.name, table.GetColumns());
+	return BindConstraints(table.GetConstraints(), table.ParentSchema(), table.name, table.GetColumns());
 }
 
 vector<unique_ptr<BoundConstraint>> Binder::BindConstraints(const vector<unique_ptr<Constraint>> &constraints,
+                                                            const SchemaCatalogEntry &table_schema,
                                                             const Identifier &table_name, const ColumnList &columns) {
 	vector<unique_ptr<BoundConstraint>> bound_constraints;
 	for (const auto &constr : constraints) {
-		bound_constraints.push_back(BindConstraint(*constr, table_name, columns));
+		bound_constraints.push_back(BindConstraint(*constr, table_schema, table_name, columns));
 	}
 	return bound_constraints;
 }
 
 vector<unique_ptr<BoundConstraint>> Binder::BindNewConstraints(vector<unique_ptr<Constraint>> &constraints,
+                                                               const SchemaCatalogEntry &table_schema,
                                                                const Identifier &table_name,
                                                                const ColumnList &columns) {
-	auto bound_constraints = BindConstraints(constraints, table_name, columns);
+	auto bound_constraints = BindConstraints(constraints, table_schema, table_name, columns);
 
 	// Handle PK and NOT NULL constraints.
 	bool has_primary_key = false;
@@ -156,19 +159,17 @@ vector<unique_ptr<BoundConstraint>> Binder::BindNewConstraints(vector<unique_ptr
 	return bound_constraints;
 }
 
-unique_ptr<BoundConstraint> BindCheckConstraint(Binder &binder, const Constraint &constraint, const Identifier &table,
+unique_ptr<BoundConstraint> BindCheckConstraint(Binder &binder, const Constraint &constraint,
+                                                const SchemaCatalogEntry &table_schema, const Identifier &table,
                                                 const ColumnList &columns) {
 	auto bound_constraint = make_uniq<BoundCheckConstraint>();
 	auto &bound_check = bound_constraint->Cast<BoundCheckConstraint>();
 
-	// Bind the CHECK expression.
-	CheckBinder check_binder(binder, binder.context, table, columns, bound_check.bound_columns);
+	CheckBinder check_binder(binder, binder.context, table, columns, bound_check.bound_columns, table_schema);
 	auto &check = constraint.Cast<CheckConstraint>();
 
-	// Create a copy of the unbound expression because binding can invalidate it.
-	auto check_copy = check.expression->Copy();
-
-	// Bind the constraint and reset the original expression.
+	// Binding is destructive, so bind a copy and keep the stored expression as written.
+	auto check_copy = binder.ResolveTableExpressionNames(table_schema, table, columns, *check.expression);
 	bound_check.expression = check_binder.Bind(check_copy);
 	return std::move(bound_constraint);
 }
@@ -253,11 +254,11 @@ unique_ptr<BoundConstraint> BindForeignKey(const Constraint &constraint) {
 	return make_uniq<BoundForeignKeyConstraint>(fk.info, std::move(pk_key_set), std::move(fk_key_set));
 }
 
-unique_ptr<BoundConstraint> Binder::BindConstraint(const Constraint &constraint, const Identifier &table,
-                                                   const ColumnList &columns) {
+unique_ptr<BoundConstraint> Binder::BindConstraint(const Constraint &constraint, const SchemaCatalogEntry &table_schema,
+                                                   const Identifier &table, const ColumnList &columns) {
 	switch (constraint.type) {
 	case ConstraintType::CHECK: {
-		return BindCheckConstraint(*this, constraint, table, columns);
+		return BindCheckConstraint(*this, constraint, table_schema, table, columns);
 	}
 	case ConstraintType::NOT_NULL: {
 		auto &not_null = constraint.Cast<NotNullConstraint>();
@@ -341,14 +342,14 @@ static FunctionResolution ResolveFunction(CatalogEntryRetriever &scope, const Qu
 	return result;
 }
 
-struct GeneratedNameScopes {
+struct TableExpressionScopes {
 	CatalogEntryRetriever &table_scope;
 	CatalogEntryRetriever &reader_scope;
 	const Identifier &table_name;
 	const ColumnList &columns;
 };
 
-static void QualifyFunctionName(GeneratedNameScopes &scopes, FunctionExpression &function) {
+static void QualifyFunctionName(TableExpressionScopes &scopes, FunctionExpression &function) {
 	auto &name = function.GetQualifiedName();
 	auto resolution = ResolveFunction(scopes.table_scope, name);
 	if (!resolution.entry || resolution == ResolveFunction(scopes.reader_scope, name)) {
@@ -365,7 +366,7 @@ static void QualifyFunctionName(GeneratedNameScopes &scopes, FunctionExpression 
 	function.SetQualifiedName(EntryName(*resolution.entry, name.Name()));
 }
 
-static void QualifyTypeName(GeneratedNameScopes &scopes, TypeExpression &type) {
+static void QualifyTypeName(TableExpressionScopes &scopes, TypeExpression &type) {
 	auto &name = type.GetQualifiedName();
 	auto entry = LookupEntry(scopes.table_scope, CatalogType::TYPE_ENTRY, name);
 	if (!entry || entry == LookupEntry(scopes.reader_scope, CatalogType::TYPE_ENTRY, name)) {
@@ -374,7 +375,7 @@ static void QualifyTypeName(GeneratedNameScopes &scopes, TypeExpression &type) {
 	type.SetQualifiedName(EntryName(*entry, name.Name()));
 }
 
-static void QualifyEntryNames(GeneratedNameScopes &scopes, ParsedExpression &expr) {
+static void QualifyEntryNames(TableExpressionScopes &scopes, ParsedExpression &expr) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::FUNCTION:
 		QualifyFunctionName(scopes, expr.Cast<FunctionExpression>());
@@ -392,10 +393,10 @@ static void QualifyEntryNames(GeneratedNameScopes &scopes, ParsedExpression &exp
 	                                            [&](ParsedExpression &child) { QualifyEntryNames(scopes, child); });
 }
 
-unique_ptr<ParsedExpression> Binder::ResolveGeneratedExpressionNames(const SchemaCatalogEntry &table_schema,
-                                                                     const Identifier &table_name,
-                                                                     const ColumnList &columns,
-                                                                     const ParsedExpression &expression) {
+unique_ptr<ParsedExpression> Binder::ResolveTableExpressionNames(const SchemaCatalogEntry &table_schema,
+                                                                 const Identifier &table_name,
+                                                                 const ColumnList &columns,
+                                                                 const ParsedExpression &expression) {
 	if (table_schema.ParentCatalog().IsTemporaryCatalog()) {
 		// the temporary schema is never put on a search path, so a temporary table, like a temporary view, resolves
 		// its names through the reader's path
@@ -407,7 +408,7 @@ unique_ptr<ParsedExpression> Binder::ResolveGeneratedExpressionNames(const Schem
 	CatalogEntryRetriever reader_scope(context);
 	reader_scope.Inherit(entry_retriever);
 	reader_scope.SetCallback(nullptr);
-	GeneratedNameScopes scopes {table_scope, reader_scope, table_name, columns};
+	TableExpressionScopes scopes {table_scope, reader_scope, table_name, columns};
 	auto result = expression.Copy();
 	QualifyEntryNames(scopes, *result);
 	return result;
@@ -452,8 +453,8 @@ void Binder::BindGeneratedColumns(BoundCreateTableInfo &info) {
 		}
 		D_ASSERT(col.Generated());
 
-		auto expression = binder->ResolveGeneratedExpressionNames(info.schema, base.GetTableName(), base.columns,
-		                                                          col.GeneratedExpression());
+		auto expression = binder->ResolveTableExpressionNames(info.schema, base.GetTableName(), base.columns,
+		                                                      col.GeneratedExpression());
 
 		auto bound_expression = expr_binder.Bind(expression);
 		D_ASSERT(bound_expression);
@@ -881,7 +882,7 @@ unique_ptr<BoundCreateTableInfo> Binder::BindCreateTableInfo(unique_ptr<CreateIn
 		if (AnyConstraintReferencesGeneratedColumn(base)) {
 			throw BinderException("Constraints on generated columns are not supported yet");
 		}
-		bound_constraints = BindNewConstraints(base.constraints, base.GetTableName(), base.columns);
+		bound_constraints = BindNewConstraints(base.constraints, schema, base.GetTableName(), base.columns);
 		for (auto &constraint : base.constraints) {
 			VerifyConstraintCheckModeStorageVersion(*constraint, catalog, base.temporary);
 		}

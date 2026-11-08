@@ -239,8 +239,8 @@ unique_ptr<ParsedExpression> TableBinding::ExpandGeneratedColumn(Binder &binder,
 	D_ASSERT(table_entry.GetColumn(LogicalIndex(column_index)).Generated());
 	// Get a copy of the generated column
 	auto expression =
-	    binder.ResolveGeneratedExpressionNames(table_entry.ParentSchema(), table_entry.name, table_entry.GetColumns(),
-	                                           table_entry.GetColumn(LogicalIndex(column_index)).GeneratedExpression());
+	    binder.ResolveTableExpressionNames(table_entry.ParentSchema(), table_entry.name, table_entry.GetColumns(),
+	                                       table_entry.GetColumn(LogicalIndex(column_index)).GeneratedExpression());
 	unordered_map<idx_t, Identifier> alias_map;
 	for (auto &entry : name_map) {
 		alias_map[entry.second] = entry.first;

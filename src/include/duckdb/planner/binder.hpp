@@ -291,23 +291,26 @@ public:
 
 	static vector<unique_ptr<BoundConstraint>> BindConstraints(ClientContext &context,
 	                                                           const vector<unique_ptr<Constraint>> &constraints,
+	                                                           const SchemaCatalogEntry &table_schema,
 	                                                           const Identifier &table_name, const ColumnList &columns);
 	vector<unique_ptr<BoundConstraint>> BindConstraints(const vector<unique_ptr<Constraint>> &constraints,
+	                                                    const SchemaCatalogEntry &table_schema,
 	                                                    const Identifier &table_name, const ColumnList &columns);
 	vector<unique_ptr<BoundConstraint>> BindConstraints(const TableCatalogEntry &table);
 	vector<unique_ptr<BoundConstraint>> BindNewConstraints(vector<unique_ptr<Constraint>> &constraints,
+	                                                       const SchemaCatalogEntry &table_schema,
 	                                                       const Identifier &table_name, const ColumnList &columns);
-	unique_ptr<BoundConstraint> BindConstraint(const Constraint &constraint, const Identifier &table,
-	                                           const ColumnList &columns);
+	unique_ptr<BoundConstraint> BindConstraint(const Constraint &constraint, const SchemaCatalogEntry &table_schema,
+	                                           const Identifier &table, const ColumnList &columns);
 	unique_ptr<BoundConstraint> BindUniqueConstraint(const Constraint &constraint, const Identifier &table,
 	                                                 const ColumnList &columns);
 	static void VerifyConstraintCheckModeStorageVersion(const Constraint &constraint, Catalog &catalog, bool temporary);
-	//! A copy of a generated column's expression in which every function, macro and type name that this binder would
-	//! resolve to another entry than the table's schema does is qualified with the table's entry
-	unique_ptr<ParsedExpression> ResolveGeneratedExpressionNames(const SchemaCatalogEntry &table_schema,
-	                                                             const Identifier &table_name,
-	                                                             const ColumnList &columns,
-	                                                             const ParsedExpression &expression);
+	//! A copy of an expression stored with a table (a generated column or a CHECK constraint) in which every function,
+	//! macro and type name that this binder would resolve to another entry than the table's schema does is qualified
+	//! with the table's entry
+	unique_ptr<ParsedExpression> ResolveTableExpressionNames(const SchemaCatalogEntry &table_schema,
+	                                                         const Identifier &table_name, const ColumnList &columns,
+	                                                         const ParsedExpression &expression);
 
 	BoundStatement BindAlterAddIndex(BoundStatement &result, CatalogEntry &entry, unique_ptr<AlterInfo> alter_info);
 
