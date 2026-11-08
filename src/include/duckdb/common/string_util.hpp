@@ -357,7 +357,6 @@ public:
 
 	//! JSON method that constructs a { string: value } JSON map
 	//! This is the inverse of ParseJSONMap
-	//! NOTE: this method is not efficient
 	DUCKDB_API static string ExceptionToJSONMap(ExceptionType type, const string &message,
 	                                            const unordered_map<string, string> &map);
 

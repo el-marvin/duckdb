@@ -906,20 +906,101 @@ string StringUtil::ValidateJSON(const char *data, const idx_t &len) {
 	return string();
 }
 
+struct JSONLength {
+	using RESULT_TYPE = idx_t;
+	static void Append(idx_t &result, char) {
+		result++;
+	}
+	static void Append(idx_t &result, const char *text) {
+		result += strlen(text);
+	}
+};
+
+struct JSONAppend {
+	using RESULT_TYPE = string;
+	static void Append(string &result, char c) {
+		result += c;
+	}
+	static void Append(string &result, const char *text) {
+		result += text;
+	}
+};
+
+//! Must match JSONWriter::ToString with ALLOW_INVALID_UNICODE byte for byte, which copies invalid UTF-8 as is
+template <class OP>
+static void WriteJSONString(typename OP::RESULT_TYPE &result, const string &value) {
+	static constexpr const char *HEX_DIGITS = "0123456789ABCDEF";
+	OP::Append(result, '"');
+	for (auto c : value) {
+		switch (c) {
+		case '"':
+			OP::Append(result, "\\\"");
+			break;
+		case '\\':
+			OP::Append(result, "\\\\");
+			break;
+		case '\b':
+			OP::Append(result, "\\b");
+			break;
+		case '\t':
+			OP::Append(result, "\\t");
+			break;
+		case '\n':
+			OP::Append(result, "\\n");
+			break;
+		case '\f':
+			OP::Append(result, "\\f");
+			break;
+		case '\r':
+			OP::Append(result, "\\r");
+			break;
+		default: {
+			auto byte = static_cast<unsigned char>(c);
+			if (byte < 0x20) {
+				OP::Append(result, "\\u00");
+				OP::Append(result, HEX_DIGITS[byte >> 4]);
+				OP::Append(result, HEX_DIGITS[byte & 0xF]);
+			} else {
+				OP::Append(result, c);
+			}
+			break;
+		}
+		}
+	}
+	OP::Append(result, '"');
+}
+
+template <class OP>
+static void WriteExceptionJSON(typename OP::RESULT_TYPE &result, const string &type_name, const string &message,
+                               const unordered_map<string, string> &map) {
+	OP::Append(result, "{\"exception_type\":");
+	WriteJSONString<OP>(result, type_name);
+	OP::Append(result, ",\"exception_message\":");
+	WriteJSONString<OP>(result, message);
+	for (auto &entry : map) {
+		OP::Append(result, ',');
+		WriteJSONString<OP>(result, entry.first);
+		OP::Append(result, ':');
+		WriteJSONString<OP>(result, entry.second);
+	}
+	OP::Append(result, '}');
+}
+
 string StringUtil::ExceptionToJSONMap(ExceptionType type, const string &message,
                                       const unordered_map<string, string> &map) {
 	D_ASSERT(map.find("exception_type") == map.end());
 	D_ASSERT(map.find("exception_message") == map.end());
 
-	JSONWriter writer;
-	auto obj = writer.CreateObject();
-	obj.AddString("exception_type", Exception::ExceptionTypeToString(type));
-	obj.AddString("exception_message", message);
-	for (auto &entry : map) {
-		obj.AddString(entry.first, entry.second);
-	}
-	writer.SetRoot(obj);
-	return writer.ToString(JSONWriteFlags::ALLOW_INVALID_UNICODE);
+	// Every exception constructor runs this, including one raised because memory ran out, so the JSON goes into one
+	// reserved string instead of a JSON document that needs pools and an output buffer.
+	auto type_name = Exception::ExceptionTypeToString(type);
+	idx_t size = 0;
+	WriteExceptionJSON<JSONLength>(size, type_name, message, map);
+	string result;
+	result.reserve(size);
+	WriteExceptionJSON<JSONAppend>(result, type_name, message, map);
+	D_ASSERT(result.size() == size);
+	return result;
 }
 
 string StringUtil::GetFileName(const string &file_path) {

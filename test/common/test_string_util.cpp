@@ -2,6 +2,7 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/to_string.hpp"
 #include "duckdb/common/exception/parser_exception.hpp"
+#include "duckdb/common/json_document.hpp"
 #include "catch.hpp"
 
 #include "duckdb/common/vector.hpp"
@@ -628,4 +629,54 @@ TEST_CASE("Test CILessThan handles embedded NUL bytes", "[string_util]") {
 	REQUIRE(!StringUtil::CILessThan("Hello", "hello"));
 	REQUIRE(!StringUtil::CILessThan("hello", "Hello"));
 	REQUIRE(StringUtil::CILessThan("abc", "abd"));
+}
+
+static string JSONWriterExceptionMap(ExceptionType type, const string &message,
+                                     const unordered_map<string, string> &map) {
+	JSONWriter writer;
+	auto obj = writer.CreateObject();
+	obj.AddString("exception_type", Exception::ExceptionTypeToString(type));
+	obj.AddString("exception_message", message);
+	for (auto &entry : map) {
+		obj.AddString(entry.first, entry.second);
+	}
+	writer.SetRoot(obj);
+	return writer.ToString(JSONWriteFlags::ALLOW_INVALID_UNICODE);
+}
+
+TEST_CASE("Exception JSON is written as the JSON writer writes it", "[string_util]") {
+	string every_byte;
+	for (idx_t i = 0; i < 256; i++) {
+		every_byte += static_cast<char>(i);
+	}
+	duckdb::vector<string> messages = {"",
+	                                   "failed to allocate data of size 16.0 MiB (15.9 MiB/19.0 MiB used)",
+	                                   "say \"hi\" \\ back\\slash / slash",
+	                                   "line\nbreak\ttab\rreturn\bbackspace\fform feed\x01\x0b\x1f\x7f",
+	                                   string("embedded\0nul", 12),
+	                                   "h\xc3\xa9llo \xe2\x82\xac \xf0\x9d\x84\x9e",
+	                                   "invalid \xff\xfe lone \x80 cut \xe2\x82",
+	                                   every_byte};
+	duckdb::vector<unordered_map<string, string>> extra_infos = {
+	    {},
+	    {{"error_subtype", "MISSING_ENTRY"}},
+	    {{"position", "7"}, {"name", "t\"bl\n"}, {"candidates", "a,b"}, {"key \\ \x02", every_byte}}};
+	duckdb::vector<ExceptionType> types = {ExceptionType::OUT_OF_MEMORY, ExceptionType::INVALID_INPUT,
+	                                       ExceptionType::INTERNAL};
+	for (auto type : types) {
+		for (auto &message : messages) {
+			for (auto &extra_info : extra_infos) {
+				auto json = StringUtil::ExceptionToJSONMap(type, message, extra_info);
+				REQUIRE(json == JSONWriterExceptionMap(type, message, extra_info));
+
+				auto parsed = StringUtil::ParseJSONMap(json);
+				REQUIRE(parsed.size() == extra_info.size() + 2);
+				REQUIRE(parsed["exception_type"] == Exception::ExceptionTypeToString(type));
+				REQUIRE(parsed["exception_message"] == message);
+				for (auto &entry : extra_info) {
+					REQUIRE(parsed[entry.first] == entry.second);
+				}
+			}
+		}
+	}
 }

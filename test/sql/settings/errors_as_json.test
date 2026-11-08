@@ -24,3 +24,20 @@ statement error
 select corr('hello'::VARCHAR, 'world'::VARCHAR)
 ----
 NO_MATCHING_FUNCTION
+
+# an out of memory error keeps its type, in the JSON form and in the plain form
+statement ok
+SET memory_limit='20MB'
+
+statement error
+SELECT list(range) FROM range(20000000)
+----
+{"exception_type":"Out of Memory"
+
+statement ok
+SET errors_as_json=false
+
+statement error
+SELECT list(range) FROM range(20000000)
+----
+Out of Memory Error:

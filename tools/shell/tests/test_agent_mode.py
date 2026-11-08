@@ -162,6 +162,12 @@ def test_json_shell_error(shell):
     result.check_stderr('"exception_type":"Invalid Input"')
     result.check_stderr('"exception_message":"Unknown Command Error: Unrecognized command \'nonsense\'')
 
+def test_json_out_of_memory_error(shell):
+    test = agent_shell(shell).statement("SET memory_limit='20MB'").statement("SELECT list(range) FROM range(20000000)")
+    result = test.run()
+    assert result.status_code == 1
+    result.check_stderr('{"exception_type":"Out of Memory"')
+
 def test_error_without_agent(shell):
     test = ShellTest(shell).statement("SELECT foo FROM (SELECT 1 AS bar)")
     result = test.run()
