@@ -78,14 +78,14 @@ SELECT (SELECT t::VARCHAR FROM (SELECT 1 AS A) t) AS c GROUP BY (SELECT t::VARCH
 
 # an operator and its function call spelling name their columns differently
 query I
-SELECT (SELECT t::VARCHAR FROM (SELECT 1 + 2) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT "+"(1, 2)) t)
+SELECT (SELECT t::VARCHAR FROM (SELECT a + b FROM (SELECT 1 AS a, 2 AS b)) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT "+"(a, b) FROM (SELECT 1 AS a, 2 AS b)) t)
 ----
-{'(1 + 2)': 3}
+{'(a + b)': 3}
 
 query I
-SELECT (SELECT t::VARCHAR FROM (SELECT 1 + 2) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT "+"(1, 2)) t), c
+SELECT (SELECT t::VARCHAR FROM (SELECT a + b FROM (SELECT 1 AS a, 2 AS b)) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT "+"(a, b) FROM (SELECT 1 AS a, 2 AS b)) t), c
 ----
-{'(1 + 2)': 3}
+{'(a + b)': 3}
 
 # a disabled single arrow lambda keeps its error next to its lambda keyword twin
 statement ok
@@ -295,9 +295,9 @@ SELECT R.a AS c FROM t GROUP BY r.a
 1
 
 query I
-SELECT (SELECT x::VARCHAR FROM (SELECT ABS(-1)) x) AS c FROM t GROUP BY (SELECT x::VARCHAR FROM (SELECT abs(-1)) x), c
+SELECT (SELECT x::VARCHAR FROM (SELECT ABS(v) FROM (SELECT -1 AS v)) x) AS c FROM t GROUP BY (SELECT x::VARCHAR FROM (SELECT abs(v) FROM (SELECT -1 AS v)) x), c
 ----
-{'abs(-1)': 1}
+{'abs(v)': 1}
 
 # a correlated twin with the same spelling still binds, one that differs only in the case of a declared name does not
 query II
@@ -395,9 +395,9 @@ SELECT 'a' AS c GROUP BY 'b', c
 a
 
 query I
-SELECT (SELECT t::VARCHAR FROM (SELECT 1.00) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT 1.0) t), c
+SELECT (SELECT t::VARCHAR FROM (SELECT 1.00 AS v) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT 1.0 AS v) t), c
 ----
-{'1.00': 1.00}
+{'v': 1.00}
 
 query I
 SELECT abs(-1) AS c GROUP BY sign(-1), c
