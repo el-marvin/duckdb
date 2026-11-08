@@ -13,6 +13,7 @@
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/expression_map.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/planner/tableref/bound_pivotref.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -76,13 +77,15 @@ static bool IsMacroParameter(const ColumnRefExpression &colref, optional_ptr<Dum
 }
 
 static unique_ptr<ParsedExpression>
-QualifySourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding, Binder &source_binder) {
+QualifySourceColumn(ColumnRefExpression &colref, optional_ptr<DummyBinding> macro_binding, Binder &source_binder,
+                    ColumnBindType bind_type = ColumnBindType::EXPAND_GENERATED_COLUMNS) {
 	ErrorData error;
-	auto qualified = ColumnQualifier(source_binder).QualifyColumnName(colref, error);
+	auto qualified =
+	    ColumnQualifier(source_binder, nullptr, nullptr, nullptr, bind_type).QualifyColumnName(colref, error);
 	if (!qualified) {
 		return nullptr;
 	}
-	// the source binder also knows the macro's parameters; a generated source column may resolve to no column at all
+	// the source binder also knows the macro's parameters; an expanded generated column may read no column at all
 	bool reads_parameter = false;
 	bool reads_other = false;
 	ParsedExpressionIterator::VisitExpression<ColumnRefExpression>(*qualified, [&](const ColumnRefExpression &child) {
@@ -861,29 +864,6 @@ void Binder::ExtractUnpivotEntries(Binder &child_binder, PivotColumnEntry &entry
 	}
 }
 
-//! Adds the names under which the source lists the columns a qualified reference reads
-static void AddSourceColumns(ParsedExpression &qualified, vector<Identifier> &result) {
-	if (qualified.GetExpressionType() == ExpressionType::STRUCT_EXTRACT) {
-		AddSourceColumns(*qualified.Cast<OperatorExpression>().GetChildrenMutable()[0], result);
-		return;
-	}
-	Identifier column_name;
-	if (qualified.GetExpressionType() == ExpressionType::COLUMN_REF) {
-		column_name = qualified.Cast<ColumnRefExpression>().GetColumnName();
-	} else if (!qualified.GetAlias().empty()) {
-		// a generated column expands to its expression, aliased with its own name
-		column_name = qualified.GetAlias();
-	} else {
-		// the whole row of a source table, or a USING column read from several tables
-		ParsedExpressionIterator::EnumerateChildren(qualified,
-		                                            [&](ParsedExpression &child) { AddSourceColumns(child, result); });
-		return;
-	}
-	if (std::find(result.begin(), result.end(), column_name) == result.end()) {
-		result.push_back(std::move(column_name));
-	}
-}
-
 static idx_t StructExtractDepth(const ParsedExpression &qualified) {
 	idx_t depth = 0;
 	reference<const ParsedExpression> current = qualified;
@@ -894,13 +874,130 @@ static idx_t StructExtractDepth(const ParsedExpression &qualified) {
 	return depth;
 }
 
+//! A column an UNPIVOT ON expression reads: an output column of the source, or a name the source does not output
+struct UnpivotSourceColumn {
+	optional_idx index;
+	Identifier name;
+	//! A qualified name that resolves nowhere, left to the binder of the generated query to report
+	bool unresolved_qualified;
+};
+
 //! Collects the source columns an UNPIVOT ON expression reads, resolving each name in the order the binder does
 struct UnpivotColumnCollector {
-	UnpivotColumnCollector(Binder &source_binder, optional_ptr<DummyBinding> macro_binding, ClientContext &context)
+	UnpivotColumnCollector(Binder &source_binder, optional_ptr<DummyBinding> macro_binding, ClientContext &context,
+	                       const vector<unique_ptr<ParsedExpression>> &all_columns)
 	    : source_binder(source_binder), macro_binding(macro_binding), scopes(source_binder, context) {
+		for (idx_t i = 0; i < all_columns.size(); i++) {
+			auto &column = *all_columns[i];
+			if (column.GetExpressionType() == ExpressionType::COLUMN_REF) {
+				output_names.push_back(column.Cast<ColumnRefExpression>().GetColumnName());
+				AddOutputColumn(column.Copy(), i);
+				AddOutputColumn(Qualify(column.Copy()->Cast<ColumnRefExpression>()), i);
+				continue;
+			}
+			// a USING column of a FULL JOIN is the coalesce of the columns it merges
+			D_ASSERT(column.GetExpressionType() == ExpressionType::OPERATOR_COALESCE);
+			output_names.push_back(column.GetAlias());
+			AddOutputColumn(column.Copy(), i);
+			ParsedExpressionIterator::EnumerateChildren(column, [&](const ParsedExpression &child) {
+				if (child.GetExpressionType() == ExpressionType::COLUMN_REF) {
+					auto child_copy = child.Copy();
+					AddOutputColumn(Qualify(child_copy->Cast<ColumnRefExpression>()), i);
+				}
+			});
+		}
+		// a column that a USING join merges into the column of its primary side names that column
+		auto &bind_context = source_binder.bind_context;
+		for (auto &binding : bind_context.GetBindingsList()) {
+			for (auto &column_name : binding->GetColumnNames()) {
+				auto using_set = bind_context.GetUsingBinding(column_name, binding->GetBindingAlias());
+				if (!using_set || !using_set->primary_binding.IsSet()) {
+					continue;
+				}
+				auto primary = bind_context.CreateColumnReference(using_set->primary_binding, column_name,
+				                                                  ColumnBindType::DO_NOT_EXPAND_GENERATED_COLUMNS);
+				auto entry = output_columns.find(*primary);
+				if (entry != output_columns.end()) {
+					AddOutputColumn(bind_context.CreateColumnReference(binding->GetBindingAlias(), column_name,
+					                                                   ColumnBindType::DO_NOT_EXPAND_GENERATED_COLUMNS),
+					                entry->second);
+				}
+			}
+		}
 	}
 
-	void Collect(ParsedExpression &expr, vector<Identifier> &result) {
+	//! Qualifies a reference to a generated column as the column, so that it keeps its own identity
+	unique_ptr<ParsedExpression> Qualify(ColumnRefExpression &colref) {
+		return QualifySourceColumn(colref, macro_binding, source_binder,
+		                           ColumnBindType::DO_NOT_EXPAND_GENERATED_COLUMNS);
+	}
+
+	void AddOutputColumn(unique_ptr<ParsedExpression> qualified, idx_t index) {
+		if (!qualified || output_columns.find(*qualified) != output_columns.end()) {
+			return;
+		}
+		output_columns.emplace(*qualified, index);
+		output_column_forms.push_back(std::move(qualified));
+	}
+
+	//! Adds the output columns of the source a qualified reference reads, each once
+	void AddReference(const ParsedExpression &qualified, vector<UnpivotSourceColumn> &result) {
+		vector<UnpivotSourceColumn> columns;
+		AddSourceColumns(qualified, columns);
+		result.insert(result.end(), columns.begin(), columns.end());
+	}
+
+	void AddSourceColumns(const ParsedExpression &qualified, vector<UnpivotSourceColumn> &result) {
+		reference<const ParsedExpression> column = qualified;
+		while (column.get().GetExpressionType() == ExpressionType::STRUCT_EXTRACT) {
+			column = *column.get().Cast<OperatorExpression>().GetChildren()[0];
+		}
+		auto entry = output_columns.find(column.get());
+		if (entry != output_columns.end()) {
+			for (auto &existing : result) {
+				if (existing.index.IsValid() && existing.index.GetIndex() == entry->second) {
+					return;
+				}
+			}
+			result.push_back(UnpivotSourceColumn {entry->second, output_names[entry->second], false});
+			return;
+		}
+		if (column.get().GetExpressionType() == ExpressionType::COLUMN_REF) {
+			// a column the source does not output, such as rowid
+			result.push_back(
+			    UnpivotSourceColumn {optional_idx(), column.get().Cast<ColumnRefExpression>().GetColumnName(), false});
+			return;
+		}
+		// the whole row of a source table
+		ParsedExpressionIterator::EnumerateChildren(
+		    column.get(), [&](const ParsedExpression &child) { AddSourceColumns(child, result); });
+	}
+
+	//! Resolves a bare source column as the qualifier does, minus its macro parameter conflict, which the bind reports
+	void CollectListedColumn(ColumnRefExpression &colref, vector<UnpivotSourceColumn> &result) {
+		auto &bind_context = source_binder.bind_context;
+		auto &column_name = colref.GetColumnName();
+		unique_ptr<ParsedExpression> column;
+		auto using_set = bind_context.GetUsingBinding(column_name);
+		if (using_set) {
+			auto &side = using_set->primary_binding.IsSet() ? using_set->primary_binding : using_set->bindings[0];
+			column =
+			    bind_context.CreateColumnReference(side, column_name, ColumnBindType::DO_NOT_EXPAND_GENERATED_COLUMNS);
+		} else {
+			auto binding = bind_context.GetMatchingBinding(column_name, colref);
+			if (binding) {
+				column = bind_context.CreateColumnReference(binding->GetBindingAlias(), column_name,
+				                                            ColumnBindType::DO_NOT_EXPAND_GENERATED_COLUMNS);
+			}
+		}
+		if (!column) {
+			result.push_back(UnpivotSourceColumn {optional_idx(), column_name, false});
+			return;
+		}
+		AddReference(*column, result);
+	}
+
+	void Collect(ParsedExpression &expr, vector<UnpivotSourceColumn> &result) {
 		switch (expr.GetExpressionClass()) {
 		case ExpressionClass::COLUMN_REF:
 			CollectColumn(expr.Cast<ColumnRefExpression>(), result);
@@ -946,10 +1043,10 @@ struct UnpivotColumnCollector {
 		if (!colref.IsQualified() && !source_binder.bind_context.GetMatchingBindings(colref.GetColumnName()).empty()) {
 			return true;
 		}
-		return QualifySourceColumn(colref, macro_binding, source_binder) != nullptr;
+		return Qualify(colref) != nullptr;
 	}
 
-	void CollectColumn(ColumnRefExpression &colref, vector<Identifier> &result) {
+	void CollectColumn(ColumnRefExpression &colref, vector<UnpivotSourceColumn> &result) {
 		auto &names = colref.ColumnNames();
 		bool names_lambda_parameter = LambdaExpression::IsLambdaParameter(lambda_params, names[0]);
 		if (names_lambda_parameter && !colref.IsQualified()) {
@@ -958,20 +1055,18 @@ struct UnpivotColumnCollector {
 		}
 		if (!colref.IsQualified()) {
 			if (!source_binder.bind_context.GetMatchingBindings(colref.GetColumnName()).empty()) {
-				result.push_back(colref.GetColumnName());
+				CollectListedColumn(colref, result);
 				return;
 			}
 			ReserveName(colref.GetColumnName());
 		}
-		auto qualified = QualifySourceColumn(colref, macro_binding, source_binder);
+		auto qualified = Qualify(colref);
 		if (qualified) {
 			// a table of the source takes precedence over a lambda parameter, a column of the source does not
 			if (names_lambda_parameter && StructExtractDepth(*qualified) + 1 >= names.size()) {
 				return;
 			}
-			vector<Identifier> columns;
-			AddSourceColumns(*qualified, columns);
-			result.insert(result.end(), columns.begin(), columns.end());
+			AddReference(*qualified, result);
 			return;
 		}
 		if (names_lambda_parameter) {
@@ -983,8 +1078,8 @@ struct UnpivotColumnCollector {
 		if (scopes.ResolveColumn(colref, 1).found) {
 			return;
 		}
-		// a name that resolves nowhere is reported as a missing source column
-		result.push_back(colref.GetColumnName());
+		// a name that resolves nowhere counts as a column; a bare one is reported as a missing source column
+		result.push_back(UnpivotSourceColumn {optional_idx(), colref.GetColumnName(), colref.IsQualified()});
 	}
 
 	void ReserveName(const Identifier &name) {
@@ -1000,6 +1095,12 @@ struct UnpivotColumnCollector {
 	//! Resolves the names the source does not, against the scopes enclosing the UNPIVOT
 	ExpressionBinder scopes;
 	vector<identifier_set_t> lambda_params;
+	//! The position in the star expansion of the source of every qualified form of an output column
+	parsed_expression_map_t<idx_t> output_columns;
+	//! Owns the keys of output_columns, which the map only references
+	vector<unique_ptr<ParsedExpression>> output_column_forms;
+	//! The name of each output column of the source, by position
+	vector<Identifier> output_names;
 };
 
 unique_ptr<SelectNode> Binder::BindUnpivot(Binder &child_binder, PivotRef &ref,
@@ -1023,16 +1124,16 @@ unique_ptr<SelectNode> Binder::BindUnpivot(Binder &child_binder, PivotRef &ref,
 		throw BinderException(ref, "UNPIVOT clause must unpivot on at least one column - zero were provided");
 	}
 
-	identifier_set_t handled_columns;
-	identifier_map_t<Identifier> name_map;
-	UnpivotColumnCollector collector(child_binder, macro_binding, context);
+	vector<bool> unpivoted_columns(all_columns.size(), false);
+	vector<Identifier> missing_columns;
+	UnpivotColumnCollector collector(child_binder, macro_binding, context, all_columns);
 	for (auto &entry : unpivot_entries) {
 		for (auto &unpivot_expr : entry.expressions) {
-			vector<Identifier> result;
+			vector<UnpivotSourceColumn> result;
 			if (unpivot_expr->GetExpressionType() == ExpressionType::COLUMN_REF &&
 			    !unpivot_expr->Cast<ColumnRefExpression>().IsQualified()) {
 				// a bare name lists a column of the source, even where an enclosing scope has one of that name
-				result.push_back(unpivot_expr->Cast<ColumnRefExpression>().GetColumnName());
+				collector.CollectListedColumn(unpivot_expr->Cast<ColumnRefExpression>(), result);
 			} else {
 				collector.Collect(*unpivot_expr, result);
 			}
@@ -1043,52 +1144,44 @@ unique_ptr<SelectNode> Binder::BindUnpivot(Binder &child_binder, PivotRef &ref,
 				    unpivot_expr->ToString());
 			}
 			if (result.size() > 1) {
+				vector<Identifier> names;
+				for (auto &column : result) {
+					names.push_back(column.name);
+				}
 				throw BinderException(
 				    *unpivot_expr,
 				    "UNPIVOT clause must contain exactly one column - expression \"%s\" contains multiple (%s)",
-				    unpivot_expr->ToString(), StringUtil::Join(result, ", "));
+				    unpivot_expr->ToString(), StringUtil::Join(names, ", "));
 			}
-			handled_columns.insert(result[0]);
-			entry.column_names.push_back(std::move(result[0]));
+			entry.column_names.push_back(result[0].name);
+			if (result[0].index.IsValid()) {
+				unpivoted_columns[result[0].index.GetIndex()] = true;
+			} else if (!result[0].unresolved_qualified) {
+				missing_columns.push_back(std::move(result[0].name));
+			}
 		}
+	}
+	if (!missing_columns.empty()) {
+		throw BinderException(ref, "Column %s referenced in UNPIVOT but no matching entry was found in the table",
+		                      missing_columns[0]);
 	}
 
 	vector<Identifier> select_names;
-	for (auto &col_expr : all_columns) {
-		if (col_expr->GetExpressionType() != ExpressionType::COLUMN_REF) {
-			throw InternalException("Unexpected child of pivot source - not a ColumnRef");
-		}
-		auto &columnref = col_expr->Cast<ColumnRefExpression>();
-		auto &column_name = columnref.GetColumnName();
-		auto entry = handled_columns.find(column_name);
-		if (entry == handled_columns.end()) {
-			// not handled - add to the set of regularly selected columns
-			select_names.push_back(col_expr->GetName());
-			select_node->select_list.push_back(std::move(col_expr));
-		} else {
-			name_map[column_name] = column_name;
-			handled_columns.erase(entry);
-		}
-	}
-	if (!handled_columns.empty()) {
-		for (auto &entry : handled_columns) {
-			throw BinderException(ref, "Column %s referenced in UNPIVOT but no matching entry was found in the table",
-			                      entry);
+	for (idx_t i = 0; i < all_columns.size(); i++) {
+		if (!unpivoted_columns[i]) {
+			select_names.push_back(all_columns[i]->GetName());
+			select_node->select_list.push_back(std::move(all_columns[i]));
 		}
 	}
 	vector<Value> unpivot_names;
 	for (auto &entry : unpivot_entries) {
 		string generated_name;
 		D_ASSERT(entry.expressions.size() == entry.column_names.size());
-		for (idx_t c = 0; c < entry.expressions.size(); c++) {
-			auto name_entry = name_map.find(entry.column_names[c]);
-			if (name_entry == name_map.end()) {
-				throw InternalException("Unpivot - could not find column name in name map");
-			}
+		for (auto &column_name : entry.column_names) {
 			if (!generated_name.empty()) {
 				generated_name += "_";
 			}
-			generated_name += name_entry->second;
+			generated_name += column_name;
 		}
 		unpivot_names.emplace_back(!entry.alias.empty() ? entry.alias : Identifier(generated_name));
 	}

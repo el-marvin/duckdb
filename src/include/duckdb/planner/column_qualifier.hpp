@@ -18,7 +18,8 @@ class ColumnQualifier {
 public:
 	explicit ColumnQualifier(Binder &binder, optional_ptr<vector<DummyBinding>> lambda_bindings = nullptr,
 	                         optional_ptr<ColumnAliasBinder> alias_binder = nullptr,
-	                         optional_ptr<HavingBinder> having_binder = nullptr);
+	                         optional_ptr<HavingBinder> having_binder = nullptr,
+	                         ColumnBindType bind_type = ColumnBindType::EXPAND_GENERATED_COLUMNS);
 	virtual ~ColumnQualifier() = default;
 
 	//! The function a bare SQL value function name (e.g. current_timestamp) converts to, or empty
@@ -50,6 +51,8 @@ private:
 	optional_ptr<vector<DummyBinding>> lambda_bindings;
 	optional_ptr<ColumnAliasBinder> alias_binder;
 	optional_ptr<HavingBinder> having_binder;
+	//! Whether a reference to a generated column becomes its expression
+	ColumnBindType bind_type;
 
 private:
 	unique_ptr<ParsedExpression> QualifyColumnNameWithManyDotsInternal(ColumnRefExpression &col_ref, ErrorData &error,

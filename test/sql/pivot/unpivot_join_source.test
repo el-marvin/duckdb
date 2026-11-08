@@ -1,0 +1,650 @@
+# name: test/sql/pivot/unpivot_join_source.test
+# description: UNPIVOT over a join source unpivots and drops exactly the output column each reference names
+# group: [pivot]
+
+statement ok
+CREATE TABLE t1(id INT, a INT);
+
+statement ok
+INSERT INTO t1 VALUES (1, 10), (2, 11);
+
+statement ok
+CREATE TABLE t2(id INT, a INT, b INT);
+
+statement ok
+INSERT INTO t2 VALUES (1, 20, 30), (3, 21, 31);
+
+# a qualified reference unpivots its own column, and that column leaves the output
+query IIIITI
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a * 10) INTO NAME n VALUE v;
+----
+1	10	1	30	a	200
+
+query IIIITI
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t1.a * 10) INTO NAME n VALUE v;
+----
+1	1	20	30	a	100
+
+query IIIITI
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON t2.a INTO NAME n VALUE v;
+----
+1	10	1	30	a	20
+
+query IIIITI
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON t1.a INTO NAME n VALUE v;
+----
+1	1	20	30	a	10
+
+query IIIITI
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (main.t2.a * 10) INTO NAME n VALUE v;
+----
+1	10	1	30	a	200
+
+query T
+SELECT list(column_name) FROM (DESCRIBE UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a * 10) INTO NAME n VALUE v);
+----
+[id, a, id_1, b, n, v]
+
+# the row is named after the column, also next to a column of another table
+query IIITI rowsort
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON t1.a, (t2.b + 1) INTO NAME n VALUE v;
+----
+1	1	20	a	10
+1	1	20	b	31
+
+# an aliased table
+query IIIITI
+UNPIVOT t1 AS l JOIN t2 AS r ON l.id = r.id ON (r.a * 10) INTO NAME n VALUE v;
+----
+1	10	1	30	a	200
+
+statement error
+UNPIVOT t1 AS l JOIN t2 AS r ON l.id = r.id ON (t2.a * 10) INTO NAME n VALUE v;
+----
+Referenced table "t2" not found
+
+# two columns of one name in one expression are two columns
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t1.a + t2.a) INTO NAME n VALUE v;
+----
+contains multiple (a, a)
+
+# every reference counts, also two to the same column
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a + b + t2.b) INTO NAME n VALUE v;
+----
+contains multiple (a, b, b)
+
+# a bare name both tables have is ambiguous, in an expression and as a whole entry
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (a * 10) INTO NAME n VALUE v;
+----
+Ambiguous reference to column name "a" (use: 't1.a' or 't2.a')
+
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON a INTO NAME n VALUE v;
+----
+Ambiguous reference to column name "a" (use: 't1.a' or 't2.a')
+
+# a bare name only one table has
+query IIIITI
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (b - 1) INTO NAME n VALUE v;
+----
+1	10	1	20	b	29
+
+# an INTO name cannot be qualified
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a) INTO NAME t2.n VALUE v;
+----
+syntax error at or near "."
+
+# the subquery form exposes deduplicated names and no table names
+statement error
+UNPIVOT (SELECT * FROM t1 JOIN t2 ON t1.id = t2.id) ON (t2.a * 10) INTO NAME n VALUE v;
+----
+Referenced table "t2" not found
+
+query IIIITI
+UNPIVOT (SELECT * FROM t1 JOIN t2 ON t1.id = t2.id) ON (a_1 * 10) INTO NAME n VALUE v;
+----
+1	10	1	30	a_1	200
+
+# a qualified name that resolves nowhere counts as a column and is reported by the binder, as in a SELECT
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t1.zzz) INTO NAME n VALUE v;
+----
+Table "t1" does not have a column named "zzz"
+
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t9.zzz) INTO NAME n VALUE v;
+----
+Referenced table "t9" not found
+
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (zz.a * 2) INTO NAME n VALUE v;
+----
+Referenced table "zz" not found
+
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (b + t9.zzz) INTO NAME n VALUE v;
+----
+contains multiple (b, zzz)
+
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON zzz INTO NAME n VALUE v;
+----
+Column "zzz" referenced in UNPIVOT but no matching entry was found in the table
+
+statement ok
+CREATE TABLE t0(c INT);
+
+statement error
+SELECT * FROM t0, LATERAL (UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t0.zzz) INTO NAME n VALUE v);
+----
+Table "t0" does not have a column named "zzz"
+
+# the whole row of one table counts the columns of that table only
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2 IS NULL) INTO NAME n VALUE v;
+----
+contains multiple (id, a, b)
+
+# rowid is a column of the join but not of its output
+statement error
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.rowid) INTO NAME n VALUE v;
+----
+Column "rowid" referenced in UNPIVOT but no matching entry was found in the table
+
+# both columns of one name unpivoted in two entries both leave the output
+query IIITI rowsort
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t1.a), (t2.a) INTO NAME n VALUE v;
+----
+1	1	30	a	10
+1	1	30	a	20
+
+query IIITI rowsort
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON t1.a AS first, t2.a AS second INTO NAME n VALUE v;
+----
+1	1	30	first	10
+1	1	30	second	20
+
+query IIITI rowsort
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON COLUMNS('^a$') INTO NAME n VALUE v;
+----
+1	1	30	a	10
+1	1	30	a	20
+
+query T
+SELECT list(column_name) FROM (DESCRIBE UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t1.a), (t2.a) INTO NAME n VALUE v);
+----
+[id, id_1, b, n, v]
+
+# a struct field of a joined column names that column
+statement ok
+CREATE TABLE s1(id INT, s STRUCT(f INT));
+
+statement ok
+INSERT INTO s1 VALUES (1, {'f': 1});
+
+statement ok
+CREATE TABLE s2(id INT, s STRUCT(f INT));
+
+statement ok
+INSERT INTO s2 VALUES (1, {'f': 2});
+
+query ITITI
+UNPIVOT s1 JOIN s2 ON s1.id = s2.id ON (s2.s.f) INTO NAME n VALUE v;
+----
+1	{'f': 1}	1	s	2
+
+# a table of the same name in another schema
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE s.t1(id INT, a INT);
+
+statement ok
+INSERT INTO s.t1 VALUES (1, 40);
+
+query IIITI
+UNPIVOT main.t1 JOIN s.t1 ON main.t1.id = s.t1.id ON (s.t1.a) INTO NAME n VALUE v;
+----
+1	10	1	a	40
+
+query IIITI
+UNPIVOT main.t1 JOIN s.t1 ON main.t1.id = s.t1.id ON (main.t1.a) INTO NAME n VALUE v;
+----
+1	1	40	a	10
+
+# a joined subquery, table function and LATERAL subquery
+query IIITI
+UNPIVOT t1 JOIN (SELECT id, a FROM t2) sq ON t1.id = sq.id ON (sq.a) INTO NAME n VALUE v;
+----
+1	10	1	a	20
+
+query IITI
+UNPIVOT t1 JOIN range(0, 3) r(id) ON t1.id = r.id ON (r.id) INTO NAME n VALUE v;
+----
+1	10	id	1
+2	11	id	2
+
+query IITI rowsort
+UNPIVOT t1 JOIN LATERAL (SELECT t1.a + 1 AS a) l ON true ON (l.a) INTO NAME n VALUE v;
+----
+1	10	a	11
+2	11	a	12
+
+# a table's columns through COLUMNS and a qualified star
+query IITI rowsort
+UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON COLUMNS(t2.*) INTO NAME n VALUE v;
+----
+1	10	a	20
+1	10	b	30
+1	10	id	1
+
+# a macro, a view and a prepared statement over a join source
+statement ok
+CREATE MACRO unpivot_join(p) AS TABLE UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a + p) INTO NAME n VALUE v;
+
+query IIIITI
+FROM unpivot_join(1);
+----
+1	10	1	30	a	21
+
+statement ok
+CREATE VIEW unpivot_join_view AS UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a * 10) INTO NAME n VALUE v;
+
+query IIIITI
+FROM unpivot_join_view;
+----
+1	10	1	30	a	200
+
+statement ok
+PREPARE unpivot_join_prepared AS UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a + $1) INTO NAME n VALUE v;
+
+query IIIITI
+EXECUTE unpivot_join_prepared(2);
+----
+1	10	1	30	a	22
+
+# a correlated reference next to a qualified source column
+query IIIITI
+SELECT u.* FROM (SELECT 5 AS o) q, LATERAL (UNPIVOT t1 JOIN t2 ON t1.id = t2.id ON (t2.a + q.o) INTO NAME n VALUE v) u;
+----
+1	10	1	30	a	25
+
+# generated columns keep their own identity, also with the same expression
+statement ok
+CREATE TABLE g(id INT, a INT, x AS (a * 2), y AS (a * 2));
+
+statement ok
+INSERT INTO g VALUES (1, 10);
+
+query IIITI
+UNPIVOT g ON y INTO NAME n VALUE v;
+----
+1	10	20	y	20
+
+query IIITI
+UNPIVOT g ON (g.y + 1) INTO NAME n VALUE v;
+----
+1	10	20	y	21
+
+query IITI rowsort
+UNPIVOT g ON x, y INTO NAME n VALUE v;
+----
+1	10	x	20
+1	10	y	20
+
+statement ok
+CREATE TABLE g1(id INT, g AS (5));
+
+statement ok
+INSERT INTO g1 VALUES (1);
+
+statement ok
+CREATE TABLE g2(id INT, g AS (5));
+
+statement ok
+INSERT INTO g2 VALUES (1);
+
+query IIITI
+UNPIVOT g1 JOIN g2 ON g1.id = g2.id ON (g2.g) INTO NAME n VALUE v;
+----
+1	5	1	g	5
+
+query T
+SELECT list(column_name) FROM (DESCRIBE UNPIVOT g1 JOIN g2 ON g1.id = g2.id ON (g1.g) INTO NAME n VALUE v);
+----
+[id, id_1, g, n, v]
+
+# USING columns: ta and tb share k
+statement ok
+CREATE TABLE ta(k INT, x INT);
+
+statement ok
+INSERT INTO ta VALUES (1, 5), (2, 6);
+
+statement ok
+CREATE TABLE tb(k INT, y INT);
+
+statement ok
+INSERT INTO tb VALUES (2, 7), (3, 8);
+
+# the USING column of a FULL JOIN is the coalesce of both sides and passes through
+query IITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON (x) INTO NAME n VALUE v;
+----
+1	NULL	x	5
+2	7	x	6
+
+query IITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON x INTO NAME n VALUE v;
+----
+1	NULL	x	5
+2	7	x	6
+
+query T
+SELECT list(column_name) FROM (DESCRIBE UNPIVOT ta FULL JOIN tb USING (k) ON (x) INTO NAME n VALUE v);
+----
+[k, y, n, v]
+
+# the USING column itself, bare, in an expression and through COLUMNS
+query IITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON k INTO NAME n VALUE v;
+----
+5	NULL	k	1
+6	7	k	2
+NULL	8	k	3
+
+query IITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON (k * 10) INTO NAME n VALUE v;
+----
+5	NULL	k	10
+6	7	k	20
+NULL	8	k	30
+
+# the star expansion of a FULL JOIN USING column is a coalesce of both sides, so COLUMNS reads two references to it
+statement error
+UNPIVOT ta FULL JOIN tb USING (k) ON COLUMNS(*) INTO NAME n VALUE v;
+----
+contains multiple (k, k)
+
+statement error
+UNPIVOT ta FULL JOIN tb USING (k) ON (COLUMNS('^k$') * 10) INTO NAME n VALUE v;
+----
+contains multiple (k, k)
+
+# COLUMNS of the other columns
+query ITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON COLUMNS(* EXCLUDE (k)) INTO NAME n VALUE v;
+----
+1	x	5
+2	x	6
+2	y	7
+3	y	8
+
+statement error
+UNPIVOT ta FULL JOIN tb USING (k) ON (k + x) INTO NAME n VALUE v;
+----
+contains multiple (k, x)
+
+# a written COALESCE of the two sides holds two references too
+statement error
+UNPIVOT ta AS l FULL JOIN tb AS r USING (k) ON (coalesce(l.k, r.k)) INTO NAME n VALUE v;
+----
+contains multiple (k, k)
+
+statement error
+UNPIVOT ta FULL JOIN tb USING (k) ON (coalesce(memory.main.ta.k, memory.main.tb.k)) INTO NAME n VALUE v;
+----
+contains multiple (k, k)
+
+# either side of the USING column names the merged column, whose rows hold the side's value (NULL rows excluded)
+query IITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON (ta.k) INTO NAME n VALUE v;
+----
+5	NULL	k	1
+6	7	k	2
+
+query IITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) ON tb.k INTO NAME n VALUE v;
+----
+6	7	k	2
+NULL	8	k	3
+
+query IITI rowsort
+UNPIVOT ta INNER JOIN tb USING (k) ON (x) INTO NAME n VALUE v;
+----
+2	7	x	6
+
+query IITI rowsort
+UNPIVOT ta INNER JOIN tb USING (k) ON k INTO NAME n VALUE v;
+----
+6	7	k	2
+
+query IITI rowsort
+UNPIVOT ta INNER JOIN tb USING (k) ON (tb.k) INTO NAME n VALUE v;
+----
+6	7	k	2
+
+query IITI rowsort
+UNPIVOT ta INNER JOIN tb USING (k) ON (ta.k) INTO NAME n VALUE v;
+----
+6	7	k	2
+
+query TI rowsort
+UNPIVOT ta INNER JOIN tb USING (k) ON COLUMNS(*) INTO NAME n VALUE v;
+----
+k	2
+x	6
+y	7
+
+# two references to the merged column are two references
+statement error
+UNPIVOT ta INNER JOIN tb USING (k) ON (ta.k + tb.k) INTO NAME n VALUE v;
+----
+contains multiple (k, k)
+
+query IITI rowsort
+UNPIVOT ta LEFT JOIN tb USING (k) ON (x) INTO NAME n VALUE v;
+----
+1	NULL	x	5
+2	7	x	6
+
+query IITI rowsort
+UNPIVOT ta LEFT JOIN tb USING (k) ON k INTO NAME n VALUE v;
+----
+5	NULL	k	1
+6	7	k	2
+
+query IITI rowsort
+UNPIVOT ta LEFT JOIN tb USING (k) ON (tb.k) INTO NAME n VALUE v;
+----
+6	7	k	2
+
+query IITI rowsort
+UNPIVOT ta LEFT JOIN tb USING (k) ON (ta.k) INTO NAME n VALUE v;
+----
+5	NULL	k	1
+6	7	k	2
+
+query TI rowsort
+UNPIVOT ta LEFT JOIN tb USING (k) ON COLUMNS(*) INTO NAME n VALUE v;
+----
+k	1
+k	2
+x	5
+x	6
+y	7
+
+query IITI rowsort
+UNPIVOT ta RIGHT JOIN tb USING (k) ON (y) INTO NAME n VALUE v;
+----
+2	6	y	7
+3	NULL	y	8
+
+query IITI rowsort
+UNPIVOT ta RIGHT JOIN tb USING (k) ON k INTO NAME n VALUE v;
+----
+6	7	k	2
+NULL	8	k	3
+
+query IITI rowsort
+UNPIVOT ta RIGHT JOIN tb USING (k) ON (ta.k) INTO NAME n VALUE v;
+----
+6	7	k	2
+
+query IITI rowsort
+UNPIVOT ta RIGHT JOIN tb USING (k) ON (tb.k) INTO NAME n VALUE v;
+----
+6	7	k	2
+NULL	8	k	3
+
+query TI rowsort
+UNPIVOT ta RIGHT JOIN tb USING (k) ON COLUMNS(*) INTO NAME n VALUE v;
+----
+k	2
+k	3
+x	6
+y	7
+y	8
+
+# the whole row of a USING side counts the merged column and the side's own columns
+statement error
+UNPIVOT ta FULL JOIN tb USING (k) ON (tb IS NULL) INTO NAME n VALUE v;
+----
+contains multiple (k, y)
+
+# a USING chain over three tables
+statement ok
+CREATE TABLE tc(k INT, z INT);
+
+statement ok
+INSERT INTO tc VALUES (3, 9), (4, 10);
+
+query IIITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) FULL JOIN tc USING (k) ON k INTO NAME n VALUE v;
+----
+5	NULL	NULL	k	1
+6	7	NULL	k	2
+NULL	8	9	k	3
+NULL	NULL	10	k	4
+
+query IIITI rowsort
+UNPIVOT ta FULL JOIN tb USING (k) FULL JOIN tc USING (k) ON (tc.k) INTO NAME n VALUE v;
+----
+NULL	8	9	k	3
+NULL	NULL	10	k	4
+
+query IIITI rowsort
+UNPIVOT ta JOIN tb USING (k) FULL JOIN tc USING (k) ON (z) INTO NAME n VALUE v;
+----
+3	NULL	NULL	z	9
+4	NULL	NULL	z	10
+
+# two separate USING columns of one name: the bare name is ambiguous, each side names its own
+statement ok
+CREATE TABLE td(k INT, w INT);
+
+statement ok
+INSERT INTO td VALUES (3, 11);
+
+statement error
+UNPIVOT (ta JOIN tb USING (k)) JOIN (tc FULL JOIN td USING (k)) ON true ON k INTO NAME n VALUE v;
+----
+Ambiguous column reference: column "k" can refer to either
+
+query IIIIITI rowsort
+UNPIVOT (ta JOIN tb USING (k)) JOIN (tc FULL JOIN td USING (k)) ON true ON (td.k) INTO NAME n VALUE v;
+----
+2	6	7	9	11	k	3
+
+# the subquery form outputs the USING column as a plain column
+query IITI rowsort
+UNPIVOT (SELECT * FROM ta FULL JOIN tb USING (k)) ON (x) INTO NAME n VALUE v;
+----
+1	NULL	x	5
+2	7	x	6
+
+# two USING columns of a FULL JOIN
+statement ok
+CREATE TABLE u1(k INT, j INT, x INT);
+
+statement ok
+INSERT INTO u1 VALUES (1, 1, 5);
+
+statement ok
+CREATE TABLE u2(k INT, j INT, y INT);
+
+statement ok
+INSERT INTO u2 VALUES (1, 1, 7), (2, 2, 8);
+
+query IIITI rowsort
+UNPIVOT u1 FULL JOIN u2 USING (k, j) ON (y) INTO NAME n VALUE v;
+----
+1	1	5	y	7
+2	2	NULL	y	8
+
+query IIITI rowsort
+UNPIVOT u1 FULL JOIN u2 USING (k, j) ON (u2.j) INTO NAME n VALUE v;
+----
+1	5	7	j	1
+2	NULL	8	j	2
+
+# NATURAL joins merge the shared columns as USING does
+statement ok
+CREATE TABLE n1(id INT, p INT);
+
+statement ok
+INSERT INTO n1 VALUES (1, 100), (2, 101);
+
+statement ok
+CREATE TABLE n2(id INT, q INT);
+
+statement ok
+INSERT INTO n2 VALUES (1, 200), (3, 201);
+
+query IITI
+UNPIVOT n1 NATURAL JOIN n2 ON q INTO NAME n VALUE v;
+----
+1	100	q	200
+
+query IITI
+UNPIVOT n1 NATURAL JOIN n2 ON (n2.id) INTO NAME n VALUE v;
+----
+100	200	id	1
+
+query IITI rowsort
+UNPIVOT n1 NATURAL FULL JOIN n2 ON (p) INTO NAME n VALUE v;
+----
+1	200	p	100
+2	NULL	p	101
+
+query IITI rowsort
+UNPIVOT n1 NATURAL FULL JOIN n2 ON id INTO NAME n VALUE v;
+----
+100	200	id	1
+101	NULL	id	2
+NULL	201	id	3
+
+# a single table UNPIVOT
+query ITI rowsort
+UNPIVOT t2 ON a, b INTO NAME n VALUE v;
+----
+1	a	20
+1	b	30
+3	a	21
+3	b	31
+
+query IITI rowsort
+UNPIVOT t2 ON (t2.a * 10) INTO NAME n VALUE v;
+----
+1	30	a	200
+3	31	a	210
+
+statement error
+UNPIVOT t2 ON (t2.zzz) INTO NAME n VALUE v;
+----
+Table "t2" does not have a column named "zzz"
