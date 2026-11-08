@@ -1,0 +1,211 @@
+# name: test/sql/subquery/scalar/correlated_dot_call_receiver.test
+# description: The receiver of a dot call is a column for the owner of an aggregate and for the outer groups, also where the call is not rewritten before binding
+# group: [scalar]
+
+statement ok
+CREATE TABLE src(k INTEGER);
+
+statement ok
+INSERT INTO src VALUES (-1), (2);
+
+statement ok
+CREATE TABLE t(k VARCHAR, x VARCHAR);
+
+statement ok
+INSERT INTO t VALUES ('A', 'p'), ('C', 'q');
+
+# an aggregate over a dot call on an outer column in a subquery WHERE belongs to the outer query, as sum(k) does
+
+query I
+SELECT (SELECT 1 WHERE sum(k.abs()) > 0) FROM src;
+----
+1
+
+query I
+SELECT (SELECT 1 WHERE sum(abs(k)) > 0) FROM src;
+----
+1
+
+query I
+SELECT (SELECT sum(k.abs()) WHERE sum(k.abs()) > 2) FROM src;
+----
+3
+
+# in JOIN ON
+
+query I
+SELECT (SELECT count(*) FROM range(1) r JOIN range(2) s ON sum(k.abs()) > 0) FROM src;
+----
+2
+
+# in the FILTER of an aggregate, and in a subquery nested in the subquery
+
+query I
+SELECT (SELECT 1 WHERE count(*) FILTER (WHERE k.abs() > 1) > 0) FROM src;
+----
+1
+
+query I
+SELECT (SELECT (SELECT 1 WHERE sum(k.abs()) > 0)) FROM src;
+----
+1
+
+# the owner is the middle query
+
+query I
+SELECT (SELECT (SELECT sum(m.abs()) WHERE sum(m.abs()) > 0) FROM (VALUES (-3), (4)) mm(m)) FROM src;
+----
+7
+7
+
+# a method chain reads the receiver of its innermost call
+
+query I
+SELECT (SELECT 1 WHERE sum(k.abs().abs()) > 0) FROM src;
+----
+1
+
+# an aggregate written as a dot call, on an outer column and on a dot call on one
+
+query I
+SELECT (SELECT 1 WHERE k.sum() > 0) FROM src;
+----
+1
+
+query I
+SELECT (SELECT 1 WHERE k.abs().sum() > 0) FROM src;
+----
+1
+
+# a struct field receiver, and a dot call in the ORDER BY of an aggregate
+
+query I
+SELECT (SELECT 1 WHERE sum(s.f.abs()) > 0) FROM (SELECT {'f': -1} AS s);
+----
+1
+
+query I
+SELECT (SELECT 1 WHERE first(1 ORDER BY k.abs()) > 0) FROM src;
+----
+1
+
+# a table qualified receiver
+
+query I
+SELECT (SELECT 1 WHERE sum(src.k.abs()) > 0) FROM src;
+----
+1
+
+# a receiver that is a column of the subquery keeps the aggregate there
+
+statement error
+SELECT (SELECT 1 FROM range(2) r WHERE sum(r.range.abs() + k) > 0) FROM src;
+----
+WHERE clause cannot contain aggregates
+
+# a schema qualified call is not a dot call, also where a column has the name of the schema
+
+query I
+SELECT (SELECT 1 WHERE sum(main.abs(k)) > 0) FROM src;
+----
+1
+
+statement ok
+CREATE SCHEMA k;
+
+statement ok
+CREATE MACRO k.f(a) AS a;
+
+query I
+SELECT (SELECT 1 WHERE sum(k.abs()) > 0) FROM src;
+----
+1
+
+statement error
+SELECT (SELECT 1 WHERE sum(k.f(1)) > 0) FROM src;
+----
+WHERE clause cannot contain aggregates
+
+# a dot call on an outer column in a subquery WHERE or JOIN ON is the outer group it equals, as lower(k) is
+
+query TI
+SELECT lower(k), (SELECT count(*) FROM range(1) WHERE k.lower() = 'a') FROM t GROUP BY lower(k) ORDER BY 1;
+----
+a	1
+c	0
+
+query TI
+SELECT lower(k), (SELECT count(*) FROM range(1) a JOIN range(2) b ON k.lower() = 'a') FROM t GROUP BY lower(k) ORDER BY 1;
+----
+a	2
+c	0
+
+query TI
+SELECT upper(lower(k)), (SELECT count(*) FROM range(1) WHERE k.lower().upper() = 'A') FROM t GROUP BY upper(lower(k)) ORDER BY 1;
+----
+A	1
+C	0
+
+query TI
+SELECT lower(k), (SELECT count(*) FROM range(1) WHERE t.k.lower() = 'a') FROM t GROUP BY lower(k) ORDER BY 1;
+----
+a	1
+c	0
+
+# a column of the subquery that shadows the grouped one keeps the call in the subquery
+
+query I
+SELECT (SELECT count(*) FROM (VALUES ('A')) v(k) WHERE k.lower() = 'a') FROM t GROUP BY lower(k);
+----
+1
+1
+
+# clauses the pre pass qualifies before binding are unchanged
+
+query I
+SELECT (SELECT 1 FROM range(1) HAVING sum(k.abs()) > 0) FROM src;
+----
+1
+
+query I
+SELECT (SELECT sum(k.abs()) OVER () FROM range(1)) FROM src ORDER BY 1;
+----
+1
+2
+
+query I
+SELECT (SELECT sum(k.abs())) FROM src;
+----
+3
+
+query T
+SELECT (SELECT k.lower()) FROM t GROUP BY lower(k) ORDER BY 1;
+----
+a
+c
+
+query I
+SELECT sum(k.abs()) FROM src;
+----
+3
+
+query I
+SELECT k FROM src WHERE k.abs() > 1;
+----
+2
+
+query T
+SELECT lower(k) FROM t GROUP BY k.lower() HAVING k.lower() = 'a';
+----
+a
+
+query T
+SELECT lower(k) FROM t GROUP BY lower(k) ORDER BY k.lower() DESC;
+----
+c
+a
+
+query T
+SELECT k FROM t QUALIFY row_number() OVER (ORDER BY k.lower() DESC) = 1;
+----
+C

@@ -176,14 +176,21 @@ ColumnResolution ExpressionBinder::ResolveColumn(ColumnRefExpression &colref, id
 	return result;
 }
 
+struct ResolvableColumns {
+	vector<reference<ColumnRefExpression>> columns;
+	//! The receivers of dot calls not yet rewritten, which live in the call's name rather than in the tree
+	vector<unique_ptr<ColumnRefExpression>> receivers;
+};
+
 //! Collect the column references that decide which scope owns an expression. Subqueries are skipped:
 //! they bind in a chain of their own, so a column inside one says nothing about this expression.
 //! Lambda parameters are skipped for the same reason: they are bound by the lambda rather than by any
 //! scope, so a parameter that happens to share a name with an outer column must not pull the
 //! expression out to that scope. The parameter names are read exactly as `ColumnQualifier` reads them,
-//! so the resolver sees the same names a real bind would.
+//! so the resolver sees the same names a real bind would. The receiver of a dot call, which stays in the
+//! call's name until the call is bound, is the column reference it is written as.
 static void CollectResolvableColumns(Binder &binder, ParsedExpression &expr, vector<identifier_set_t> &lambda_params,
-                                     vector<reference<ColumnRefExpression>> &result) {
+                                     ResolvableColumns &result) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::SUBQUERY:
 		return;
@@ -194,11 +201,16 @@ static void CollectResolvableColumns(Binder &binder, ParsedExpression &expr, vec
 		if (!col_ref.IsQualified() && LambdaExpression::IsLambdaParameter(lambda_params, col_ref.GetColumnName())) {
 			return;
 		}
-		result.push_back(col_ref);
+		result.columns.push_back(col_ref);
 		return;
 	}
 	case ExpressionClass::FUNCTION: {
 		auto &function = expr.Cast<FunctionExpression>();
+		auto receiver = ColumnQualifier::GetDotCallReceiver(binder, function);
+		if (receiver) {
+			CollectResolvableColumns(binder, *receiver, lambda_params, result);
+			result.receivers.push_back(std::move(receiver));
+		}
 		if (!function.IsLambdaFunction()) {
 			break;
 		}
@@ -225,10 +237,10 @@ bool ExpressionBinder::ReferencesLambdaParameter(ParsedExpression &expr) {
 	if (!lambda_bindings) {
 		return false;
 	}
-	vector<reference<ColumnRefExpression>> columns;
+	ResolvableColumns columns;
 	vector<identifier_set_t> lambda_params;
 	CollectResolvableColumns(binder, expr, lambda_params, columns);
-	for (auto &column : columns) {
+	for (auto &column : columns.columns) {
 		auto &col_ref = column.get();
 		if (!col_ref.IsQualified() &&
 		    LambdaRefExpression::FindMatchingBinding(lambda_bindings, col_ref.GetColumnName())) {
@@ -243,10 +255,10 @@ optional_idx ExpressionBinder::ResolveAggregateOwner(FunctionExpression &aggrega
 }
 
 optional_idx ExpressionBinder::ResolveExpressionOwner(ParsedExpression &expr, idx_t start) {
-	vector<reference<ColumnRefExpression>> columns;
+	ResolvableColumns columns;
 	vector<identifier_set_t> lambda_params;
 	CollectResolvableColumns(binder, expr, lambda_params, columns);
-	return ResolveOwner(columns, start);
+	return ResolveOwner(columns.columns, start);
 }
 
 optional_idx ExpressionBinder::ResolveOwner(vector<reference<ColumnRefExpression>> &columns, idx_t start) {

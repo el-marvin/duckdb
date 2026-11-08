@@ -1,0 +1,89 @@
+# name: test/sql/function/list/lambdas/lambda_parameter_dot_call_owner.test
+# description: A dot call receiver in a lambda body in a subquery WHERE or JOIN ON resolves its owner as the plain call does
+# group: [lambdas]
+
+statement ok
+CREATE TABLE t(k VARCHAR, x VARCHAR);
+
+statement ok
+INSERT INTO t VALUES ('A', 'p'), ('C', 'q');
+
+statement ok
+CREATE TABLE src(k INTEGER);
+
+statement ok
+INSERT INTO src VALUES (-1), (2);
+
+# a receiver naming the lambda parameter is the parameter, so the body is not the outer group lower(k) || x
+
+statement error
+SELECT (SELECT count(*) FROM range(1) WHERE list_transform(['B'], lambda k: k.lower() || x) = ['bp']) FROM t GROUP BY lower(k) || x;
+----
+column "x" must appear in the GROUP BY clause
+
+statement error
+SELECT (SELECT count(*) FROM range(1) WHERE list_transform(['B'], lambda k: lower(k) || x) = ['bp']) FROM t GROUP BY lower(k) || x;
+----
+column "x" must appear in the GROUP BY clause
+
+statement error
+SELECT (SELECT count(*) FROM range(1) a JOIN range(1) b ON list_transform(['B'], lambda k: k.lower() || x) = ['bp']) FROM t GROUP BY lower(k) || x;
+----
+column "x" must appear in the GROUP BY clause
+
+# an aggregate whose argument reads only the parameter stays in the subquery, as with abs(k)
+
+statement error
+SELECT (SELECT 1 WHERE sum(list_transform([1], lambda k: k.abs())[1]) > 0) FROM src;
+----
+WHERE clause cannot contain aggregates
+
+statement error
+SELECT (SELECT 1 WHERE sum(list_transform([1], lambda k: abs(k))[1]) > 0) FROM src;
+----
+WHERE clause cannot contain aggregates
+
+# GROUPING of a call on the parameter is not GROUPING of the outer group
+
+statement error
+SELECT lower(k), (SELECT count(*) FROM range(1) WHERE list_transform([1], lambda k: grouping(k.lower())) = [0]) FROM t GROUP BY lower(k);
+----
+GROUPING function is not supported here
+
+statement error
+SELECT lower(k), (SELECT count(*) FROM range(1) WHERE list_transform([1], lambda k: grouping(lower(k))) = [0]) FROM t GROUP BY lower(k);
+----
+GROUPING function is not supported here
+
+# a receiver naming an outer column in the body is that column
+
+query TI
+SELECT lower(k), (SELECT count(*) FROM range(1) WHERE list_transform(['b'], lambda y: k.lower() || y) = ['ab']) FROM t GROUP BY lower(k) ORDER BY 1;
+----
+a	1
+c	0
+
+query I
+SELECT (SELECT 1 WHERE sum(list_transform([1], lambda y: k.abs() + y)[1]) > 0) FROM src;
+----
+1
+
+# a table qualified receiver is the column, also where its name is a parameter
+
+query TI
+SELECT lower(k), (SELECT count(*) FROM range(1) WHERE list_transform(['B'], lambda k: t.k.lower() || k.lower()) = ['ab']) FROM t GROUP BY lower(k) ORDER BY 1;
+----
+a	1
+c	0
+
+query I
+SELECT (SELECT 1 WHERE sum(list_transform([1], lambda k: src.k.abs() + k)[1]) > 0) FROM src;
+----
+1
+
+# the dot call taking a lambda, written on an outer column
+
+query I
+SELECT (SELECT 1 WHERE sum(l.list_transform(lambda y: y + 1)[1]) > 0) FROM (VALUES ([1]), ([2])) v(l);
+----
+1

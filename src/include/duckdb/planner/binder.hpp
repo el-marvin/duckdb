@@ -112,6 +112,14 @@ struct TrySubqueryPlanIndexes {
 	bool nested_transport = false;
 };
 
+//! What the function lookup of a call says about its arguments as written (see ColumnQualifier)
+struct WrittenCallArguments {
+	//! The call is written on a column, as in "x.lower()", which is the function's first argument
+	bool dot_call = false;
+	//! The written argument that takes a lambda
+	optional_idx lambda_argument;
+};
+
 enum class BindingMode : uint8_t {
 	STANDARD_BINDING,
 	PREPARE,
@@ -264,8 +272,8 @@ public:
 	optional_ptr<DummyBinding> macro_binding;
 	//! The intermediate lambda bindings to bind nested lambdas (if any)
 	optional_ptr<vector<DummyBinding>> lambda_bindings;
-	//! Per qualified name as written in a call, the written argument that takes a lambda (see ColumnQualifier)
-	unordered_map<string, optional_idx> lambda_argument_positions;
+	//! Per qualified name as written in a call, what its function lookup says about the written arguments
+	unordered_map<string, WrittenCallArguments> written_call_arguments;
 
 	unordered_map<TableIndex, LogicalOperator *> recursive_ctes;
 

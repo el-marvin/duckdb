@@ -294,13 +294,7 @@ optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &
 		return func;
 	}
 	ErrorData error;
-	unique_ptr<ColumnRefExpression> colref;
-	if (function.GetQualifiedName().Catalog().empty()) {
-		colref = make_uniq<ColumnRefExpression>(function.GetQualifiedName().Schema());
-	} else {
-		colref =
-		    make_uniq<ColumnRefExpression>(function.GetQualifiedName().Schema(), function.GetQualifiedName().Catalog());
-	}
+	auto colref = CreateDotCallReceiver(function.GetQualifiedName());
 	auto new_colref = QualifyColumnName(*colref, error);
 	if (!new_colref) {
 		new_colref = std::move(colref);
@@ -313,30 +307,47 @@ optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &
 	return func;
 }
 
-optional_idx ColumnQualifier::GetLambdaArgumentPosition(Binder &binder, const FunctionExpression &function) {
+unique_ptr<ColumnRefExpression> ColumnQualifier::CreateDotCallReceiver(const QualifiedName &name) {
+	if (name.Catalog().empty()) {
+		return make_uniq<ColumnRefExpression>(name.Schema());
+	}
+	return make_uniq<ColumnRefExpression>(name.Schema(), name.Catalog());
+}
+
+unique_ptr<ColumnRefExpression> ColumnQualifier::GetDotCallReceiver(Binder &binder,
+                                                                    const FunctionExpression &function) {
+	if (function.GetQualifiedName().Schema().empty() || ExpressionBinder::IsUnnestFunction(function.FunctionName())) {
+		return nullptr;
+	}
+	if (!GetWrittenCallArguments(binder, function).dot_call) {
+		return nullptr;
+	}
+	return CreateDotCallReceiver(function.GetQualifiedName());
+}
+
+WrittenCallArguments ColumnQualifier::GetWrittenCallArguments(Binder &binder, const FunctionExpression &function) {
 	string key;
 	for (auto &part : function.GetQualifiedName().Path()) {
 		key += part.GetIdentifierName();
 		key += '\0';
 	}
-	auto cached = binder.lambda_argument_positions.find(key);
-	if (cached != binder.lambda_argument_positions.end()) {
+	auto cached = binder.written_call_arguments.find(key);
+	if (cached != binder.written_call_arguments.end()) {
 		return cached->second;
 	}
 	auto name = function.GetQualifiedName();
 	binder.BindSchemaOrCatalog(name);
-	bool dot_call;
-	auto func = FindFunction(binder, function, name, dot_call);
-	optional_idx position;
+	WrittenCallArguments result;
+	auto func = FindFunction(binder, function, name, result.dot_call);
 	if (func && func->type == CatalogType::SCALAR_FUNCTION_ENTRY) {
 		auto lambda_index = ExpressionBinder::GetLambdaArgumentIndex(func->Cast<ScalarFunctionCatalogEntry>());
 		// the receiver of a dot call is the function's first argument, so the written arguments start at the second
-		if (lambda_index.IsValid() && (!dot_call || lambda_index.GetIndex() > 0)) {
-			position = optional_idx(lambda_index.GetIndex() - (dot_call ? 1 : 0));
+		if (lambda_index.IsValid() && (!result.dot_call || lambda_index.GetIndex() > 0)) {
+			result.lambda_argument = optional_idx(lambda_index.GetIndex() - (result.dot_call ? 1 : 0));
 		}
 	}
-	binder.lambda_argument_positions.emplace(std::move(key), position);
-	return position;
+	binder.written_call_arguments.emplace(std::move(key), result);
+	return result;
 }
 
 bool ColumnQualifier::TryGetLambdaParameters(Binder &binder, const FunctionExpression &function, idx_t index,
@@ -347,7 +358,7 @@ bool ColumnQualifier::TryGetLambdaParameters(Binder &binder, const FunctionExpre
 	}
 	auto &lambda = argument.Cast<LambdaExpression>();
 	if (lambda.GetLambdaSyntaxType() != LambdaSyntaxType::LAMBDA_KEYWORD) {
-		auto position = GetLambdaArgumentPosition(binder, function);
+		auto position = GetWrittenCallArguments(binder, function).lambda_argument;
 		if (!position.IsValid() || position.GetIndex() != index) {
 			return false;
 		}

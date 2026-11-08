@@ -49,6 +49,8 @@ public:
 	//! Whether argument index of the call binds as a lambda, filling in the parameter names it declares
 	static bool TryGetLambdaParameters(Binder &binder, const FunctionExpression &function, idx_t index,
 	                                   identifier_set_t &parameters);
+	//! The receiver of a dot call "x.lower()" as written, as a column reference, or nullptr if the call is not one
+	static unique_ptr<ColumnRefExpression> GetDotCallReceiver(Binder &binder, const FunctionExpression &function);
 	//! Visits the children of a call, handing each argument that binds as a lambda to lambda_callback instead
 	static void EnumerateCallChildren(
 	    Binder &binder, FunctionExpression &function,
@@ -70,8 +72,9 @@ private:
 	bool TableNameExists(const Identifier &table_name);
 
 	unique_ptr<ParsedExpression> QualifyColumnNameInternal(ColumnRefExpression &col_ref, ErrorData &error);
-	//! The argument of the call as written that takes a lambda, looked up once per function name and binder
-	static optional_idx GetLambdaArgumentPosition(Binder &binder, const FunctionExpression &function);
+	//! The dot call and lambda argument of the call as written, looked up once per function name and binder
+	static WrittenCallArguments GetWrittenCallArguments(Binder &binder, const FunctionExpression &function);
+	static unique_ptr<ColumnRefExpression> CreateDotCallReceiver(const QualifiedName &name);
 	//! The function entry of the call; dot_call says it is written on a column, as in "x.lower()"
 	static optional_ptr<CatalogEntry> FindFunction(Binder &binder, const FunctionExpression &function,
 	                                               const QualifiedName &name, bool &dot_call);
