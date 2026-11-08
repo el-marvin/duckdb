@@ -177,6 +177,10 @@ bool Binder::BindTableFunctionParameters(TableFunctionCatalogEntry &table_functi
 			auto binder = Binder::CreateBinder(this->context, this);
 			binder->SetCanContainNulls(true);
 			auto &se = child->Cast<SubqueryExpression>();
+			if (!se.GetBindingCatalog().empty()) {
+				binder->SetBodySearchPath(Catalog::GetCatalog(context, se.GetBindingCatalog()),
+				                          se.GetBindingSchemaPath());
+			}
 			subquery = binder->BindNode(*se.Subquery()->node);
 			MoveCorrelatedExpressions(*binder);
 			seen_subquery = true;
@@ -476,10 +480,12 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 		if (!func_catalog.ParentCatalog().IsSystemCatalog()) {
 			GetStatementProperties().RegisterDBRead(func_catalog.ParentCatalog(), context);
 		}
-		auto query_node = BindTableMacro(fexpr, macro_func, 0);
+		// the body binds in the macro's schema, and so do the arguments it takes in, also when they pick an overload
+		auto binder = Binder::CreateBinder(context, this);
+		binder->SetBodySearchPath(macro_func.ParentCatalog(), macro_func.ParentSchema().GetSchemaPath());
+		auto query_node = binder->BindTableMacro(fexpr, macro_func, 0);
 		D_ASSERT(query_node);
 
-		auto binder = Binder::CreateBinder(context, this);
 		binder->SetCanContainNulls(true);
 		binder->AddBoundTableMacro(macro_func);
 

@@ -47,6 +47,17 @@ public:
 	ExpressionType &GetComparisonTypeMutable() {
 		return comparison_type;
 	}
+	//! The catalog and schema path whose view search path binds the subquery, empty for the enclosing binder's path
+	const Identifier &GetBindingCatalog() const {
+		return binding_catalog;
+	}
+	const vector<Identifier> &GetBindingSchemaPath() const {
+		return binding_schema_path;
+	}
+	void SetBindingSchema(Identifier catalog, vector<Identifier> schema_path) {
+		binding_catalog = std::move(catalog);
+		binding_schema_path = std::move(schema_path);
+	}
 
 	bool HasSubquery() const override {
 		return true;
@@ -75,5 +86,8 @@ private:
 	unique_ptr<ParsedExpression> child;
 	//! The comparison type of the child expression with the subquery (in case of ANY, ALL operators), empty otherwise
 	ExpressionType comparison_type;
+	//! Set on the copy of a stored macro body for the call being bound, never parsed or serialized
+	Identifier binding_catalog;
+	vector<Identifier> binding_schema_path;
 };
 } // namespace duckdb

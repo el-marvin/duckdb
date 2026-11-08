@@ -467,11 +467,18 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 		store_types = info.temporary || attached.IsTemporary() || storage_manager.InMemory() ||
 		              storage_manager.GetStorageVersion() >= since;
 	}
+	// the definition binds as a call binds the body, in the macro's own schema
+	auto &macro_schema = *Catalog::GetSchema(context, info.GetQualifiedName().Catalog(),
+	                                         info.GetQualifiedName().SchemaPath(), OnEntryNotFound::THROW_EXCEPTION);
+	auto body_binder = CreateBinder(context, this);
+	body_binder->SetBodySearchPath(catalog, macro_schema.GetSchemaPath());
 	// try to bind each of the included functions
 	vector_of_logical_type_set_t type_overloads;
 	auto &base = info.Cast<CreateMacroInfo>();
 	CheckMacroStorageVersion(catalog, base);
 	for (auto &function : base.macros) {
+		// the previous member's binding does not outlive its iteration
+		body_binder->macro_binding = nullptr;
 		if (!store_types) {
 			for (const auto &type : function->types) {
 				if (type.id() != LogicalTypeId::UNKNOWN) {
@@ -514,7 +521,8 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 				continue;
 			}
 
-			ConstantBinder binder(*this, context, StringUtil::Format("Default value for parameter %s", param_name));
+			ConstantBinder binder(*body_binder, context,
+			                      StringUtil::Format("Default value for parameter %s", param_name));
 			auto default_expr = param_expr->Copy();
 			auto bound_default = binder.Bind(default_expr);
 			if (!bound_default->IsFoldable()) {
@@ -534,7 +542,7 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 
 		// Resolve a user type in the declared return type
 		if (function->return_type.id() == LogicalTypeId::UNBOUND) {
-			BindLogicalType(function->return_type);
+			body_binder->BindLogicalType(function->return_type);
 		}
 
 		// Resolve any user type arguments
@@ -544,7 +552,7 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 				continue;
 			}
 			if (type.id() == LogicalTypeId::UNBOUND) {
-				BindLogicalType(type);
+				body_binder->BindLogicalType(type);
 			}
 			const auto &param_name = function->parameters[param_idx]->Cast<ColumnRefExpression>().GetColumnName();
 			auto it = default_values.find(param_name);
@@ -579,7 +587,7 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 
 		auto this_macro_binding =
 		    make_uniq<DummyBinding>(dummy_types, dummy_names, base.GetFunctionName().GetIdentifierName());
-		macro_binding = this_macro_binding.get();
+		body_binder->macro_binding = this_macro_binding.get();
 
 		auto &dependencies = base.dependencies;
 		const auto should_create_dependencies = Settings::Get<EnableMacroDependenciesSetting>(context);
@@ -596,14 +604,15 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 		ErrorData error;
 		if (info.type == CatalogType::MACRO_ENTRY) {
 			BoundSelectNode sel_node;
-			SelectBinder binder(*this, context, sel_node);
+			SelectBinder binder(*body_binder, context, sel_node);
 			if (should_create_dependencies) {
 				binder.SetCatalogLookupCallback(binder_callback);
 			}
 
 			// create a copy of the expression because we do not want to alter the original
 			auto expression = function->Cast<ScalarMacroFunction>().expression->Copy();
-			ExpressionBinder::QualifyColumnNames(*this, expression);
+			ExpressionBinder::QualifyColumnNames(*body_binder, expression);
+			body_binder->ResolveMacroBodyNames(macro_schema, *expression);
 			try {
 				auto bind_result = binder.Bind(expression, 0, false);
 				if (bind_result.HasError()) {
@@ -615,7 +624,7 @@ SchemaCatalogEntry &Binder::BindCreateFunctionInfo(CreateInfo &info) {
 			}
 		} else {
 			D_ASSERT(info.type == CatalogType::TABLE_MACRO_ENTRY);
-			auto dummy_binder = CreateBinder(context, this);
+			auto dummy_binder = CreateBinder(context, body_binder.get());
 			if (should_create_dependencies) {
 				dummy_binder->SetCatalogLookupCallback(binder_callback);
 			}

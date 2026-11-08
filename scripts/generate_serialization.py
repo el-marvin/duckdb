@@ -1011,6 +1011,8 @@ def check_children_for_duplicate_members(node: SerializableClass, parents: list,
                     f"Error: Duplicate member name \"{member.name}\" in class \"{node.name}\" ({' -> '.join(map(lambda x: x.name, parents))} -> {node.name})"
                 )
             seen_names.add(member.name)
+            if member.serialize_skip:
+                continue
             if member.id in seen_ids:
                 exit(
                     f"Error: Duplicate member id \"{member.id}\" in class \"{node.name}\" ({' -> '.join(map(lambda x: x.name, parents))} -> {node.name})"

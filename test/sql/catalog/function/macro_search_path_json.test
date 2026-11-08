@@ -1,0 +1,16 @@
+# name: test/sql/catalog/function/macro_search_path_json.test
+# description: An argument a macro body passes to another macro keeps the JSON arrow chain's operator form
+# group: [function]
+
+require json
+
+statement ok
+CREATE MACRO main.ident_m(x) AS x;
+
+statement ok
+CREATE MACRO main.json_m() AS ident_m(json_object('1', json_object('b', 42)) -> '1' ->> 'b');
+
+query I
+SELECT json_m();
+----
+42

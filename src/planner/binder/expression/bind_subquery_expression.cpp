@@ -1,3 +1,4 @@
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -83,6 +84,10 @@ BindResult ExpressionBinder::BindExpression(SubqueryExpression &expr, idx_t dept
 	}
 	// bind the subquery in its own binder
 	auto subquery_binder = Binder::CreateBinder(context, binder);
+	if (!expr.GetBindingCatalog().empty()) {
+		subquery_binder->SetBodySearchPath(Catalog::GetCatalog(context, expr.GetBindingCatalog()),
+		                                   expr.GetBindingSchemaPath());
+	}
 	subquery_binder->SetCanContainNulls(true);
 	subquery_binder->SetInsideSubquery();
 	if (try_subquery || rethrow_try_errors) {

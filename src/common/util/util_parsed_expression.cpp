@@ -849,6 +849,17 @@ bool SubqueryExpression::Equals(const ParsedExpression &other) const {
 	if (comparison_type != other_p.comparison_type) {
 		return false;
 	}
+	if (binding_catalog != other_p.binding_catalog) {
+		return false;
+	}
+	if (binding_schema_path.size() != other_p.binding_schema_path.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < binding_schema_path.size(); i++) {
+		if (binding_schema_path[i] != other_p.binding_schema_path[i]) {
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -856,6 +867,10 @@ hash_t SubqueryExpression::Hash() const {
 	hash_t hash = ParsedExpression::Hash();
 	hash = CombineHash(hash, duckdb::Hash<uint32_t>(static_cast<uint32_t>(subquery_type)));
 	hash = CombineHash(hash, duckdb::Hash<uint32_t>(static_cast<uint32_t>(comparison_type)));
+	hash = CombineHash(hash, binding_catalog.Hash());
+	for (auto &s : binding_schema_path) {
+		hash = CombineHash(hash, s.Hash());
+	}
 	return hash;
 }
 
@@ -865,6 +880,8 @@ unique_ptr<ParsedExpression> SubqueryExpression::Copy() const {
 	copy->subquery = subquery ? unique_ptr_cast<SQLStatement, SelectStatement>(subquery->Copy()) : nullptr;
 	copy->child = child ? child->Copy() : nullptr;
 	copy->comparison_type = comparison_type;
+	copy->binding_catalog = binding_catalog;
+	copy->binding_schema_path = binding_schema_path;
 	copy->CopyBase(*this);
 	return std::move(copy);
 }

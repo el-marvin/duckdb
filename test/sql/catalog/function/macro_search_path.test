@@ -1,0 +1,802 @@
+# name: test/sql/catalog/function/macro_search_path.test
+# description: A macro body resolves its names in the macro's own schema first, as a view body does, whatever the caller's search path; at the expression level of a scalar body the caller's arguments keep the caller's resolution
+# group: [function]
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE s.src AS SELECT 's' AS v;
+
+statement ok
+CREATE TABLE main.src AS SELECT 'main' AS v;
+
+statement ok
+CREATE MACRO s.f(x) AS x * 10;
+
+statement ok
+CREATE MACRO main.f(x) AS x * 1000;
+
+# macros created under the search path s, called from main, next to a view created the same way
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE MACRO m() AS (SELECT v FROM src);
+
+statement ok
+CREATE MACRO tm() AS TABLE SELECT v FROM src;
+
+statement ok
+CREATE VIEW vs AS SELECT v FROM src;
+
+statement ok
+RESET search_path;
+
+query III
+SELECT s.m(), (SELECT v FROM s.tm()), (SELECT v FROM s.vs);
+----
+s	s	s
+
+statement ok
+SET search_path = 's';
+
+query II
+SELECT m(), (SELECT v FROM tm());
+----
+s	s
+
+statement ok
+RESET search_path;
+
+# a table that only the macro's schema holds
+
+statement ok
+CREATE TABLE s.only_s AS SELECT 'only s' AS v;
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE MACRO mo() AS (SELECT v FROM only_s);
+
+statement ok
+CREATE MACRO tmo() AS TABLE SELECT v FROM only_s;
+
+statement ok
+RESET search_path;
+
+query II
+SELECT s.mo(), (SELECT v FROM s.tmo());
+----
+only s	only s
+
+# a macro name in both schemas: the body calls the one of its own schema
+
+statement ok
+CREATE MACRO s.callf(x) AS f(x);
+
+statement ok
+CREATE MACRO s.tcallf(x) AS TABLE SELECT f(x) AS r;
+
+query II
+SELECT s.callf(1), (SELECT r FROM s.tcallf(1));
+----
+10	10
+
+# a macro of main called from a session on s uses main's table and macro
+
+statement ok
+CREATE MACRO main.mm() AS (SELECT v FROM src);
+
+statement ok
+CREATE MACRO main.tmm() AS TABLE SELECT v, f(1) AS r FROM src;
+
+statement ok
+CREATE MACRO main.callf_main(x) AS f(x);
+
+statement ok
+SET search_path = 's';
+
+query IIII
+SELECT main.mm(), main.callf_main(1), v, r FROM main.tmm();
+----
+main	1000	main	1000
+
+statement ok
+RESET search_path;
+
+# nested macros: a bare macro name in a body resolves in the body's schema
+
+statement ok
+CREATE MACRO s.inner_m(x) AS x + 1;
+
+statement ok
+CREATE MACRO s.outer_m(x) AS inner_m(x) * 2;
+
+statement ok
+CREATE MACRO s.both_m(x) AS x + 100;
+
+statement ok
+CREATE MACRO main.both_m(x) AS x + 900000;
+
+statement ok
+CREATE MACRO s.outer_both(x) AS both_m(x);
+
+statement ok
+CREATE MACRO s.touter(x) AS TABLE SELECT both_m(x) AS r, inner_m(x) AS i;
+
+statement ok
+CREATE MACRO s.sub_tm() AS (SELECT max(v) FROM tm());
+
+statement ok
+CREATE MACRO s.tt() AS TABLE SELECT v FROM tm();
+
+query IIIIII
+SELECT s.outer_m(1), s.outer_both(1), r, i, s.sub_tm(), (SELECT v FROM s.tt()) FROM s.touter(1);
+----
+4	101	101	2	s	s
+
+# a generated column of s calling a macro of s whose body calls a bare macro of s, written and read from main
+
+statement ok
+CREATE TABLE s.gen(v INTEGER, g INTEGER GENERATED ALWAYS AS (outer_m(v)));
+
+statement ok
+INSERT INTO s.gen VALUES (1);
+
+query II
+SELECT v, g FROM s.gen;
+----
+1	4
+
+# a bare view and a bare user type, present in both schemas
+
+statement ok
+CREATE VIEW s.vw AS SELECT 's view' AS w;
+
+statement ok
+CREATE VIEW main.vw AS SELECT 'main view' AS w;
+
+statement ok
+CREATE TYPE s.mood AS ENUM ('s_ok', 's_sad');
+
+statement ok
+CREATE TYPE main.mood AS ENUM ('main_ok');
+
+statement ok
+CREATE MACRO s.mv() AS (SELECT w FROM vw);
+
+statement ok
+CREATE MACRO s.mt(x) AS x::mood;
+
+statement ok
+CREATE MACRO s.mt_range() AS enum_range(NULL::mood);
+
+statement ok
+CREATE MACRO s.tmv() AS TABLE SELECT w, enum_range(NULL::mood) AS r, 's_sad'::mood AS c FROM vw;
+
+query III
+SELECT s.mv(), s.mt('s_ok'), s.mt_range();
+----
+s view	s_ok	[s_ok, s_sad]
+
+query III
+SELECT * FROM s.tmv();
+----
+s view	[s_ok, s_sad]	s_sad
+
+# a parameter named like a table of the macro's schema is the parameter, in the body and in its subquery
+
+statement ok
+CREATE MACRO s.pm(src) AS src || '!';
+
+statement ok
+CREATE MACRO s.pm_sub(src) AS (SELECT src || v FROM src);
+
+statement ok
+CREATE MACRO s.tpm(src) AS TABLE SELECT src || v AS r FROM src;
+
+query III
+SELECT s.pm('arg'), s.pm_sub('arg '), (SELECT r FROM s.tpm('arg '));
+----
+arg!	arg s	arg s
+
+# a lambda in the body: its call resolves in s, its parameter named like a table is the lambda parameter
+
+statement ok
+CREATE MACRO s.lm(l) AS list_transform(l, lambda src: f(src));
+
+statement ok
+CREATE MACRO s.tlm(l) AS TABLE SELECT list_transform(l, lambda src: f(src)) AS r;
+
+query II
+SELECT s.lm([1, 2]), (SELECT r FROM s.tlm([1, 2]));
+----
+[10, 20]	[10, 20]
+
+# DEFAULT parameter values are folded at CREATE under the macro's schema
+
+statement ok
+CREATE MACRO s.dm(a := f(1)) AS a;
+
+statement ok
+CREATE MACRO s.tdm(a := f(1)) AS TABLE SELECT a AS r;
+
+query III
+SELECT s.dm(), s.dm(5), (SELECT r FROM s.tdm());
+----
+10	5	10
+
+# a temporary macro follows the caller's search path, as a temporary view does
+
+statement ok
+CREATE TEMP MACRO tmpm() AS (SELECT v FROM src);
+
+statement ok
+CREATE TEMP MACRO ttmpm() AS TABLE SELECT v FROM src;
+
+statement ok
+CREATE TEMP VIEW tmpv AS SELECT v FROM src;
+
+query III
+SELECT tmpm(), (SELECT v FROM ttmpm()), (SELECT v FROM tmpv);
+----
+main	main	main
+
+statement ok
+SET search_path = 's';
+
+query III
+SELECT tmpm(), (SELECT v FROM ttmpm()), (SELECT v FROM tmpv);
+----
+s	s	s
+
+statement ok
+RESET search_path;
+
+# the caller's arguments at the expression level of a scalar body keep the caller's entries
+
+statement ok
+CREATE MACRO s.callf_sub(x) AS (SELECT f(x));
+
+statement ok
+CREATE MACRO s.ident(x) AS (SELECT x);
+
+statement ok
+CREATE MACRO s.tident(x) AS TABLE SELECT enum_range(x) AS r;
+
+statement ok
+CREATE MACRO s.plus1(x) AS x + 1;
+
+statement ok
+CREATE MACRO s.idx(x) AS x;
+
+query II
+SELECT s.callf(f(1)), s.callf(x := f(2));
+----
+10000	20000
+
+query II
+SELECT enum_range(s.idx(NULL::mood)), s.plus1(f(1));
+----
+[main_ok]	1001
+
+# an argument at the expression level still matches the caller's GROUP BY key
+
+statement ok
+CREATE TABLE main.gk AS SELECT range AS x FROM range(3);
+
+query II
+SELECT f(x), s.plus1(f(x)) FROM gk GROUP BY f(x) ORDER BY 1;
+----
+0	1
+1000	1001
+2000	2001
+
+# chosen rule: an argument the body puts into one of its query parts (a subquery of a scalar body, the query of a
+# table macro) binds there as the rest of that part does, in the macro's schema, so where both schemas hold the
+# name it reads the macro's entry
+
+query IIII
+SELECT s.callf_sub(f(1)), (SELECT r FROM s.tcallf(f(1))), enum_range(s.ident(NULL::mood)), (SELECT r FROM s.tident(NULL::mood));
+----
+100	100	[s_ok, s_sad]	[s_ok, s_sad]
+
+statement ok
+CREATE VIEW main.vid AS SELECT s.ident(f(1)) AS r;
+
+query I
+SELECT r FROM main.vid;
+----
+10
+
+# an argument a macro body passes to another macro at its expression level keeps the body's entries, from every
+# session; in a subquery of the body the call is part of a query part and passes it as a view would
+
+statement ok
+CREATE MACRO s.wsub(x) AS sum((SELECT x));
+
+statement ok
+CREATE MACRO main.outer_ident() AS s.ident(f(1));
+
+query I
+SELECT main.outer_ident();
+----
+1000
+
+statement ok
+CREATE MACRO main.outer_window() AS s.wsub(f(1)) OVER ();
+
+statement ok
+CREATE MACRO main.sub_ident() AS (SELECT s.ident(f(1)));
+
+statement ok
+CREATE MACRO main.pass_on(x) AS x;
+
+statement ok
+CREATE MACRO main.nested_ident() AS main.pass_on(s.ident(f(1)));
+
+statement ok
+CREATE MACRO main.forward(x) AS s.ident(x);
+
+statement ok
+CREATE MACRO main.forwarded() AS main.forward(f(1));
+
+statement ok
+CREATE MACRO main.sub_table() AS (SELECT r FROM s.tcallf(f(1)));
+
+query IIIIII
+SELECT main.outer_ident(), main.outer_window(), main.sub_ident(), main.nested_ident(), main.forwarded(), main.sub_table();
+----
+1000	1000	10	1000	1000	100
+
+statement ok
+SET search_path = 's';
+
+query IIIIII
+SELECT main.outer_ident(), main.outer_window(), main.sub_ident(), main.nested_ident(), main.forwarded(), main.sub_table();
+----
+1000	1000	10	1000	1000	100
+
+statement ok
+RESET search_path;
+
+# a built-in in a nested argument, and the window clause of a nested window macro call, stay as written where the
+# caller reads them the same, so they still match the caller's GROUP BY key; so does a generated column's argument
+
+statement ok
+CREATE MACRO main.ident_m(x) AS x;
+
+statement ok
+CREATE MACRO main.abs_m(x) AS ident_m(abs(x));
+
+query II
+SELECT abs_m(x), count(*) FROM (VALUES (-2), (2), (NULL)) t(x) GROUP BY abs(x) ORDER BY 1;
+----
+2	2
+NULL	1
+
+statement ok
+CREATE MACRO main.myg(x) AS x * 2;
+
+statement ok
+CREATE MACRO main.wsum(x) AS sum(x);
+
+statement ok
+CREATE MACRO main.part_m(x) AS main.wsum(1) OVER (PARTITION BY myg(x));
+
+query II
+SELECT main.part_m(x), count(*) FROM (VALUES (1), (1), (2)) t(x) GROUP BY myg(x) ORDER BY count(*) DESC;
+----
+1	2
+1	1
+
+statement ok
+CREATE TABLE main.gen_ident(x INTEGER, g INTEGER GENERATED ALWAYS AS (ident_m(myg(x))));
+
+statement ok
+INSERT INTO main.gen_ident VALUES (1), (1), (2);
+
+query II
+SELECT g, count(*) FROM main.gen_ident GROUP BY myg(x) ORDER BY 1;
+----
+2	2
+4	1
+
+# chosen rule: a user function in an argument a body passes to another macro keeps the body's entry, so it no longer
+# matches a caller GROUP BY key written bare; grouping by the select alias works
+
+statement ok
+CREATE MACRO main.myf(x) AS x * 2;
+
+statement ok
+CREATE MACRO main.m2(x) AS s.idx(myf(x));
+
+statement error
+SELECT main.m2(x), count(*) FROM gk GROUP BY myf(x);
+----
+<REGEX>:.*must appear in the GROUP BY clause.*
+
+query II
+SELECT main.m2(x) AS k, count(*) FROM gk GROUP BY k ORDER BY k;
+----
+0	1
+2	1
+4	1
+
+# a user function passed to a built-in macro (nullif, list_append) still matches the caller's GROUP BY key: a built-in
+# macro has no path of its own
+
+statement ok
+CREATE MACRO main.m_nullif(y) AS nullif(myg(y), 0);
+
+statement ok
+CREATE MACRO main.m_append(y) AS list_append([1], myg(y));
+
+query II
+SELECT m_nullif(x), count(*) FROM gk GROUP BY myg(x) ORDER BY 1;
+----
+2	1
+4	1
+NULL	1
+
+query II
+SELECT m_append(x), count(*) FROM gk GROUP BY myg(x) ORDER BY 1;
+----
+[1, 0]	1
+[1, 2]	1
+[1, 4]	1
+
+# a subquery a body passes to another macro keeps the body's entries also as the table input of an in-out function
+
+statement ok
+CREATE MACRO s.inner_sum(x) AS (SELECT max(v) FROM summary(x));
+
+statement ok
+CREATE MACRO main.outer_sum() AS s.inner_sum((SELECT v FROM src));
+
+statement ok
+CREATE MACRO main.outer_scalar() AS s.ident((SELECT v FROM src));
+
+query II
+SELECT main.outer_sum(), main.outer_scalar();
+----
+main	main
+
+statement ok
+SET search_path = 's';
+
+query II
+SELECT main.outer_sum(), main.outer_scalar();
+----
+main	main
+
+statement ok
+RESET search_path;
+
+# CREATE checks a body with the same resolution, so a working definition can be replaced by itself
+
+statement ok
+CREATE MACRO main.gl() AS [1];
+
+statement ok
+CREATE MACRO s.len(x) AS array_length((SELECT x));
+
+statement ok
+CREATE MACRO main.outer_len() AS s.len(gl());
+
+statement ok
+CREATE MACRO s.gl() AS 2;
+
+statement ok
+CREATE OR REPLACE MACRO main.outer_len() AS s.len(gl());
+
+query I
+SELECT main.outer_len();
+----
+1
+
+# a table macro argument also picks the overload in the macro's schema, where the body binds it
+
+statement ok
+CREATE MACRO main.g() AS 7;
+
+statement ok
+CREATE MACRO s.g() AS 'schema';
+
+statement ok
+CREATE MACRO s.tov
+    (x INTEGER) AS TABLE (SELECT 'integer ' || x AS r),
+    (x VARCHAR) AS TABLE (SELECT 'varchar ' || x AS r);
+
+query I
+SELECT r FROM s.tov(g());
+----
+varchar schema
+
+# CREATE MACRO binds the body in the macro's schema: a table only s holds, created from main
+
+statement ok
+CREATE MACRO s.mk() AS (SELECT v FROM only_s);
+
+query I
+SELECT s.mk();
+----
+only s
+
+# with macro dependencies the dependency is on the table of the macro's schema
+
+statement ok
+SET enable_macro_dependencies = true;
+
+statement ok
+CREATE TABLE s.dep_t AS SELECT 1 AS d;
+
+statement ok
+CREATE TABLE main.dep_t AS SELECT 2 AS d;
+
+statement ok
+CREATE MACRO s.dep_m() AS (SELECT d FROM dep_t);
+
+statement error
+DROP TABLE s.dep_t;
+----
+<REGEX>:.*Cannot drop entry.*dep_t.*
+
+statement ok
+DROP TABLE main.dep_t;
+
+query I
+SELECT s.dep_m();
+----
+1
+
+statement ok
+RESET enable_macro_dependencies;
+
+# a macro of an attached catalog binds in its own catalog and schema
+
+statement ok
+ATTACH ':memory:' AS db2;
+
+statement ok
+CREATE SCHEMA db2.s;
+
+statement ok
+CREATE TABLE db2.s.src AS SELECT 'db2 s' AS v;
+
+statement ok
+CREATE MACRO db2.s.m() AS (SELECT v FROM src);
+
+statement ok
+CREATE MACRO db2.s.tm() AS TABLE SELECT v FROM src;
+
+query II
+SELECT db2.s.m(), (SELECT v FROM db2.s.tm());
+----
+db2 s	db2 s
+
+# parameter types name the macro's type, and a dot call on a parameter calls the macro's function
+
+statement ok
+CREATE MACRO s.tp(x mood) AS x;
+
+statement ok
+CREATE MACRO s.dot(a) AS a.f();
+
+query II
+SELECT enum_range(s.tp(NULL)), s.dot(1);
+----
+[s_ok, s_sad]	10
+
+# a RETURNS type names the macro's type; RETURNS needs storage v2.1.0, which an in-memory database has
+
+statement ok
+ATTACH ':memory:' AS rdb;
+
+statement ok
+CREATE SCHEMA rdb.s;
+
+statement ok
+CREATE TYPE rdb.s.mood AS ENUM ('r_ok');
+
+statement ok
+CREATE MACRO rdb.s.rt(x) RETURNS mood AS x;
+
+query I
+SELECT rdb.s.rt('r_ok');
+----
+r_ok
+
+# a temporary macro called from a body binds on the path of the binder that expands it, as a temporary view does
+
+statement ok
+CREATE TEMP MACRO tmpf() AS f(1);
+
+statement ok
+CREATE MACRO s.outer_tmp() AS tmpf();
+
+statement ok
+CREATE MACRO s.outer_tmp_sub() AS (SELECT tmpf());
+
+query II
+SELECT s.outer_tmp(), s.outer_tmp_sub();
+----
+1000	10
+
+# a macro of a nested schema binds in that schema (nested schemas need storage v2.0.0, which an in-memory database has)
+
+statement ok
+ATTACH ':memory:' AS ndb;
+
+statement ok
+CREATE SCHEMA ndb.s;
+
+statement ok
+CREATE SCHEMA ndb.s.deep;
+
+statement ok
+CREATE TABLE ndb.s.deep.src AS SELECT 'deep' AS v;
+
+statement ok
+CREATE MACRO ndb.s.deep.md() AS (SELECT v FROM src);
+
+query I
+SELECT ndb.s.deep.md();
+----
+deep
+
+# a body subquery inside GROUP BY and ORDER BY still matches the same call in the select list
+
+statement ok
+CREATE TABLE main.gt AS SELECT range AS x FROM range(3);
+
+statement ok
+CREATE MACRO s.tagged(x) AS (SELECT v || x FROM src);
+
+query II
+SELECT s.tagged(x::VARCHAR) AS g, count(*) FROM gt GROUP BY s.tagged(x::VARCHAR) ORDER BY s.tagged(x::VARCHAR);
+----
+s0	1
+s1	1
+s2	1
+
+# a window macro: the body's call resolves in s, the caller's FILTER in main
+
+statement ok
+CREATE TABLE main.wt AS SELECT * FROM (VALUES (1), (2), (3)) t(x);
+
+statement ok
+CREATE MACRO s.wm(x) AS sum(f(x));
+
+query I
+SELECT DISTINCT s.wm(x) FILTER (WHERE f(x) > 1500) OVER () FROM wt;
+----
+50
+
+query II
+SELECT x, s.wm(x) OVER (PARTITION BY f(x) // 2000) FROM wt ORDER BY x;
+----
+1	10
+2	50
+3	50
+
+# a window macro called by its bare name in a body, with OVER
+
+statement ok
+CREATE MACRO main.wm(x) AS max(x);
+
+statement ok
+CREATE MACRO s.callw(x) AS wm(x) OVER ();
+
+query I
+SELECT DISTINCT s.callw(x) FROM wt;
+----
+60
+
+# a correlated call, its argument a column of the outer query
+
+statement ok
+CREATE TABLE main.ct AS SELECT 1 AS x UNION ALL SELECT 2;
+
+query III
+SELECT x, (SELECT s.callf(ct.x)), (SELECT s.callf_sub(ct.x)) FROM ct ORDER BY x;
+----
+1	10	10
+2	20	20
+
+query II
+SELECT ct.x, r FROM ct, s.tcallf(ct.x) ORDER BY ct.x;
+----
+1	10
+2	20
+
+# a name in neither schema falls back to the caller's search path, as for a view
+
+statement ok
+CREATE SCHEMA x;
+
+statement ok
+CREATE TABLE x.only_x AS SELECT 'x' AS v;
+
+statement ok
+SET search_path = 'x';
+
+statement ok
+CREATE MACRO s.mx() AS (SELECT v FROM only_x);
+
+statement ok
+CREATE MACRO s.tmx() AS TABLE SELECT v FROM only_x;
+
+statement ok
+CREATE VIEW s.vx AS SELECT v FROM only_x;
+
+query III
+SELECT s.mx(), (SELECT v FROM s.tmx()), (SELECT v FROM s.vx);
+----
+x	x	x
+
+statement ok
+RESET search_path;
+
+# a sequence named in a body subquery and query_table in a table body resolve in s
+
+statement ok
+CREATE SEQUENCE s.seq START 100;
+
+statement ok
+CREATE SEQUENCE main.seq START 900;
+
+statement ok
+CREATE MACRO s.next_sub() AS (SELECT nextval('seq'));
+
+statement ok
+CREATE MACRO s.tq() AS TABLE SELECT v FROM query_table('src');
+
+query II
+SELECT s.next_sub(), (SELECT v FROM s.tq());
+----
+100	s
+
+# EXPORT writes the bodies as written, and IMPORT from a fresh session creates and calls them
+
+load {TEST_DIR}/macro_search_path_export.db
+
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE TABLE s.src AS SELECT 's' AS v;
+
+statement ok
+SET search_path = 's';
+
+statement ok
+CREATE MACRO m() AS (SELECT v FROM src);
+
+statement ok
+CREATE MACRO tm() AS TABLE SELECT v FROM src;
+
+statement ok
+RESET search_path;
+
+query II
+SELECT function_name, macro_definition FROM duckdb_functions() WHERE schema_name = 's' ORDER BY function_name;
+----
+m	(SELECT v FROM src)
+tm	SELECT v FROM src
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/macro_search_path_export';
+
+load {TEST_DIR}/macro_search_path_import.db
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/macro_search_path_export';
+
+query II
+SELECT s.m(), (SELECT v FROM s.tm());
+----
+s	s

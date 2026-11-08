@@ -301,14 +301,43 @@ static bool CanBeDotCall(ClientContext &context, const QualifiedName &name) {
 	return !name.Catalog().empty() || !DatabaseManager::Get(context).GetDatabase(context, name.Schema());
 }
 
+//! The scope a stored expression was written in, and the scope of the statement that binds a copy of it
+struct EntryNameScopes {
+	CatalogEntryRetriever &written_scope;
+	CatalogEntryRetriever &binding_scope;
+	//! the table whose physical columns a generated column's dot call receivers may name
+	optional_ptr<const Identifier> table_name;
+	optional_ptr<const ColumnList> columns;
+	//! the schema on whose view path each subquery of a stored body binds
+	optional_ptr<const SchemaCatalogEntry> subquery_schema;
+	//! a macro body: an argument it passes to another macro keeps the written entry of every name outside the system
+	//! catalog, since that macro, or one it passes the argument on to, may bind it on another path
+	bool pins_macro_arguments;
+	bool in_macro_argument;
+};
+
+//! Whether a name written as resolving to written_entry is read otherwise where the copy binds; built-ins follow the
+//! binding scope only, so a caller's GROUP BY key and the binder's name based forms still match them
+template <class ENTRY, class RESOLVE>
+static bool ReadOtherwise(EntryNameScopes &scopes, const CatalogEntry &written_entry, const ENTRY &written,
+                          RESOLVE resolve) {
+	if (scopes.in_macro_argument && !written_entry.ParentCatalog().IsSystemCatalog()) {
+		return true;
+	}
+	return !(written == resolve(scopes.binding_scope));
+}
+
 //! ColumnQualifier::QualifyFunction reads x.f() and x.y.f(), whose qualification holds no f, as the calls f(x) and
 //! f(x.y). Read as the table's own scope reads it (CheckBinder), the receiver x.y is column y when x names the table
 //! and field y of column x otherwise. Only a physical column is written out: the column dependency manager never saw
 //! the receiver, so a generated one could close a cycle, and anything else may sit in a macro argument the bind
 //! never uses; both are left to the bind.
-static unique_ptr<ParsedExpression> DotCallReceiver(const QualifiedName &name, const Identifier &table_name,
-                                                    const ColumnList &columns) {
-	bool plain_column = name.Catalog().empty() || name.Catalog() == table_name;
+static unique_ptr<ParsedExpression> DotCallReceiver(const QualifiedName &name, const EntryNameScopes &scopes) {
+	if (!scopes.columns) {
+		return nullptr;
+	}
+	auto &columns = *scopes.columns;
+	bool plain_column = name.Catalog().empty() || name.Catalog() == *scopes.table_name;
 	auto &column_name = plain_column ? name.Schema() : name.Catalog();
 	if (!columns.ColumnExists(column_name) || columns.GetColumn(column_name).Generated()) {
 		return nullptr;
@@ -341,43 +370,86 @@ static FunctionResolution ResolveFunction(CatalogEntryRetriever &scope, const Qu
 	return result;
 }
 
-struct GeneratedNameScopes {
-	CatalogEntryRetriever &table_scope;
-	CatalogEntryRetriever &reader_scope;
-	const Identifier &table_name;
-	const ColumnList &columns;
-};
-
-static void QualifyFunctionName(GeneratedNameScopes &scopes, FunctionExpression &function) {
+//! Returns the entry the written scope calls, unless the call is a dot call
+static optional_ptr<CatalogEntry> QualifyFunctionName(EntryNameScopes &scopes, FunctionExpression &function) {
 	auto &name = function.GetQualifiedName();
-	auto resolution = ResolveFunction(scopes.table_scope, name);
-	if (!resolution.entry || resolution == ResolveFunction(scopes.reader_scope, name)) {
-		return;
+	auto resolution = ResolveFunction(scopes.written_scope, name);
+	if (!resolution.entry) {
+		return nullptr;
+	}
+	auto called = resolution.dot_call ? nullptr : resolution.entry;
+	if (!ReadOtherwise(scopes, *resolution.entry, resolution,
+	                   [&](CatalogEntryRetriever &scope) { return ResolveFunction(scope, name); })) {
+		return called;
 	}
 	if (resolution.dot_call) {
-		auto receiver = DotCallReceiver(name, scopes.table_name, scopes.columns);
+		auto receiver = DotCallReceiver(name, scopes);
 		if (!receiver) {
-			return;
+			return called;
 		}
 		auto &arguments = function.GetArgumentsMutable();
 		arguments.insert(arguments.begin(), std::move(receiver));
 	}
 	function.SetQualifiedName(EntryName(*resolution.entry, name.Name()));
+	return called;
 }
 
-static void QualifyTypeName(GeneratedNameScopes &scopes, TypeExpression &type) {
+static void QualifyTypeName(EntryNameScopes &scopes, TypeExpression &type) {
 	auto &name = type.GetQualifiedName();
-	auto entry = LookupEntry(scopes.table_scope, CatalogType::TYPE_ENTRY, name);
-	if (!entry || entry == LookupEntry(scopes.reader_scope, CatalogType::TYPE_ENTRY, name)) {
+	auto entry = LookupEntry(scopes.written_scope, CatalogType::TYPE_ENTRY, name);
+	if (!entry || !ReadOtherwise(scopes, *entry, entry, [&](CatalogEntryRetriever &scope) {
+		    return LookupEntry(scope, CatalogType::TYPE_ENTRY, name);
+	    })) {
 		return;
 	}
 	type.SetQualifiedName(EntryName(*entry, name.Name()));
 }
 
-static void QualifyEntryNames(GeneratedNameScopes &scopes, ParsedExpression &expr) {
+//! Returns the entry the written scope calls
+static optional_ptr<CatalogEntry> QualifyWindowName(EntryNameScopes &scopes, WindowExpression &window) {
+	auto &name = window.GetQualifiedName();
+	if (name.Name().empty()) {
+		return nullptr;
+	}
+	auto entry = LookupEntry(scopes.written_scope, CatalogType::SCALAR_FUNCTION_ENTRY, name);
+	if (!entry || !ReadOtherwise(scopes, *entry, entry, [&](CatalogEntryRetriever &scope) {
+		    return LookupEntry(scope, CatalogType::SCALAR_FUNCTION_ENTRY, name);
+	    })) {
+		return entry;
+	}
+	window.SetQualifiedName(EntryName(*entry, name.Name()));
+	return entry;
+}
+
+//! The temporary and the system catalog are never put on a search path, so an entry stored there, like a temporary
+//! view, resolves the names of its body through the path of whoever binds it
+static bool HasOwnSearchPath(const SchemaCatalogEntry &schema) {
+	auto &catalog = schema.ParentCatalog();
+	return !catalog.IsTemporaryCatalog() && !catalog.IsSystemCatalog();
+}
+
+static void QualifyEntryNames(EntryNameScopes &scopes, ParsedExpression &expr);
+
+static void QualifyMacroArguments(EntryNameScopes &scopes, ParsedExpression &call,
+                                  vector<FunctionArgument> &arguments) {
+	auto argument_scopes = scopes;
+	argument_scopes.in_macro_argument = true;
+	ParsedExpressionIterator::EnumerateChildren(call, [&](ParsedExpression &child) {
+		for (auto &argument : arguments) {
+			if (&argument.GetExpression() == &child) {
+				QualifyEntryNames(argument_scopes, child);
+				return;
+			}
+		}
+		QualifyEntryNames(scopes, child);
+	});
+}
+
+static void QualifyEntryNames(EntryNameScopes &scopes, ParsedExpression &expr) {
+	optional_ptr<CatalogEntry> called;
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::FUNCTION:
-		QualifyFunctionName(scopes, expr.Cast<FunctionExpression>());
+		called = QualifyFunctionName(scopes, expr.Cast<FunctionExpression>());
 		break;
 	case ExpressionClass::CAST:
 		QualifyEntryNames(scopes, expr.Cast<CastExpression>().TargetTypeMutable());
@@ -385,8 +457,26 @@ static void QualifyEntryNames(GeneratedNameScopes &scopes, ParsedExpression &exp
 	case ExpressionClass::TYPE:
 		QualifyTypeName(scopes, expr.Cast<TypeExpression>());
 		break;
+	case ExpressionClass::WINDOW:
+		called = QualifyWindowName(scopes, expr.Cast<WindowExpression>());
+		break;
+	case ExpressionClass::SUBQUERY:
+		if (scopes.subquery_schema) {
+			auto &schema = *scopes.subquery_schema;
+			expr.Cast<SubqueryExpression>().SetBindingSchema(schema.ParentCatalog().GetName(), schema.GetSchemaPath());
+		}
+		break;
 	default:
 		break;
+	}
+	// a built-in macro has no path of its own and forwards nothing, so its arguments follow the rule above
+	if (called && called->type == CatalogType::MACRO_ENTRY && !called->ParentCatalog().IsSystemCatalog() &&
+	    scopes.pins_macro_arguments && !scopes.in_macro_argument) {
+		auto &arguments = expr.GetExpressionClass() == ExpressionClass::WINDOW
+		                      ? expr.Cast<WindowExpression>().GetArgumentsMutable()
+		                      : expr.Cast<FunctionExpression>().GetArgumentsMutable();
+		QualifyMacroArguments(scopes, expr, arguments);
+		return;
 	}
 	ParsedExpressionIterator::EnumerateChildren(expr,
 	                                            [&](ParsedExpression &child) { QualifyEntryNames(scopes, child); });
@@ -396,9 +486,7 @@ unique_ptr<ParsedExpression> Binder::ResolveGeneratedExpressionNames(const Schem
                                                                      const Identifier &table_name,
                                                                      const ColumnList &columns,
                                                                      const ParsedExpression &expression) {
-	if (table_schema.ParentCatalog().IsTemporaryCatalog()) {
-		// the temporary schema is never put on a search path, so a temporary table, like a temporary view, resolves
-		// its names through the reader's path
+	if (!HasOwnSearchPath(table_schema)) {
 		return expression.Copy();
 	}
 	// Neither lookup runs the dependency callback: the bind of the result looks every name up again.
@@ -407,10 +495,23 @@ unique_ptr<ParsedExpression> Binder::ResolveGeneratedExpressionNames(const Schem
 	CatalogEntryRetriever reader_scope(context);
 	reader_scope.Inherit(entry_retriever);
 	reader_scope.SetCallback(nullptr);
-	GeneratedNameScopes scopes {table_scope, reader_scope, table_name, columns};
+	EntryNameScopes scopes {table_scope, reader_scope, &table_name, &columns, nullptr, false, false};
 	auto result = expression.Copy();
 	QualifyEntryNames(scopes, *result);
 	return result;
+}
+
+void Binder::ResolveMacroBodyNames(const SchemaCatalogEntry &macro_schema, ParsedExpression &body) {
+	if (!HasOwnSearchPath(macro_schema)) {
+		return;
+	}
+	CatalogEntryRetriever macro_scope(context);
+	macro_scope.SetSearchPath(GetSearchPath(macro_schema.ParentCatalog(), macro_schema.GetSchemaPath(), true));
+	CatalogEntryRetriever caller_scope(context);
+	caller_scope.Inherit(entry_retriever);
+	caller_scope.SetCallback(nullptr);
+	EntryNameScopes scopes {macro_scope, caller_scope, nullptr, nullptr, &macro_schema, true, false};
+	QualifyEntryNames(scopes, body);
 }
 
 void Binder::BindGeneratedColumns(BoundCreateTableInfo &info) {

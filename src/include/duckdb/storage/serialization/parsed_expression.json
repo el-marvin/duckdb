@@ -489,6 +489,16 @@
         "id": 203,
         "name": "comparison_type",
         "type": "ExpressionType"
+      },
+      {
+        "name": "binding_catalog",
+        "type": "Identifier",
+        "serialize_skip": true
+      },
+      {
+        "name": "binding_schema_path",
+        "type": "vector<Identifier>",
+        "serialize_skip": true
       }
     ]
   },

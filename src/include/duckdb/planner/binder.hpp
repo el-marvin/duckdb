@@ -308,6 +308,9 @@ public:
 	                                                             const Identifier &table_name,
 	                                                             const ColumnList &columns,
 	                                                             const ParsedExpression &expression);
+	//! Qualifies in a copy of a macro body every function, macro, window and type name that this binder would
+	//! resolve to another entry than the macro's schema does, and marks its subqueries to bind in that schema
+	void ResolveMacroBodyNames(const SchemaCatalogEntry &macro_schema, ParsedExpression &body);
 
 	BoundStatement BindAlterAddIndex(BoundStatement &result, CatalogEntry &entry, unique_ptr<AlterInfo> alter_info);
 
@@ -455,6 +458,9 @@ public:
 
 	void SetSearchPath(Catalog &catalog, const vector<Identifier> &schema_path);
 	void SetSearchPath(Catalog &catalog, const Identifier &schema);
+	//! Resolves names as the body of an entry stored in the schema does: the schema first, then its catalog's default
+	//! schema, then the session's paths
+	void SetBodySearchPath(const Catalog &catalog, const vector<Identifier> &schema_path);
 
 	void BindDefaultValue(const ColumnDefinition &column, vector<unique_ptr<Expression>> &bound_defaults,
 	                      const string &catalog = "", const vector<Identifier> &schema_path = {});
