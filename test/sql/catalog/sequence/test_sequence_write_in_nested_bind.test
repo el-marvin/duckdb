@@ -1,0 +1,69 @@
+# name: test/sql/catalog/sequence/test_sequence_write_in_nested_bind.test
+# description: a sequence write made by a bind that no statement declared is a write of the transaction, refused in a read only one
+# group: [sequence]
+
+statement ok
+CREATE SEQUENCE s
+
+# a table function argument is evaluated while the statement binds, before its declared write is applied
+
+query I
+SELECT count(*) FROM range(nextval('s'))
+----
+1
+
+query I
+SELECT currval('s')
+----
+1
+
+statement ok
+CREATE VIEW v AS SELECT * FROM range(nextval('s'))
+
+query I
+SELECT currval('s')
+----
+2
+
+# PRAGMA table_info binds the view again, which evaluates nextval inside a statement that declared no write
+
+query II
+SELECT name, type FROM pragma_table_info('v')
+----
+range	BIGINT
+
+query I
+SELECT currval('s') > 2
+----
+true
+
+statement ok
+SET VARIABLE before_read_only = currval('s')
+
+statement ok
+BEGIN TRANSACTION READ ONLY
+
+statement error
+SELECT name FROM pragma_table_info('v')
+----
+transaction is launched in read-only mode
+
+# the refused write aborts the transaction, as any failed write does
+
+statement error
+SELECT currval('s')
+----
+Current transaction is aborted
+
+statement ok
+ROLLBACK
+
+query I
+SELECT currval('s') = getvariable('before_read_only')
+----
+true
+
+query I
+SELECT count(*) > 0 FROM v
+----
+true

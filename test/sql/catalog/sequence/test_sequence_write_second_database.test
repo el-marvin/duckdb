@@ -1,0 +1,59 @@
+# name: test/sql/catalog/sequence/test_sequence_write_second_database.test
+# description: a sequence write that a nested plan makes in a transaction that wrote another database is refused, and the refusal changes nothing
+# group: [sequence]
+
+require json
+
+statement ok
+ATTACH ':memory:' AS a
+
+statement ok
+ATTACH ':memory:' AS b
+
+statement ok
+CREATE TABLE a.t(i INTEGER)
+
+statement ok
+CREATE SEQUENCE b.s
+
+query I
+SELECT nextval('b.s')
+----
+1
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO a.t VALUES (1)
+
+# json_serialize_plan plans its SQL, which evaluates nextval, and reports the error in its result; the second attempt
+# is refused as well, so the first left the transaction's state for b unchanged
+
+query I
+SELECT json_serialize_plan('SELECT * FROM range(nextval(''b.s''))')->>'error_message'
+----
+Attempting to write to database "b" in a transaction that has already modified database "a" - a single transaction can only write to a single attached database.
+
+query I
+SELECT json_serialize_plan('SELECT * FROM range(nextval(''b.s''))')->>'error_message'
+----
+Attempting to write to database "b" in a transaction that has already modified database "a" - a single transaction can only write to a single attached database.
+
+query I
+SELECT currval('b.s')
+----
+1
+
+statement ok
+COMMIT
+
+query I
+SELECT count(*) FROM a.t
+----
+1
+
+query I
+SELECT nextval('b.s')
+----
+2
