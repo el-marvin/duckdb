@@ -42,8 +42,9 @@ bool MatchRecognizeConfig::Equals(const MatchRecognizeConfig &other) const {
 	    after_match_variable != other.after_match_variable || define_auto != other.define_auto) {
 		return false;
 	}
-	if (!ExpressionUtil::ListEquals(partition_expressions, other.partition_expressions) ||
-	    !ExpressionUtil::ListEqualsWithAliases(measures_expression_list, other.measures_expression_list) ||
+	// ONE ROW PER MATCH reports the partitions under the names they were spelled with
+	if (!ExpressionUtil::ListEqualsWithNames(partition_expressions, other.partition_expressions, false) ||
+	    !ExpressionUtil::ListEqualsWithNames(measures_expression_list, other.measures_expression_list, true) ||
 	    !ExpressionUtil::ListEqualsWithAliases(defines_expression_list, other.defines_expression_list)) {
 		return false;
 	}

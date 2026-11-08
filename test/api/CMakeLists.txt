@@ -75,6 +75,7 @@ set(TEST_API_OBJECTS
     test_dialect_extension.cpp
     test_query_node_copy.cpp
     test_query_node_equals.cpp
+    test_parsed_expression_equals.cpp
     test_statement_tostring.cpp
     test_grammar_extension.cpp
     test_parser_query_completeness.cpp

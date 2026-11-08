@@ -1,6 +1,8 @@
 #include "duckdb/parser/expression/star_expression.hpp"
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/sql_identifier.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -11,6 +13,18 @@ namespace duckdb {
 
 StarExpression::StarExpression(Identifier relation_name_p)
     : ParsedExpression(ExpressionType::STAR, ExpressionClass::STAR), relation_name(std::move(relation_name_p)) {
+}
+
+// The lists are hash containers whose order a copy may change, so they print sorted to keep the text, which names an
+// unaliased column, the same for equal expressions.
+template <class CONTAINER, class PRINT>
+static string JoinSorted(const CONTAINER &entries, PRINT &&print) {
+	vector<string> printed;
+	for (auto &entry : entries) {
+		printed.push_back(print(entry));
+	}
+	std::sort(printed.begin(), printed.end());
+	return StringUtil::Join(printed, ", ");
 }
 
 string StarExpression::ToString() const {
@@ -26,19 +40,19 @@ string StarExpression::ToString() const {
 	result += relation_name.empty() ? "*" : SQLIdentifier(relation_name) + ".*";
 	if (!exclude_list.empty()) {
 		result += " EXCLUDE (";
-		result += StringUtil::Join(exclude_list, ", ", [](const auto &entry) { return entry.ToString(); });
+		result += JoinSorted(exclude_list, [](const QualifiedColumnName &entry) { return entry.ToString(); });
 		result += ")";
 	}
 	if (!replace_list.empty()) {
 		result += " REPLACE (";
-		result += StringUtil::Join(replace_list, ", ", [](const auto &entry) {
+		result += JoinSorted(replace_list, [](const pair<const Identifier, unique_ptr<ParsedExpression>> &entry) {
 			return entry.second->ToString() + " AS " + SQLIdentifier(entry.first);
 		});
 		result += ")";
 	}
 	if (!rename_list.empty()) {
 		result += " RENAME (";
-		result += StringUtil::Join(rename_list, ", ", [](const auto &entry) {
+		result += JoinSorted(rename_list, [](const pair<const QualifiedColumnName, Identifier> &entry) {
 			return entry.first.ToString() + " AS " + SQLIdentifier(entry.second);
 		});
 		result += ")";

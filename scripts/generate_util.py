@@ -127,17 +127,18 @@ def generate_func_arg_comparison(field_name, indent):
     ]
 
 
-def generate_expression_map_comparison(field_name, indent):
+def generate_expression_map_comparison(field_name, indent, compare_key_spelling=False):
     i = indent
     ii = indent + '\t'
     iii = indent + '\t\t'
+    key_check = ' || !entry.first.SpellingEquals(other_entry->first)' if compare_key_spelling else ''
     return [
         f'{i}if ({field_name}.size() != other_p.{field_name}.size()) {{',
         f'{ii}return false;',
         f'{i}}}',
         f'{i}for (auto &entry : {field_name}) {{',
         f'{ii}auto other_entry = other_p.{field_name}.find(entry.first);',
-        f'{ii}if (other_entry == other_p.{field_name}.end()) {{',
+        f'{ii}if (other_entry == other_p.{field_name}.end(){key_check}) {{',
         f'{iii}return false;',
         f'{ii}}}',
         f'{ii}if (!entry.second->Equals(*other_entry->second)) {{',
@@ -162,9 +163,46 @@ def generate_ci_vector_string_comparison(field_name, indent):
     ]
 
 
+def generate_rename_map_spelling_comparison(field_name, indent):
+    ii = indent + '\t'
+    iii = indent + '\t\t'
+    return [
+        f'{indent}if ({field_name}.size() != other_p.{field_name}.size()) {{',
+        f'{ii}return false;',
+        f'{indent}}}',
+        f'{indent}for (auto &entry : {field_name}) {{',
+        f'{ii}auto other_entry = other_p.{field_name}.find(entry.first);',
+        f'{ii}if (other_entry == other_p.{field_name}.end() || !(entry.first == other_entry->first) ||',
+        f'{ii}    !entry.second.SpellingEquals(other_entry->second)) {{',
+        f'{iii}return false;',
+        f'{ii}}}',
+        f'{indent}}}',
+    ]
+
+
+# Names the result keeps (struct field names, output column names) compare case-sensitively.
+def generate_spelling_comparison(member, indent):
+    field_name = get_member_field_name(member)
+    type_str = member['type']
+    if is_parsed_expression_list(type_str):
+        return [
+            f'{indent}if (!ExpressionUtil::ListEqualsWithAliases({field_name}, other_p.{field_name})) {{',
+            f'{indent}\treturn false;',
+            f'{indent}}}',
+        ]
+    if is_expression_map(type_str):
+        return generate_expression_map_comparison(field_name, indent, compare_key_spelling=True)
+    if type_str == 'qualified_column_map_t<Identifier>':
+        return generate_rename_map_spelling_comparison(field_name, indent)
+    raise ValueError(f"{member['name']}: equals_by_spelling is not supported for type {type_str}")
+
+
 def generate_member_comparison(member, indent='\t'):
     field_name = get_member_field_name(member)
     type_str = member['type']
+
+    if member.get('equals_by_spelling', False):
+        return generate_spelling_comparison(member, indent)
 
     if type_str in ('Identifier', 'duckdb::Identifier', 'Literal'):
         return [

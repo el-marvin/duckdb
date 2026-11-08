@@ -118,7 +118,7 @@ bool SelectNode::Equals(const QueryNode *other_p) const {
 	auto &other = other_p->Cast<SelectNode>();
 
 	// SELECT; the aliases name the columns that an enclosing query reads
-	if (!ExpressionUtil::ListEqualsWithAliases(select_list, other.select_list)) {
+	if (!ExpressionUtil::ListEqualsWithNames(select_list, other.select_list, true)) {
 		return false;
 	}
 	// FROM

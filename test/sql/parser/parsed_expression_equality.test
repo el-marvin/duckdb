@@ -1,0 +1,480 @@
+# name: test/sql/parser/parsed_expression_equality.test
+# description: GROUP BY matches a select entry only to a parsed expression with the same value and the same name
+# group: [parser]
+
+statement ok
+CREATE TABLE t AS SELECT 1 AS s, {'a': 1} AS r
+
+# a STRUCT cast target's field names, unreferenced and referenced select entry
+query I
+SELECT (row(1, 2)::STRUCT(x INTEGER, y INTEGER)).x AS c GROUP BY (row(1, 2)::STRUCT(y INTEGER, x INTEGER)).x
+----
+1
+
+query I
+SELECT (row(1, 2)::STRUCT(x INTEGER, y INTEGER)).x AS c GROUP BY (row(1, 2)::STRUCT(y INTEGER, x INTEGER)).x, c
+----
+1
+
+# a column reference in a PIVOT IN tuple is the string it spells
+statement ok
+CREATE TABLE pivot_source AS SELECT 'a' AS k, 1 AS n, 7 AS v
+
+query I
+SELECT (SELECT p FROM pivot_source PIVOT (sum(v) FOR (k, n) IN ((a, 1) AS p))) AS c
+GROUP BY (SELECT p FROM pivot_source PIVOT (sum(v) FOR (k, n) IN ((A, 1) AS p)))
+----
+7
+
+# the columns an UNPIVOT unpivots
+query I
+SELECT (SELECT v FROM (UNPIVOT (SELECT 1 AS a, 2 AS b) ON a INTO NAME n VALUE v)) AS c
+GROUP BY (SELECT v FROM (UNPIVOT (SELECT 1 AS a, 2 AS b) ON b INTO NAME n VALUE v))
+----
+1
+
+query I
+SELECT (SELECT v FROM (UNPIVOT (SELECT 1 AS a, 2 AS b) ON a INTO NAME n VALUE v)) AS c
+GROUP BY (SELECT v FROM (UNPIVOT (SELECT 1 AS a, 2 AS b) ON b INTO NAME n VALUE v)), c
+----
+1
+
+# a PIVOT IN entry that is an expression
+query I
+SELECT (SELECT p FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (1 + 1 AS p) USING sum(v))) AS c
+GROUP BY (SELECT p FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (1 + 2 AS p) USING sum(v)))
+----
+7
+
+query I
+SELECT (SELECT p FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (1 + 1 AS p) USING sum(v))) AS c
+GROUP BY (SELECT p FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (1 + 2 AS p) USING sum(v))), c
+----
+7
+
+# the spelling of a select alias, read by a case sensitive COLUMNS pattern
+query I
+SELECT (SELECT COLUMNS('^[a-z]+$') FROM (SELECT 1 AS a, 2 AS B)) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]+$') FROM (SELECT 1 AS A, 2 AS b))
+----
+1
+
+query I
+SELECT (SELECT COLUMNS('^[a-z]+$') FROM (SELECT 1 AS a, 2 AS B)) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]+$') FROM (SELECT 1 AS A, 2 AS b)), c
+----
+1
+
+# the spelling of a select alias, read by a row cast to VARCHAR
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT 1 AS A) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT 1 AS a) t)
+----
+{'A': 1}
+
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT 1 AS A) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT 1 AS a) t), c
+----
+{'A': 1}
+
+# an operator and its function call spelling name their columns differently
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT 1 + 2) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT "+"(1, 2)) t)
+----
+{'(1 + 2)': 3}
+
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT 1 + 2) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT "+"(1, 2)) t), c
+----
+{'(1 + 2)': 3}
+
+# a disabled single arrow lambda keeps its error next to its lambda keyword twin
+statement ok
+SET lambda_syntax = 'DISABLE_SINGLE_ARROW'
+
+statement error
+SELECT (SELECT list_transform([1], x -> x + 1)) AS c GROUP BY (SELECT list_transform([1], lambda x: x + 1))
+----
+Deprecated lambda arrow (->) detected
+
+statement error
+SELECT (SELECT list_transform([1], x -> x + 1)) AS c GROUP BY (SELECT list_transform([1], lambda x: x + 1)), c
+----
+Deprecated lambda arrow (->) detected
+
+statement ok
+RESET lambda_syntax
+
+# every name the query declares for the result compares by its spelling
+query I
+SELECT (row(1)::STRUCT(A INTEGER))::VARCHAR AS c GROUP BY (row(1)::STRUCT(a INTEGER))::VARCHAR
+----
+{'A': 1}
+
+query I
+SELECT (row(1)::STRUCT(A INTEGER))::VARCHAR AS c GROUP BY (row(1)::STRUCT(a INTEGER))::VARCHAR, c
+----
+{'A': 1}
+
+query I
+SELECT {'A': 1}::VARCHAR AS c GROUP BY {'a': 1}::VARCHAR, c
+----
+{'A': 1}
+
+query I
+SELECT struct_pack(A := 1)::VARCHAR AS c GROUP BY struct_pack(a := 1)::VARCHAR, c
+----
+{'A': 1}
+
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT 1) t(A)) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT 1) t(a)), c
+----
+{'A': 1}
+
+query I
+SELECT (WITH q(a, B) AS (SELECT 1, 2) SELECT COLUMNS('^[a-z]$') FROM q) AS c
+GROUP BY (WITH q(A, b) AS (SELECT 1, 2) SELECT COLUMNS('^[a-z]$') FROM q), c
+----
+1
+
+query I
+SELECT (WITH RECURSIVE q(A) AS (SELECT 1 UNION ALL SELECT A + 1 FROM q WHERE A < 1) SELECT q::VARCHAR FROM q) AS c
+GROUP BY (WITH RECURSIVE q(a) AS (SELECT 1 UNION ALL SELECT a + 1 FROM q WHERE a < 1) SELECT q::VARCHAR FROM q), c
+----
+{'A': 1}
+
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT * RENAME (x AS A) FROM (SELECT 1 AS x)) t) AS c
+GROUP BY (SELECT t::VARCHAR FROM (SELECT * RENAME (x AS a) FROM (SELECT 1 AS x)) t), c
+----
+{'A': 1}
+
+query I
+SELECT (SELECT COLUMNS('^[a-z]$') FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (2 AS p, 3 AS Q) USING sum(v))) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]$') FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (2 AS P, 3 AS q) USING sum(v))), c
+----
+7
+
+query I
+SELECT (SELECT COLUMNS('^2_[a-z]$') FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (2) USING sum(v) AS s, count(v) AS C)) AS c
+GROUP BY (SELECT COLUMNS('^2_[a-z]$') FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (2) USING sum(v) AS S, count(v) AS c)), c
+----
+7
+
+query I
+SELECT (SELECT COLUMNS('^[a-z]$') FROM (UNPIVOT (SELECT 1 AS a) ON a INTO NAME N VALUE v)) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]$') FROM (UNPIVOT (SELECT 1 AS a) ON a INTO NAME n VALUE V)), c
+----
+1
+
+query I
+SELECT (SELECT n FROM (UNPIVOT (SELECT 1 AS a) ON a AS X INTO NAME n VALUE v)) AS c
+GROUP BY (SELECT n FROM (UNPIVOT (SELECT 1 AS a) ON a AS x INTO NAME n VALUE v)), c
+----
+X
+
+query I
+SELECT (SELECT COLUMNS('^[a-z]$') FROM (SELECT * REPLACE (1 AS a, 2 AS B) FROM (SELECT 0 AS a, 0 AS b))) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]$') FROM (SELECT * REPLACE (1 AS A, 2 AS b) FROM (SELECT 0 AS a, 0 AS b))), c
+----
+1
+
+query I
+SELECT (SELECT x::VARCHAR FROM (SELECT * FROM range(1) T) x) AS c GROUP BY (SELECT x::VARCHAR FROM (SELECT * FROM range(1) t) x), c
+----
+{'T': 0}
+
+query I
+SELECT (SELECT classifier FROM (SELECT 1 AS o, 1 AS v) MATCH_RECOGNIZE (ORDER BY o MEASURES classifier() AS classifier PATTERN (A) DEFINE A AS v = 1)) AS c
+GROUP BY (SELECT classifier FROM (SELECT 1 AS o, 1 AS v) MATCH_RECOGNIZE (ORDER BY o MEASURES classifier() AS classifier PATTERN (A) DEFINE a AS v = 1)), c
+----
+A
+
+query I
+SELECT (SELECT x::VARCHAR FROM (SELECT * FROM range(1) T(n)) x) AS c GROUP BY (SELECT x::VARCHAR FROM (SELECT * FROM range(1) t(n)) x), c
+----
+{'n': 0}
+
+query I
+SELECT (SELECT s FROM range(1) AS T(x)) AS c FROM (VALUES (1)) v(s) GROUP BY (SELECT s FROM range(1) AS t(x))
+----
+1
+
+statement ok
+SET pivot_filter_threshold = 0
+
+query I
+SELECT (SELECT COLUMNS('^[a-z]$') FROM (PIVOT (SELECT 1 AS g, 2 AS h, 3 AS k) ON k IN (3) USING count(*) GROUP BY g, H)) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]$') FROM (PIVOT (SELECT 1 AS g, 2 AS h, 3 AS k) ON k IN (3) USING count(*) GROUP BY G, h)), c
+----
+1
+
+statement ok
+RESET pivot_filter_threshold
+
+query I
+SELECT (SELECT COLUMNS('^\(s ') FROM (SELECT 1 AS s) MATCH_RECOGNIZE (PARTITION BY s + 1, S + 2 PATTERN (A) DEFINE A AS true)) AS c
+GROUP BY (SELECT COLUMNS('^\(s ') FROM (SELECT 1 AS s) MATCH_RECOGNIZE (PARTITION BY S + 1, s + 2 PATTERN (A) DEFINE A AS true)), c
+----
+2
+
+query I
+SELECT (SELECT s FROM (SELECT 1 AS p) AS t MATCH_RECOGNIZE (PARTITION BY t.p PATTERN (A) DEFINE A AS true)) AS c
+FROM (VALUES (1)) v(s) GROUP BY (SELECT s FROM (SELECT 1 AS p) AS t MATCH_RECOGNIZE (PARTITION BY T.p PATTERN (A) DEFINE A AS true))
+----
+1
+
+query I
+SELECT (SELECT COLUMNS('^[a-z]$') FROM (SELECT 1 AS s, 2 AS u) MATCH_RECOGNIZE (PARTITION BY s, U PATTERN (A) DEFINE A AS true)) AS c
+GROUP BY (SELECT COLUMNS('^[a-z]$') FROM (SELECT 1 AS s, 2 AS u) MATCH_RECOGNIZE (PARTITION BY S, u PATTERN (A) DEFINE A AS true)), c
+----
+1
+
+# an unaliased select entry is named by its printed text
+query I
+SELECT (SELECT COLUMNS('^\(s ') FROM (SELECT s + 1, S + 2 FROM t)) AS c GROUP BY (SELECT COLUMNS('^\(s ') FROM (SELECT S + 1, s + 2 FROM t)), c
+----
+2
+
+query I
+SELECT (SELECT COLUMNS('tinyint') FROM (SELECT 1::tinyint, 2::TINYINT)) AS c GROUP BY (SELECT COLUMNS('tinyint') FROM (SELECT 1::TINYINT, 2::tinyint)), c
+----
+1
+
+query I
+SELECT (SELECT COLUMNS('\(v\)$') FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (2) USING sum(v), count(V))) AS c
+GROUP BY (SELECT COLUMNS('\(v\)$') FROM (PIVOT (SELECT 2 AS k, 7 AS v) ON k IN (2) USING sum(V), count(v))), c
+----
+7
+
+# an operator and its function call spelling can bind differently (an arrow chain restructures only the operator), so
+# they do not match at the top level either
+statement error
+SELECT s + 1 AS c FROM t GROUP BY "+"(s, 1)
+----
+must appear in the GROUP BY clause
+
+# names that refer to something still match whatever their spelling
+query I
+SELECT (SELECT T.S) AS c FROM t GROUP BY (SELECT t.s)
+----
+1
+
+query I
+SELECT (SELECT s FROM (SELECT r.* FROM (SELECT 1 AS x) r)) AS c FROM t GROUP BY (SELECT s FROM (SELECT R.* FROM (SELECT 1 AS x) r))
+----
+1
+
+query I
+SELECT (SELECT row(*COLUMNS(* REPLACE (s AS a, 2 AS b))) FROM (VALUES (0, 0)) u(a, b)) AS c FROM t
+GROUP BY (SELECT row(*COLUMNS(* REPLACE (s AS a, 2 AS b))) FROM (VALUES (0, 0)) u(a, b))
+----
+(1, 2)
+
+query I
+SELECT (SELECT (SELECT row(*COLUMNS(* REPLACE (s AS a, 2 AS b))) FROM (VALUES (0, 0)) u(a, b))) AS c FROM t
+GROUP BY (SELECT (SELECT row(*COLUMNS(* REPLACE (s AS a, 2 AS b))) FROM (VALUES (0, 0)) u(a, b)))
+----
+(1, 2)
+
+# an entry that holds a star is named by its printed text
+query I
+SELECT (SELECT COLUMNS('t\.\*') FROM (SELECT count(t.*), count(T.*) + 1 FROM (VALUES (1)) t(x))) AS c
+GROUP BY (SELECT COLUMNS('t\.\*') FROM (SELECT count(T.*), count(t.*) + 1 FROM (VALUES (1)) t(x)))
+----
+1
+
+query I
+SELECT (SELECT s FROM (SELECT * EXCLUDE (x) FROM (SELECT 1 AS x, 2 AS y))) AS c FROM t
+GROUP BY (SELECT s FROM (SELECT * EXCLUDE (X) FROM (SELECT 1 AS x, 2 AS y)))
+----
+1
+
+query I
+SELECT R.a AS c FROM t GROUP BY r.a
+----
+1
+
+query I
+SELECT (SELECT x::VARCHAR FROM (SELECT ABS(-1)) x) AS c FROM t GROUP BY (SELECT x::VARCHAR FROM (SELECT abs(-1)) x), c
+----
+{'abs(-1)': 1}
+
+# a correlated twin with the same spelling still binds, one that differs only in the case of a declared name does not
+query II
+SELECT (SELECT s AS A), (SELECT {'A': s}) FROM t GROUP BY (SELECT s AS A), (SELECT {'A': s})
+----
+1	{'A': 1}
+
+statement error
+SELECT (SELECT s AS A) FROM t GROUP BY (SELECT s AS a)
+----
+must appear in the GROUP BY clause
+
+statement error
+SELECT (SELECT {'A': s}) FROM t GROUP BY (SELECT {'a': s})
+----
+must appear in the GROUP BY clause
+
+# the two lambda syntaxes follow different binding rules, so they do not match even where both bind
+statement ok
+SET lambda_syntax = 'ENABLE_SINGLE_ARROW'
+
+statement error
+SELECT list_transform([s], lambda x: x + 1) AS c FROM t GROUP BY list_transform([s], x -> x + 1)
+----
+must appear in the GROUP BY clause
+
+statement ok
+RESET lambda_syntax
+
+# a struct key is part of the value, also at the top level
+statement error
+SELECT {'A': s} AS c FROM t GROUP BY {'a': s}
+----
+must appear in the GROUP BY clause
+
+# ORDER BY and HAVING match through the same equality
+query I
+SELECT (row(i, -i)::STRUCT(x INTEGER, y INTEGER)).x AS c FROM range(3) r(i) ORDER BY (row(i, -i)::STRUCT(y INTEGER, x INTEGER)).x
+----
+2
+1
+0
+
+query I
+SELECT (row(i, -i)::STRUCT(x INTEGER, y INTEGER)).x AS c FROM range(3) r(i)
+GROUP BY (row(i, -i)::STRUCT(x INTEGER, y INTEGER)).x, i HAVING (row(i, -i)::STRUCT(y INTEGER, x INTEGER)).x < 0 ORDER BY c
+----
+1
+2
+
+# one pair per expression kind that differs in one compared field
+query I
+SELECT 2 BETWEEN 1 AND 3 AS c GROUP BY 2 BETWEEN 3 AND 4, c
+----
+true
+
+query I
+SELECT CASE WHEN false THEN 1 ELSE 2 END AS c GROUP BY CASE WHEN false THEN 1 ELSE 3 END, c
+----
+2
+
+statement error
+SELECT CAST('x' AS INTEGER) AS c GROUP BY TRY_CAST('x' AS INTEGER), c
+----
+Could not convert string 'x' to INT32
+
+query I
+SELECT typeof(1::INTEGER) AS c GROUP BY typeof(1::BIGINT), c
+----
+INTEGER
+
+query I
+SELECT ('a' COLLATE nocase) = 'A' AS c GROUP BY ('a' COLLATE noaccent) = 'A', c
+----
+true
+
+query I
+SELECT (SELECT x FROM (SELECT 1 AS x, 2 AS y)) AS c GROUP BY (SELECT y FROM (SELECT 1 AS x, 2 AS y)), c
+----
+1
+
+query I
+SELECT 1 < 2 AS c GROUP BY 1 > 2, c
+----
+true
+
+query I
+SELECT true OR false AS c GROUP BY true AND false, c
+----
+true
+
+query I
+SELECT 'a' AS c GROUP BY 'b', c
+----
+a
+
+query I
+SELECT (SELECT t::VARCHAR FROM (SELECT 1.00) t) AS c GROUP BY (SELECT t::VARCHAR FROM (SELECT 1.0) t), c
+----
+{'1.00': 1.00}
+
+query I
+SELECT abs(-1) AS c GROUP BY sign(-1), c
+----
+1
+
+query I
+SELECT (SELECT count(DISTINCT x) FROM (VALUES (1), (1)) v(x)) AS c GROUP BY (SELECT count(x) FROM (VALUES (1), (1)) v(x)), c
+----
+1
+
+query I
+SELECT (SELECT count(*) FILTER (WHERE x > 1) FROM (VALUES (1), (2)) v(x)) AS c
+GROUP BY (SELECT count(*) FILTER (WHERE x > 0) FROM (VALUES (1), (2)) v(x)), c
+----
+1
+
+query I
+SELECT (SELECT string_agg(x::VARCHAR ORDER BY x DESC) FROM (VALUES (1), (2)) v(x)) AS c
+GROUP BY (SELECT string_agg(x::VARCHAR ORDER BY x) FROM (VALUES (1), (2)) v(x)), c
+----
+2,1
+
+query I
+SELECT power(x := 2, y := 3) AS c GROUP BY power(x := 3, y := 2), c
+----
+8.0
+
+query I
+SELECT list_transform([1], lambda x: x + 1) AS c GROUP BY list_transform([1], lambda x: x + 2), c
+----
+[2]
+
+query I
+SELECT NULL IS NULL AS c GROUP BY NULL IS NOT NULL, c
+----
+true
+
+statement ok
+PREPARE p AS SELECT $1::INTEGER AS c GROUP BY $2::INTEGER, c
+
+query I
+EXECUTE p(1, 2)
+----
+1
+
+query I
+SELECT (SELECT #1 FROM (SELECT 1, 2)) AS c GROUP BY (SELECT #2 FROM (SELECT 1, 2)), c
+----
+1
+
+query I
+SELECT (SELECT COLUMNS('x') FROM (SELECT 1 AS x, 2 AS y)) AS c GROUP BY (SELECT COLUMNS('y') FROM (SELECT 1 AS x, 2 AS y)), c
+----
+1
+
+query I
+SELECT (SELECT * EXCLUDE (y) FROM (SELECT 1 AS x, 2 AS y)) AS c GROUP BY (SELECT * EXCLUDE (x) FROM (SELECT 1 AS x, 2 AS y)), c
+----
+1
+
+query I
+SELECT (SELECT * REPLACE (x + 10 AS x) FROM (SELECT 1 AS x)) AS c GROUP BY (SELECT * REPLACE (x + 20 AS x) FROM (SELECT 1 AS x)), c
+----
+11
+
+query I
+SELECT (SELECT l.* FROM (SELECT 1) l(x), (SELECT 2) r(x)) AS c GROUP BY (SELECT r.* FROM (SELECT 1) l(x), (SELECT 2) r(x)), c
+----
+1
+
+query I
+SELECT 1 = ANY (SELECT 1) AS c GROUP BY 1 < ANY (SELECT 1), c
+----
+true
+
+query I
+SELECT EXISTS (SELECT 1 WHERE false) AS c GROUP BY NOT EXISTS (SELECT 1 WHERE false), c
+----
+false

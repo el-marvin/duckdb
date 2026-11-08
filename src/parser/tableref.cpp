@@ -52,7 +52,8 @@ string TableRef::BaseToString(string result, const vector<Identifier> &column_na
 }
 
 bool TableRef::Equals(const TableRef &other) const {
-	return type == other.type && alias == other.alias && column_name_alias == other.column_name_alias &&
+	return type == other.type && alias == other.alias &&
+	       Identifier::SpellingEquals(column_name_alias, other.column_name_alias) &&
 	       SampleOptions::Equals(sample.get(), other.sample.get());
 }
 

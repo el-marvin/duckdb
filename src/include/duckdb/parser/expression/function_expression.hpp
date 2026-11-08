@@ -49,7 +49,7 @@ public:
 	}
 
 	bool Equals(const FunctionArgument &other) const {
-		if (name != other.name) {
+		if (!name.SpellingEquals(other.name)) {
 			return false;
 		}
 		if (expression && other.expression) {

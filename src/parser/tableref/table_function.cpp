@@ -19,6 +19,11 @@ bool TableFunctionRef::Equals(const TableRef &other_p) const {
 		return false;
 	}
 	auto &other = other_p.Cast<TableFunctionRef>();
+	// without column aliases, the alias of a set-returning function with one column names that column; the function's
+	// return shape is only known after binding
+	if (column_name_alias.empty() && !alias.SpellingEquals(other.alias)) {
+		return false;
+	}
 	return bind_info == other.bind_info && with_ordinality == other.with_ordinality &&
 	       function->Equals(*other.function);
 }

@@ -146,7 +146,7 @@ bool QueryNode::Equals(const QueryNode *other) const {
 		if (entry.first != other_entry->first) {
 			return false;
 		}
-		if (cte.aliases != other_cte.aliases) {
+		if (!Identifier::SpellingEquals(cte.aliases, other_cte.aliases)) {
 			return false;
 		}
 		if (!ExpressionUtil::ListEqualsWithAliases(cte.key_targets, other_cte.key_targets)) {

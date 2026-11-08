@@ -357,6 +357,7 @@ supported_member_entries = [
     "required_until",
     # equality/hash generation annotations (used by generate_util.py)
     "equals_skip",
+    "equals_by_spelling",
     "hash_skip",
     # skip (de)serialization entirely (member only exists for equals/hash/copy generation)
     "serialize_skip",

@@ -31,7 +31,7 @@ bool RecursiveCTENode::Equals(const QueryNode *other_p) const {
 	if (ctename != other.ctename) {
 		return false;
 	}
-	if (aliases != other.aliases) {
+	if (!Identifier::SpellingEquals(aliases, other.aliases)) {
 		return false;
 	}
 	if (!ExpressionUtil::ListEqualsWithAliases(key_targets, other.key_targets)) {

@@ -296,7 +296,6 @@
         "id": 206,
         "name": "is_operator",
         "type": "bool",
-        "equals_skip": true,
         "accessor_mut": "IsOperatorMutable()",
         "accessor": "IsOperator()"
       },
@@ -342,7 +341,6 @@
         "type": "LambdaSyntaxType",
         "default": "LambdaSyntaxType::SINGLE_ARROW_STORAGE",
         "version": "v1.3.0",
-        "equals_skip": true,
         "accessor_mut": "GetLambdaSyntaxTypeMutable()",
         "accessor": "GetLambdaSyntaxType()"
       }
@@ -422,6 +420,7 @@
         "id": 202,
         "name": "replace_list",
         "type": "identifier_map_t<ParsedExpression*>",
+        "equals_by_spelling": true,
         "accessor_mut": "ReplaceListMutable()",
         "accessor": "ReplaceList()"
       },
@@ -457,6 +456,7 @@
         "id": 207,
         "name": "rename_list",
         "type": "qualified_column_map_t<Identifier>",
+        "equals_by_spelling": true,
         "default": "qualified_column_map_t<Identifier>()"
       }
     ],
@@ -643,6 +643,7 @@
         "id": 203,
         "name": "children",
         "type": "vector<unique_ptr<ParsedExpression>>",
+        "equals_by_spelling": true,
         "accessor_mut": "GetChildren()"
       },
       {

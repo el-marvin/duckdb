@@ -2,7 +2,9 @@
 #include "test_helpers.hpp"
 
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -169,6 +171,96 @@ TEST_CASE("Table references that differ in a field of their kind are not equal",
 		defines[0]->SetAlias(Identifier("B"));
 		defines[1]->SetAlias(Identifier("A"));
 	});
+}
+
+TEST_CASE("Table references that differ in the spelling of an output name or in a pivot entry are not equal",
+          "[api][parser]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	for (auto &source : {"tbl t(x, y)", "(SELECT 1, 2) t(x, y)", "src PIVOT (sum(v) FOR k IN ('a', 'b')) AS t(x, y)"}) {
+		auto ref = ParseFrom(con, source);
+		RequireChangeBreaksEquality(source, *ref, [](TableRef &copy) { copy.column_name_alias[0] = Identifier("X"); });
+	}
+
+	auto values = ParseFrom(con, "(VALUES (1, 2))");
+	auto &list = InnerRef<ExpressionListRef>(*values);
+	list.expected_names = {Identifier("x"), Identifier("y")};
+	RequireChangeBreaksEquality("expected_names spelling", list, [](TableRef &copy) {
+		copy.Cast<ExpressionListRef>().expected_names[0] = Identifier("X");
+	});
+
+	auto pivot = ParseFrom(con, "src PIVOT (sum(v) AS s FOR k IN (1 + 1 AS p, 'b'))");
+	REQUIRE(pivot->Cast<PivotRef>().pivots[0].entries[0].expr);
+	RequireChangeBreaksEquality("pivot entry expression", *pivot, [](TableRef &copy) {
+		copy.Cast<PivotRef>().pivots[0].entries[0].expr = ConstantExpression::Integer(3);
+	});
+	RequireChangeBreaksEquality("pivot entry alias spelling", *pivot, [](TableRef &copy) {
+		copy.Cast<PivotRef>().pivots[0].entries[0].alias = Identifier("P");
+	});
+	RequireChangeBreaksEquality("pivot aggregate alias spelling", *pivot,
+	                            [](TableRef &copy) { copy.Cast<PivotRef>().aggregates[0]->SetAlias(Identifier("S")); });
+
+	auto unpivot = ParseFrom(con, "src UNPIVOT (val FOR n IN (a, b))");
+	auto &unpivot_ref = unpivot->Cast<PivotRef>();
+	REQUIRE(unpivot_ref.unpivot_names.size() == 1);
+	REQUIRE(unpivot_ref.pivots[0].entries[0].expr);
+	RequireChangeBreaksEquality("unpivot entry expression", *unpivot, [](TableRef &copy) {
+		auto &entries = copy.Cast<PivotRef>().pivots[0].entries;
+		entries[0].expr = entries[1].expr->Copy();
+	});
+	RequireChangeBreaksEquality("unpivot entry alias spelling", *unpivot, [](TableRef &copy) {
+		copy.Cast<PivotRef>().pivots[0].entries[0].alias = Identifier("A");
+	});
+	RequireChangeBreaksEquality("unpivot value name spelling", *unpivot,
+	                            [](TableRef &copy) { copy.Cast<PivotRef>().unpivot_names[0] = Identifier("VAL"); });
+	RequireChangeBreaksEquality("unpivot name column spelling", *unpivot, [](TableRef &copy) {
+		copy.Cast<PivotRef>().pivots[0].unpivot_names[0] = Identifier("N");
+	});
+
+	auto series = ParseFrom(con, "range(1) t");
+	RequireChangeBreaksEquality("set-returning function alias spelling", *series,
+	                            [](TableRef &copy) { copy.alias = Identifier("T"); });
+
+	auto tuple_pivot = ParseFrom(con, "src PIVOT (sum(v) FOR (k, n) IN ((a, 1) AS p))");
+	REQUIRE(tuple_pivot->Cast<PivotRef>().pivots[0].entries[0].expr);
+	auto tuple_copy = tuple_pivot->Copy();
+	auto &tuple = tuple_copy->Cast<PivotRef>().pivots[0].entries[0].expr->Cast<FunctionExpression>();
+	tuple.GetArgumentsMutable()[0].GetExpressionMutable() = make_uniq<ColumnRefExpression>("A");
+	CHECK(!tuple_pivot->Equals(*tuple_copy));
+
+	auto qualified_partition =
+	    ParseFrom(con, "src AS t MATCH_RECOGNIZE (PARTITION BY t.p ORDER BY o PATTERN (A) DEFINE A AS true)");
+	auto requalified = qualified_partition->Copy();
+	requalified->Cast<MatchRecognizeRef>().config->partition_expressions[0] =
+	    make_uniq<ColumnRefExpression>(vector<Identifier> {Identifier("T"), Identifier("p")});
+	CHECK(qualified_partition->Equals(*requalified));
+
+	// with column aliases, the alias of a table function only names the relation
+	auto aliased_series = ParseFrom(con, "range(1) t(x)");
+	auto renamed_series = aliased_series->Copy();
+	renamed_series->alias = Identifier("T");
+	CHECK(aliased_series->Equals(*renamed_series));
+
+	auto grouped_pivot = ParseFrom(con, "src PIVOT (sum(v) FOR k IN ('a') GROUP BY g)");
+	RequireChangeBreaksEquality("pivot group spelling", *grouped_pivot,
+	                            [](TableRef &copy) { copy.Cast<PivotRef>().groups[0] = Identifier("G"); });
+
+	auto match = ParseFrom(con, "src MATCH_RECOGNIZE (PARTITION BY p, q + 1 ORDER BY o PATTERN (A) DEFINE A AS true)");
+	RequireChangeBreaksEquality("partition column spelling", *match, [](TableRef &copy) {
+		copy.Cast<MatchRecognizeRef>().config->partition_expressions[0] = make_uniq<ColumnRefExpression>("P");
+	});
+	RequireChangeBreaksEquality("partition expression spelling", *match, [](TableRef &copy) {
+		auto &partitions = copy.Cast<MatchRecognizeRef>().config->partition_expressions;
+		auto &function = partitions[1]->Cast<FunctionExpression>();
+		function.GetArgumentsMutable()[0].GetExpressionMutable() = make_uniq<ColumnRefExpression>("Q");
+	});
+
+	// the table alias names a binding that references resolve case insensitively
+	auto aliased = ParseFrom(con, "tbl t(x, y)");
+	auto renamed = aliased->Copy();
+	renamed->alias = Identifier("T");
+	CHECK(aliased->Equals(*renamed));
 }
 
 static unique_ptr<SelectStatement> ParseSelect(Connection &con, const string &sql) {

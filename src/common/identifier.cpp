@@ -23,6 +23,22 @@ hash_t Identifier::Hash() const {
 	return StringUtil::CIHash(value);
 }
 
+bool Identifier::SpellingEquals(const Identifier &other) const {
+	return value == other.value;
+}
+
+bool Identifier::SpellingEquals(const vector<Identifier> &a, const vector<Identifier> &b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < a.size(); i++) {
+		if (!a[i].SpellingEquals(b[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool operator==(const Identifier &a, const Identifier &b) {
 	return StringUtil::CIEquals(a.GetIdentifierName(), b.GetIdentifierName());
 }

@@ -140,6 +140,34 @@ TEST_CASE("Recursive CTE nodes that differ in a field are not equal", "[api][par
 	                            [](QueryNode &copy) { copy.Cast<RecursiveCTENode>().union_all = false; });
 }
 
+TEST_CASE("Query nodes that differ in the spelling of an output name are not equal", "[api][parser]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+
+	auto select = ParseNode(con, "SELECT 1 AS x, 2 AS y");
+	RequireChangeBreaksEquality("select alias spelling", *select, [](QueryNode &copy) {
+		copy.Cast<SelectNode>().select_list[0]->SetAlias(Identifier("X"));
+	});
+
+	auto cte = ParseNode(con, "WITH q(x, y) AS (SELECT 1, 2) SELECT * FROM q");
+	RequireChangeBreaksEquality("CTE alias spelling", *cte,
+	                            [](QueryNode &copy) { CTE(copy, "q").aliases[0] = Identifier("X"); });
+
+	auto recursive = ParseNode(con, "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r WHERE x < 3) "
+	                                "SELECT * FROM r");
+	auto &recursive_node = *CTE(*recursive, "r").query_node;
+	REQUIRE(recursive_node.type == QueryNodeType::RECURSIVE_CTE_NODE);
+	RequireChangeBreaksEquality("recursive CTE alias spelling", recursive_node,
+	                            [](QueryNode &copy) { copy.Cast<RecursiveCTENode>().aliases[0] = Identifier("X"); });
+
+	// a CTE name is resolved case insensitively by its references
+	auto renamed = cte->Copy();
+	auto entry = std::move(renamed->cte_map.map.begin()->second);
+	renamed->cte_map.map.clear();
+	renamed->cte_map.map.insert(Identifier("Q"), std::move(entry));
+	CHECK(cte->Equals(renamed.get()));
+}
+
 static void RequireCopyEquals(const SelectStatement &statement) {
 	CHECK(statement.node->Equals(statement.node->Copy().get()));
 }

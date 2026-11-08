@@ -79,7 +79,10 @@ string PivotColumn::ToString() const {
 }
 
 bool PivotColumnEntry::Equals(const PivotColumnEntry &other) const {
-	if (alias != other.alias) {
+	if (!alias.SpellingEquals(other.alias)) {
+		return false;
+	}
+	if (!ParsedExpression::Equals(expr, other.expr)) {
 		return false;
 	}
 	if (values.size() != other.values.size()) {
@@ -97,7 +100,7 @@ bool PivotColumn::Equals(const PivotColumn &other) const {
 	if (!ExpressionUtil::ListEquals(pivot_expressions, other.pivot_expressions)) {
 		return false;
 	}
-	if (other.unpivot_names != unpivot_names) {
+	if (!Identifier::SpellingEquals(unpivot_names, other.unpivot_names)) {
 		return false;
 	}
 	if (other.pivot_enum != pivot_enum) {
@@ -108,6 +111,11 @@ bool PivotColumn::Equals(const PivotColumn &other) const {
 	}
 	for (idx_t i = 0; i < entries.size(); i++) {
 		if (!entries[i].Equals(other.entries[i])) {
+			return false;
+		}
+		// a column reference in a PIVOT IN entry is read as the string it spells
+		auto &expr = entries[i].expr;
+		if (unpivot_names.empty() && expr && expr->ToString() != other.entries[i].expr->ToString()) {
 			return false;
 		}
 	}
@@ -301,7 +309,7 @@ bool PivotRef::Equals(const TableRef &other_p) const {
 	if (!source->Equals(*other.source)) {
 		return false;
 	}
-	if (!ExpressionUtil::ListEqualsWithAliases(aggregates, other.aggregates)) {
+	if (!ExpressionUtil::ListEqualsWithNames(aggregates, other.aggregates, true)) {
 		return false;
 	}
 	if (pivots.size() != other.pivots.size()) {
@@ -312,10 +320,11 @@ bool PivotRef::Equals(const TableRef &other_p) const {
 			return false;
 		}
 	}
-	if (unpivot_names != other.unpivot_names) {
+	if (!Identifier::SpellingEquals(unpivot_names, other.unpivot_names)) {
 		return false;
 	}
-	if (groups != other.groups) {
+	// the physical PIVOT names its group columns as written
+	if (!Identifier::SpellingEquals(groups, other.groups)) {
 		return false;
 	}
 	if (include_nulls != other.include_nulls) {

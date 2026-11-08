@@ -24,6 +24,11 @@ public:
 	//! ListEqualsWithAliases: check if a list of two expressions is equal, aliases included (order is important)
 	static bool ListEqualsWithAliases(const vector<unique_ptr<ParsedExpression>> &a,
 	                                  const vector<unique_ptr<ParsedExpression>> &b);
+	//! ListEqualsWithNames: check if a list of two expressions is equal, the names of the columns they produce
+	//! included; a bare column reference or star is named by what it binds to or by its own name, as the caller says
+	static bool ListEqualsWithNames(const vector<unique_ptr<ParsedExpression>> &a,
+	                                const vector<unique_ptr<ParsedExpression>> &b,
+	                                bool column_references_named_by_binding);
 	//! SetEquals: check if two sets of expressions are equal (order is not important)
 	static bool SetEquals(const vector<unique_ptr<ParsedExpression>> &a, const vector<unique_ptr<ParsedExpression>> &b);
 	static bool SetEquals(const vector<unique_ptr<Expression>> &a, const vector<unique_ptr<Expression>> &b);
