@@ -9,6 +9,7 @@
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/thread.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/settings.hpp"
@@ -50,6 +51,30 @@ void Binder::IncreaseDepth() {
 		                      "increase the maximum expression depth.",
 		                      max_expression_depth);
 	}
+	CheckStackSpace();
+}
+
+void Binder::ContinueDepth(const Binder &creator) {
+	depth = creator.GetBinderDepth();
+	IncreaseDepth();
+}
+
+void Binder::CheckStackSpace() {
+	// binding a leaf below the last check and throwing the error take about 14 KiB on a release build, more under a
+	// sanitizer
+	static constexpr idx_t MIN_STACK_RESERVE = 64 * 1024;
+	static constexpr idx_t MAX_STACK_RESERVE = 256 * 1024;
+	idx_t stack_size;
+	idx_t remaining;
+	if (!ThreadUtil::GetStackSpace(stack_size, remaining)) {
+		return;
+	}
+	auto reserve = MinValue(MaxValue(stack_size / 8, MIN_STACK_RESERVE), MAX_STACK_RESERVE);
+	if (remaining < MinValue(reserve, stack_size / 2)) {
+		throw BinderException("Max expression depth exceeded: binding the query would overflow the %lld KiB stack of "
+		                      "this thread",
+		                      stack_size / 1024);
+	}
 }
 
 shared_ptr<Binder> Binder::CreateBinder(ClientContext &context, optional_ptr<Binder> parent, BinderType binder_type) {
@@ -60,6 +85,10 @@ Binder::Binder(ClientContext &context, shared_ptr<Binder> parent_p, BinderType b
     : context(context), bind_context(*this), parent(std::move(parent_p)), binder_type(binder_type),
       global_binder_state(parent ? parent->global_binder_state : make_shared_ptr<GlobalBinderState>()),
       entry_retriever(context), depth(parent ? parent->GetBinderDepth() : 1) {
+	if (!parent) {
+		// the stack limit of a process can change between two statements
+		ThreadUtil::RefreshStackLimit();
+	}
 	IncreaseDepth();
 	if (parent) {
 		entry_retriever.Inherit(parent->entry_retriever);

@@ -485,10 +485,14 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 
 		binder->alias = ref.alias.empty() ? "unnamed_query" : ref.alias;
 		BoundStatement query;
+		// thrown after the handler, since Windows runs a handler on top of the frames of the throw it handles
+		ErrorData error;
 		try {
 			query = binder->BindNode(*query_node);
 		} catch (std::exception &ex) {
-			ErrorData error(ex);
+			error = ErrorData(ex);
+		}
+		if (error.HasError()) {
 			error.AddQueryLocation(ref);
 			error.Throw();
 		}
@@ -564,16 +568,20 @@ BoundStatement Binder::Bind(TableFunctionRef &ref) {
 	}
 
 	BoundStatement get;
+	// thrown after the handler, since Windows runs a handler on top of the frames of the throw it handles
+	ErrorData bind_error;
 	try {
 		get = BindTableFunctionInternal(table_function, ref, std::move(parameters), std::move(named_parameters),
 		                                std::move(input_table_types), std::move(input_table_names), &subquery.plan);
 	} catch (std::exception &ex) {
-		error = ErrorData(ex);
+		bind_error = ErrorData(ex);
+	}
+	if (bind_error.HasError()) {
 		// if the error does not already contain a query location, add one
-		if (error.ExtraInfo().count("position") == 0) {
-			error.AddQueryLocation(ref);
+		if (bind_error.ExtraInfo().count("position") == 0) {
+			bind_error.AddQueryLocation(ref);
 		}
-		error.Throw();
+		bind_error.Throw();
 	}
 
 	if (subquery.plan) {

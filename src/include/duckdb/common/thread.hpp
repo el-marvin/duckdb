@@ -34,6 +34,12 @@ struct ThreadUtil {
 	static void SleepMicroSeconds(idx_t micros);
 	static thread_id GetThreadId();
 	static string GetThreadIdString();
+	//! The size of the calling thread's stack and the bytes of it left below the caller. False where the platform does
+	//! not report the stack, or where the caller runs outside the stack its thread was first found on, such as on a
+	//! fiber's
+	static bool GetStackSpace(idx_t &stack_size, idx_t &remaining);
+	//! Read the stack limit again where the calling thread's stack follows it, as a Linux main thread's does
+	static void RefreshStackLimit();
 };
 
 } // namespace duckdb

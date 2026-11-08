@@ -492,6 +492,10 @@ private:
 	idx_t GetBinderDepth() const;
 	//! Increase the depth of the binder
 	void IncreaseDepth();
+	//! Continue the depth of the binder that creates this one, for a binder that does not take it as its parent
+	void ContinueDepth(const Binder &creator);
+	//! Throw the depth error when the stack of the calling thread is nearly used up
+	static void CheckStackSpace();
 	//! Bind the expressions of generated columns to check for errors
 	void BindGeneratedColumns(BoundCreateTableInfo &info);
 	//! Bind the default values of the columns of a table

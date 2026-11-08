@@ -24,6 +24,7 @@ set(TEST_API_OBJECTS
     test_remote_pushdown_macro_arguments.cpp
     test_remote_pushdown_merge.cpp
     test_os_util.cpp
+    test_binder_stack_limit.cpp
     test_compression_select.cpp
     test_connection_callbacks.cpp
     test_connection_secrets.cpp

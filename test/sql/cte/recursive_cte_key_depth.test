@@ -1,0 +1,102 @@
+# name: test/sql/cte/recursive_cte_key_depth.test
+# description: The aggregates of USING KEY bind at the depth of the recursive CTE, so a macro cycle through them reaches the depth limit
+# group: [cte]
+
+statement ok
+SET memory_limit='4GB';
+
+statement ok
+CREATE MACRO plain() AS 7;
+
+# a finite macro in a USING KEY aggregate binds
+query II
+WITH RECURSIVE r(k, v) USING KEY (k, max(plain()) AS v) AS (
+	VALUES (1, 1)
+	UNION
+	SELECT k + 1, v FROM r WHERE k < 3)
+SELECT k, v FROM r ORDER BY k;
+----
+1	7
+2	7
+3	7
+
+# a temporary macro shadows the one being created, so its body reads the shadow
+statement ok
+CREATE TEMP MACRO m() AS 1;
+
+statement ok
+CREATE MACRO main.m() AS (
+	WITH RECURSIVE r(k, v) USING KEY (k, max(m()) AS v) AS (
+		VALUES (1, 1)
+		UNION
+		SELECT k, v FROM r WHERE false)
+	SELECT max(v) FROM r);
+
+query I
+SELECT main.m();
+----
+1
+
+# dropping the shadow closes the cycle through the aggregate, which binds at the depth of the CTE; whether the depth
+# limit or the stack of the thread ends it depends on the stack, test_binder_stack_limit.cpp pins the limit itself
+statement ok
+DROP MACRO temp.m;
+
+statement error
+SELECT m();
+----
+Max expression depth
+
+statement ok
+SET max_expression_depth=100;
+
+statement error
+SELECT m();
+----
+Max expression depth
+
+statement ok
+RESET max_expression_depth;
+
+# a search path that no longer finds the shadow closes the cycle as well
+statement ok
+CREATE SCHEMA s;
+
+statement ok
+CREATE MACRO s.n() AS 1;
+
+statement ok
+SET search_path='s,main';
+
+statement ok
+CREATE MACRO main.n() AS (
+	WITH RECURSIVE r(k, v) USING KEY (k, max(n()) AS v) AS (
+		VALUES (1, 1)
+		UNION
+		SELECT k, v FROM r WHERE false)
+	SELECT max(v) FROM r);
+
+query I
+SELECT main.n();
+----
+1
+
+statement ok
+SET search_path='main';
+
+statement ok
+SET max_expression_depth=100;
+
+statement error
+SELECT n();
+----
+Max expression depth
+
+statement ok
+RESET max_expression_depth;
+
+# the database is still usable
+query I
+SELECT plain();
+----
+7
