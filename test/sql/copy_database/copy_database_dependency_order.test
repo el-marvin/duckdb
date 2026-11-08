@@ -1,0 +1,623 @@
+# name: test/sql/copy_database/copy_database_dependency_order.test
+# description: COPY FROM DATABASE creates every entry after the entries it depends on, in the order EXPORT DATABASE writes
+# group: [copy_database]
+
+# the catalog helpers below live in the default database, which is memory only without forced storage
+require noforcestorage
+
+# a CHECK constraint and a generated column calling a macro of the same schema
+
+statement ok
+ATTACH ':memory:' AS src1
+
+statement ok
+USE src1
+
+statement ok
+CREATE MACRO tenfold(x) AS x * 10
+
+statement ok
+CREATE TABLE tc(v INTEGER, CHECK (tenfold(v) < 100))
+
+statement ok
+CREATE TABLE tg(v INTEGER, w AS (tenfold(v)))
+
+statement ok
+INSERT INTO tc VALUES (1), (NULL)
+
+statement ok
+INSERT INTO tg VALUES (2), (NULL)
+
+statement ok
+ATTACH ':memory:' AS dst1
+
+statement ok
+USE dst1
+
+statement ok
+COPY FROM DATABASE src1 TO dst1
+
+query I
+SELECT v FROM tc ORDER BY v NULLS LAST
+----
+1
+NULL
+
+query II
+SELECT v, w FROM tg ORDER BY v NULLS LAST
+----
+2	20
+NULL	NULL
+
+statement error
+INSERT INTO tc VALUES (10)
+----
+CHECK constraint failed
+
+query I
+SELECT w FROM tg WHERE v = 2
+----
+20
+
+statement ok
+USE memory
+
+statement ok
+DETACH dst1
+
+statement ok
+DETACH src1
+
+# every kind of dependency, in a schema other than main and in main
+
+statement ok
+ATTACH ':memory:' AS src
+
+statement ok
+USE src
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE MACRO tenfold(x) AS x * 10
+
+statement ok
+CREATE TABLE tc(v INTEGER, CHECK (tenfold(v) < 100))
+
+statement ok
+CREATE TABLE tg(v INTEGER, w AS (tenfold(v)))
+
+statement ok
+CREATE MACRO s.zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO s.adouble_inc(x) AS s.zinc(x) * 2
+
+statement ok
+CREATE TABLE s.tm(v INTEGER, w AS (s.adouble_inc(v)), CHECK (s.adouble_inc(v) < 100))
+
+statement ok
+CREATE VIEW s.vm AS SELECT v, s.adouble_inc(v) AS d FROM s.tm
+
+statement ok
+CREATE TYPE s.mood AS ENUM ('ok', 'sad')
+
+statement ok
+CREATE TYPE s.all_moods AS s.mood[]
+
+statement ok
+CREATE MACRO s.is_ok(m) AS m::s.mood = 'ok'
+
+statement ok
+CREATE TABLE s.tt(m s.mood, ms s.all_moods, CHECK (s.is_ok(m) OR m = 'sad'))
+
+statement ok
+CREATE SEQUENCE s.seq START 100
+
+statement ok
+CREATE TABLE s.tq(id INTEGER DEFAULT nextval('s.seq'), v INTEGER)
+
+statement ok
+CREATE UNIQUE INDEX tq_v ON s.tq(v)
+
+statement ok
+CREATE TABLE s.zparent(i INTEGER PRIMARY KEY)
+
+statement ok
+CREATE TABLE s.achild(i INTEGER REFERENCES s.zparent(i), CHECK (s.zinc(i) < 1000))
+
+statement ok
+CREATE SCHEMA s.inner
+
+statement ok
+CREATE TYPE s.inner.size AS ENUM ('small', 'big')
+
+statement ok
+CREATE MACRO s.inner.is_big(x) AS x::s.inner.size = 'big'
+
+statement ok
+CREATE TABLE s.tn(sz s.inner.size, CHECK (s.inner.is_big(sz) OR sz = 'small'))
+
+statement ok
+CREATE TABLE s.tlog(msg INTEGER)
+
+statement ok
+CREATE MACRO s.zfirst() AS 1
+
+statement ok
+CREATE MACRO s.asecond() AS s.zfirst() + 1
+
+statement ok
+CREATE TRIGGER tq_log AFTER INSERT ON s.tq FOR EACH ROW INSERT INTO s.tlog VALUES (s.adouble_inc(NEW.v))
+
+statement ok
+INSERT INTO tc VALUES (1), (NULL)
+
+statement ok
+INSERT INTO tg VALUES (2), (NULL)
+
+statement ok
+INSERT INTO s.tm VALUES (3), (NULL)
+
+statement ok
+INSERT INTO s.tt VALUES ('ok', ['ok', 'sad']), ('sad', NULL), (NULL, [])
+
+statement ok
+INSERT INTO s.tq (v) VALUES (1), (2)
+
+statement ok
+INSERT INTO s.zparent VALUES (1), (2)
+
+statement ok
+INSERT INTO s.tn VALUES ('big'), ('small'), (NULL)
+
+statement ok
+INSERT INTO s.achild VALUES (1), (1), (NULL)
+
+query I
+SELECT msg FROM s.tlog ORDER BY msg
+----
+4
+6
+
+statement ok
+CREATE MACRO memory.main.creation_order(db) AS TABLE
+SELECT row_number() OVER (ORDER BY oid) AS pos, kind, schema_name, name FROM (
+	SELECT 'schema' AS kind, oid, schema_name, schema_name AS name FROM duckdb_schemas()
+	WHERE database_name = db AND schema_name <> 'main'
+	UNION ALL
+	SELECT 'type', type_oid, schema_name, type_name FROM duckdb_types() WHERE database_name = db AND NOT internal
+	UNION ALL
+	SELECT 'sequence', sequence_oid, schema_name, sequence_name FROM duckdb_sequences() WHERE database_name = db
+	UNION ALL
+	SELECT 'table', table_oid, schema_name, table_name FROM duckdb_tables() WHERE database_name = db
+	UNION ALL
+	SELECT 'macro', function_oid, schema_name, function_name FROM duckdb_functions()
+	WHERE database_name = db AND function_type IN ('macro', 'table_macro') AND NOT internal
+	UNION ALL
+	SELECT 'view', view_oid, schema_name, view_name FROM duckdb_views() WHERE database_name = db AND NOT internal
+	UNION ALL
+	SELECT 'index', index_oid, schema_name, index_name FROM duckdb_indexes() WHERE database_name = db
+	UNION ALL
+	SELECT 'trigger', trigger_oid, schema_name, trigger_name FROM duckdb_triggers() WHERE database_name = db
+)
+
+statement ok
+CREATE MACRO memory.main.catalog_text(db) AS TABLE
+SELECT 'table' AS kind, schema_name, table_name AS name, sql FROM duckdb_tables() WHERE database_name = db
+UNION ALL
+SELECT 'view', schema_name, view_name, sql FROM duckdb_views() WHERE database_name = db AND NOT internal
+UNION ALL
+SELECT 'macro', schema_name, function_name, macro_definition FROM duckdb_functions()
+WHERE database_name = db AND function_type IN ('macro', 'table_macro') AND NOT internal
+UNION ALL
+SELECT 'type', schema_name, type_name, logical_type || ' ' || labels::VARCHAR FROM duckdb_types()
+WHERE database_name = db AND NOT internal
+UNION ALL
+SELECT 'sequence', schema_name, sequence_name, sql FROM duckdb_sequences() WHERE database_name = db
+UNION ALL
+SELECT 'index', schema_name, index_name, sql FROM duckdb_indexes() WHERE database_name = db
+UNION ALL
+SELECT 'trigger', schema_name, trigger_name, sql FROM duckdb_triggers() WHERE database_name = db
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/copy_database_dependency_order'
+
+statement ok
+ATTACH ':memory:' AS dst
+
+statement ok
+USE dst
+
+statement ok
+COPY FROM DATABASE src TO dst
+
+# one scan of duckdb_triggers() per query: concurrent printing of one trigger body can corrupt it
+statement ok
+CREATE TABLE memory.order_dst AS FROM memory.creation_order('dst')
+
+statement ok
+CREATE TABLE memory.text_dst AS FROM memory.catalog_text('dst')
+
+# every entry comes after the entries it depends on: the macros a table calls come right before the table, in
+# creation order, as do the other macros, whose bodies record no dependency; tables follow their foreign keys
+query III
+SELECT kind, schema_name, name FROM memory.order_dst ORDER BY pos
+----
+schema	s	s
+schema	inner	inner
+sequence	s	seq
+type	s	mood
+type	s	all_moods
+type	inner	size
+macro	main	tenfold
+table	main	tc
+table	main	tg
+table	s	tlog
+macro	s	zinc
+macro	s	adouble_inc
+table	s	tm
+macro	inner	is_big
+table	s	tn
+table	s	tq
+macro	s	is_ok
+table	s	tt
+table	s	zparent
+table	s	achild
+macro	s	zfirst
+macro	s	asecond
+view	s	vm
+index	s	tq_v
+trigger	s	tq_log
+
+statement ok
+ATTACH ':memory:' AS imp
+
+statement ok
+USE imp
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/copy_database_dependency_order'
+
+statement ok
+CREATE TABLE memory.order_imp AS FROM memory.creation_order('imp')
+
+statement ok
+CREATE TABLE memory.text_imp AS FROM memory.catalog_text('imp')
+
+# the import creates the same entries in the same order, with the same definitions
+query I
+SELECT count(*) FROM (
+	(FROM memory.order_dst EXCEPT ALL FROM memory.order_imp)
+	UNION ALL
+	(FROM memory.order_imp EXCEPT ALL FROM memory.order_dst)
+)
+----
+0
+
+query I
+SELECT count(*) FROM memory.order_imp
+----
+25
+
+query I
+SELECT count(*) FROM (
+	(FROM memory.text_dst EXCEPT ALL FROM memory.text_imp)
+	UNION ALL
+	(FROM memory.text_imp EXCEPT ALL FROM memory.text_dst)
+)
+----
+0
+
+foreach db dst imp
+
+statement ok
+USE {db}
+
+query I
+SELECT v FROM tc ORDER BY v NULLS LAST
+----
+1
+NULL
+
+query II
+SELECT v, w FROM s.tm ORDER BY v NULLS LAST
+----
+3	8
+NULL	NULL
+
+query II
+SELECT v, d FROM s.vm ORDER BY v NULLS LAST
+----
+3	8
+NULL	NULL
+
+query II
+SELECT m, ms FROM s.tt ORDER BY m NULLS LAST
+----
+ok	[ok, sad]
+sad	NULL
+NULL	[]
+
+query II
+SELECT id, v FROM s.tq ORDER BY id
+----
+100	1
+101	2
+
+query I
+SELECT i FROM s.achild ORDER BY i NULLS LAST
+----
+1
+1
+NULL
+
+query I
+SELECT sz FROM s.tn ORDER BY sz NULLS LAST
+----
+small
+big
+NULL
+
+query III
+SELECT typeof(NULL::s.mood), typeof(NULL::s.all_moods), typeof(NULL::s.inner.size)
+----
+ENUM('ok', 'sad')	ENUM('ok', 'sad')[]	ENUM('small', 'big')
+
+# the copy fired no trigger
+query I
+SELECT msg FROM s.tlog ORDER BY msg
+----
+4
+6
+
+statement error
+INSERT INTO tc VALUES (10)
+----
+CHECK constraint failed
+
+statement error
+INSERT INTO s.tm VALUES (50)
+----
+CHECK constraint failed
+
+statement error
+INSERT INTO s.tt VALUES ('happy', NULL)
+----
+Could not convert string 'happy' to ENUM
+
+statement error
+INSERT INTO s.achild VALUES (3)
+----
+Violates foreign key constraint
+
+statement ok
+INSERT INTO s.tq (v) VALUES (3)
+
+query II
+SELECT id, v FROM s.tq WHERE v = 3
+----
+102	3
+
+statement error
+INSERT INTO s.tq (v) VALUES (1)
+----
+Duplicate key
+
+query I
+SELECT msg FROM s.tlog ORDER BY msg
+----
+4
+6
+8
+
+endloop
+
+# the schema step and the data step run by hand create the same entries in the same order
+
+statement ok
+ATTACH ':memory:' AS dst2
+
+statement ok
+USE dst2
+
+statement ok
+COPY FROM DATABASE src TO dst2 (SCHEMA)
+
+statement ok
+COPY FROM DATABASE src TO dst2 (DATA)
+
+statement ok
+CREATE TABLE memory.order_dst2 AS FROM memory.creation_order('dst2')
+
+statement ok
+CREATE TABLE memory.text_dst2 AS FROM memory.catalog_text('dst2')
+
+query I
+SELECT count(*) FROM (
+	(FROM memory.order_dst2 EXCEPT ALL FROM memory.order_dst)
+	UNION ALL
+	(FROM memory.order_dst EXCEPT ALL FROM memory.order_dst2)
+)
+----
+0
+
+query I
+SELECT count(*) FROM (
+	(FROM memory.text_dst2 EXCEPT ALL FROM memory.text_dst)
+	UNION ALL
+	(FROM memory.text_dst EXCEPT ALL FROM memory.text_dst2)
+)
+----
+0
+
+query II
+SELECT id, v FROM s.tq ORDER BY id
+----
+100	1
+101	2
+
+query I
+SELECT msg FROM s.tlog ORDER BY msg
+----
+4
+6
+
+# the checkpoint writes entries in the same dependency order: a table with several dependencies, and nested macros,
+# survive two checkpoints and reloads, and a copy from the reloaded database
+
+statement ok
+USE memory
+
+statement ok
+ATTACH '{TEST_DIR}/copy_database_dependency_order.db' AS ck
+
+statement ok
+USE ck
+
+statement ok
+CREATE SCHEMA s
+
+statement ok
+CREATE MACRO s.zinc(x) AS x + 1
+
+statement ok
+CREATE MACRO s.adouble_inc(x) AS s.zinc(x) * 2
+
+statement ok
+CREATE TYPE s.mood AS ENUM ('ok', 'sad')
+
+statement ok
+CREATE SEQUENCE s.seq START 100
+
+statement ok
+CREATE TABLE s.tk(id INTEGER DEFAULT nextval('s.seq'), m s.mood DEFAULT 'ok', v INTEGER DEFAULT s.adouble_inc(1), w AS (s.adouble_inc(v)), CHECK (s.adouble_inc(v) < 100))
+
+statement ok
+INSERT INTO s.tk (v) VALUES (3)
+
+loop i 0 2
+
+statement ok
+CHECKPOINT ck
+
+statement ok
+USE memory
+
+statement ok
+DETACH ck
+
+statement ok
+ATTACH '{TEST_DIR}/copy_database_dependency_order.db' AS ck
+
+statement ok
+USE ck
+
+statement ok
+INSERT INTO s.tk DEFAULT VALUES
+
+statement error
+INSERT INTO s.tk (id, v) VALUES (0, 50)
+----
+CHECK constraint failed
+
+endloop
+
+query IIII
+SELECT id, m, v, w FROM s.tk ORDER BY id
+----
+100	ok	3	8
+101	ok	4	10
+102	ok	4	10
+
+# the reload keeps zinc before adouble_inc, which the export needs because CREATE MACRO binds the body
+
+statement ok
+EXPORT DATABASE '{TEST_DIR}/copy_database_dependency_order_reloaded'
+
+statement ok
+ATTACH ':memory:' AS impk
+
+statement ok
+USE impk
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}/copy_database_dependency_order_reloaded'
+
+query IIII
+SELECT id, m, v, w FROM s.tk ORDER BY id
+----
+100	ok	3	8
+101	ok	4	10
+102	ok	4	10
+
+statement ok
+ATTACH ':memory:' AS dstk
+
+statement ok
+USE dstk
+
+statement ok
+COPY FROM DATABASE ck TO dstk
+
+statement ok
+INSERT INTO s.tk DEFAULT VALUES
+
+query IIII
+SELECT id, m, v, w FROM s.tk ORDER BY id
+----
+100	ok	3	8
+101	ok	4	10
+102	ok	4	10
+103	ok	4	10
+
+# ownership is a dependency too: a sequence owned by a table and one owned by another sequence copy
+
+statement ok
+USE memory
+
+statement ok
+ATTACH ':memory:' AS src3
+
+statement ok
+USE src3
+
+statement ok
+CREATE TABLE owner_table(i INTEGER)
+
+statement ok
+CREATE SEQUENCE owned_by_table
+
+statement ok
+ALTER SEQUENCE owned_by_table OWNED BY owner_table
+
+statement ok
+CREATE SEQUENCE owner_sequence
+
+statement ok
+CREATE SEQUENCE owned_by_sequence
+
+statement ok
+ALTER SEQUENCE owned_by_sequence OWNED BY owner_sequence
+
+statement error
+ALTER SEQUENCE owner_sequence OWNED BY owner_sequence
+----
+can not become its own owner
+
+statement ok
+ATTACH ':memory:' AS dst3
+
+statement ok
+USE dst3
+
+statement ok
+COPY FROM DATABASE src3 TO dst3
+
+query I
+SELECT sequence_name FROM duckdb_sequences() WHERE database_name = 'dst3' ORDER BY sequence_name
+----
+owned_by_sequence
+owned_by_table
+owner_sequence

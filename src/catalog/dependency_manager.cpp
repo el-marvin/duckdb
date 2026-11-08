@@ -12,6 +12,7 @@
 #include "duckdb/catalog/catalog_entry/dependency/dependency_subject_entry.hpp"
 #include "duckdb/catalog/catalog_entry/dependency/dependency_dependent_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_schema_entry.hpp"
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/queue.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/trigger_catalog_entry.hpp"
@@ -694,11 +695,15 @@ void DependencyManager::ReorderEntry(CatalogTransaction transaction, CatalogEntr
 	}
 
 	// Check if there are any entries that this entry depends on, those are written first
-	catalog_entry_vector_t dependents;
+	catalog_entry_vector_t subjects;
 	auto info = GetLookupProperties(entry);
-	ScanSubjects(transaction, info, [&](DependencyEntry &dep) { dependents.push_back(dep); });
-	for (auto &dep : dependents) {
-		ReorderEntry(transaction, dep, visited, order, allow_internal);
+	ScanSubjects(transaction, info, [&](DependencyEntry &dep) { subjects.push_back(*LookupEntry(transaction, dep)); });
+	// A macro records no dependency on the macros its body calls but binds them when created, so keep creation order
+	sort(subjects.begin(), subjects.end(), [](const reference<CatalogEntry> &lhs, const reference<CatalogEntry> &rhs) {
+		return lhs.get().oid < rhs.get().oid;
+	});
+	for (auto &subject : subjects) {
+		ReorderEntry(transaction, subject, visited, order, allow_internal);
 	}
 
 	// Then write the entry
@@ -852,6 +857,10 @@ void DependencyManager::Scan(
 void DependencyManager::AddOwnership(CatalogTransaction transaction, CatalogEntry &owner, CatalogEntry &entry) {
 	if (IsSystemEntry(entry) || IsSystemEntry(owner)) {
 		return;
+	}
+	// An entry that owns itself depends on itself, a cycle that ReorderEntries never leaves
+	if (owner.oid == entry.oid) {
+		throw DependencyException("%s can not become its own owner", entry.name);
 	}
 
 	// If the owner is already owned by something else, throw an error

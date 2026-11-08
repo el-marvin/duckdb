@@ -46,6 +46,14 @@ alter sequence sequence3 owned by sequence1
 ----
 <REGEX>:.*Dependency Error.*is already owned.*
 
+statement error
+ALTER SEQUENCE sequence2 OWNED BY sequence2;
+----
+<REGEX>:.*Dependency Error.*can not become its own owner.*
+
+statement ok
+SELECT nextval('sequence2');
+
 statement ok
 DROP TABLE tbl1;
 

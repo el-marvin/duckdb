@@ -233,6 +233,15 @@ catalog_entry_vector_t PhysicalExport::GetNaiveExportOrder(ClientContext &contex
 	return catalog_entries;
 }
 
+catalog_entry_vector_t PhysicalExport::GetExportOrder(ClientContext &context, Catalog &catalog) {
+	auto catalog_entries = GetNaiveExportOrder(context, catalog);
+	auto dependency_manager = catalog.GetDependencyManager();
+	if (dependency_manager) {
+		dependency_manager->ReorderEntries(catalog_entries, context);
+	}
+	return catalog_entries;
+}
+
 SourceResultType PhysicalExport::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                  OperatorSourceInput &input) const {
 	auto &state = input.global_state.Cast<ExportSourceState>();
@@ -245,12 +254,7 @@ SourceResultType PhysicalExport::GetDataInternal(ExecutionContext &context, Data
 
 	auto &catalog = Catalog::GetCatalog(ccontext, info->GetQualifiedName().Catalog());
 
-	catalog_entry_vector_t catalog_entries;
-	catalog_entries = GetNaiveExportOrder(context.client, catalog);
-	auto dependency_manager = catalog.GetDependencyManager();
-	if (dependency_manager) {
-		dependency_manager->ReorderEntries(catalog_entries, ccontext);
-	}
+	auto catalog_entries = GetExportOrder(ccontext, catalog);
 
 	// write the schema.sql file
 	stringstream ss;
