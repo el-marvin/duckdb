@@ -1,0 +1,386 @@
+# name: test/sql/types/union/union_cast_from_varchar_nested.test
+# description: Casts from VARCHAR to a nested type raise where the child cast raises at the top level
+# group: [union]
+
+# top level: a UNION without a member that VARCHAR casts to implicitly raises under CAST and is NULL under TRY_CAST
+statement error
+SELECT CAST('1' AS UNION(i INTEGER))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('1' AS UNION(i INTEGER))
+----
+NULL
+
+statement error
+SELECT CAST('2020-01-01' AS UNION(d DATE, i INTEGER))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('2020-01-01' AS UNION(d DATE, i INTEGER))
+----
+NULL
+
+query II
+SELECT CAST(NULL::VARCHAR AS UNION(i INTEGER)), TRY_CAST(NULL::VARCHAR AS UNION(i INTEGER))
+----
+NULL	NULL
+
+# the member VARCHAR casts to implicitly is chosen
+query II
+SELECT CAST('1' AS UNION(i INTEGER, s VARCHAR)) u, union_tag(u)
+----
+1	s
+
+query II
+SELECT TRY_CAST('1' AS UNION(i INTEGER, s VARCHAR)) u, union_tag(u)
+----
+1	s
+
+# LIST
+statement error
+SELECT CAST('[1, 2]' AS UNION(i INTEGER)[])
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('[1, 2]' AS UNION(i INTEGER)[])
+----
+[NULL, NULL]
+
+statement error
+SELECT CAST(x AS UNION(i INTEGER)[]) FROM (VALUES ('[1, 2]')) t(x)
+----
+can't be implicitly cast to any of the union member types
+
+# the same child cast from a VARCHAR list raises too
+statement error
+SELECT CAST(['1', '2'] AS UNION(i INTEGER)[])
+----
+can't be implicitly cast to any of the union member types
+
+# LIST to ARRAY, with a NULL row (each list is copied before its child cast)
+statement error
+SELECT CAST(x AS UNION(i INTEGER)[2]) FROM (VALUES (['1', '2']), (NULL)) t(x)
+----
+can't be implicitly cast to any of the union member types
+
+statement error
+SELECT CAST(x AS "NULL"[2]) FROM (VALUES (['1', '2']), (NULL)) t(x)
+----
+Unimplemented type for cast (VARCHAR -> "NULL")
+
+query II
+SELECT id, TRY_CAST(x AS UNION(i INTEGER)[2]) FROM (VALUES (1, ['1', '2']), (2, NULL), (3, ['3']), (4, [NULL, NULL])) t(id, x) ORDER BY id
+----
+1	[NULL, NULL]
+2	NULL
+3	NULL
+4	[NULL, NULL]
+
+query I
+SELECT CAST(x AS UNION(i INTEGER)[2]) FROM (VALUES ([NULL, NULL]::VARCHAR[]), (NULL)) t(x)
+----
+[NULL, NULL]
+NULL
+
+# LIST to ARRAY from a constant list that is not the whole child vector
+statement ok
+PRAGMA disable_optimizer
+
+statement error
+SELECT CAST(list_slice(['x', '1', '2'], 2, 3) AS UNION(i INTEGER)[2])
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST(list_slice(['x', '1', '2'], 2, 3) AS UNION(i INTEGER)[2])
+----
+[NULL, NULL]
+
+query II
+SELECT CAST(list_slice([NULL, NULL, '1'], 1, 2) AS UNION(i INTEGER)[2]), CAST(list_slice([NULL, NULL, '1'], 1, 2) AS "NULL"[2])
+----
+[NULL, NULL]	[NULL, NULL]
+
+query I
+SELECT CAST(list_slice(['x', '1', '2'], 2, 3) AS INTEGER[2])
+----
+[1, 2]
+
+statement ok
+PRAGMA enable_optimizer
+
+# ARRAY
+statement error
+SELECT CAST('[1, 2]' AS UNION(i INTEGER)[2])
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('[1, 2]' AS UNION(i INTEGER)[2])
+----
+[NULL, NULL]
+
+# STRUCT, also next to a field that converts
+statement error
+SELECT CAST('{a: 1}' AS STRUCT(a UNION(i INTEGER)))
+----
+can't be implicitly cast to any of the union member types
+
+statement error
+SELECT CAST('{a: 1, b: 2}' AS STRUCT(a INTEGER, b UNION(i INTEGER)))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('{a: 1, b: 2}' AS STRUCT(a INTEGER, b UNION(i INTEGER)))
+----
+{'a': 1, 'b': NULL}
+
+statement error
+SELECT CAST('(1, 2)' AS TUPLE(INTEGER, UNION(i INTEGER)))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('(1, 2)' AS TUPLE(INTEGER, UNION(i INTEGER)))
+----
+(1, NULL)
+
+# MAP value and key
+statement error
+SELECT CAST('{1=2}' AS MAP(INTEGER, UNION(i INTEGER)))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('{1=2}' AS MAP(INTEGER, UNION(i INTEGER)))
+----
+{1=NULL}
+
+statement error
+SELECT CAST('{1=2}' AS MAP(UNION(i INTEGER), INTEGER))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('{1=2}' AS MAP(UNION(i INTEGER), INTEGER))
+----
+NULL
+
+# nested unions, a list inside a struct, a list of lists, through an ENUM
+statement error
+SELECT CAST('[1]' AS UNION(u UNION(i INTEGER))[])
+----
+can't be implicitly cast to any of the union member types
+
+query II
+SELECT CAST('[a]' AS UNION(u UNION(s VARCHAR))[]) l, union_tag(l[1])
+----
+[a]	u
+
+statement error
+SELECT CAST('{a: [1]}' AS STRUCT(a UNION(i INTEGER)[]))
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('{a: [1]}' AS STRUCT(a UNION(i INTEGER)[]))
+----
+{'a': [NULL]}
+
+statement error
+SELECT CAST('[[1], [2, 3]]' AS UNION(i INTEGER)[][])
+----
+can't be implicitly cast to any of the union member types
+
+query I
+SELECT TRY_CAST('[[1], [2, 3]]' AS UNION(i INTEGER)[][])
+----
+[[NULL], [NULL, NULL]]
+
+statement error
+SELECT CAST('[1]'::ENUM('[1]') AS UNION(i INTEGER)[])
+----
+can't be implicitly cast to any of the union member types
+
+# the child type NULL, which has no cast from VARCHAR
+statement error
+SELECT CAST('1' AS "NULL")
+----
+Unimplemented type for cast (VARCHAR -> "NULL")
+
+statement error
+SELECT CAST('[1]' AS "NULL"[])
+----
+Unimplemented type for cast (VARCHAR -> "NULL")
+
+statement error
+SELECT CAST('{a: 1}' AS STRUCT(a "NULL"))
+----
+Unimplemented type for cast (VARCHAR -> "NULL")
+
+statement error
+SELECT CAST('{1=2}' AS MAP(INTEGER, "NULL"))
+----
+Unimplemented type for cast (VARCHAR -> "NULL")
+
+query I
+SELECT TRY_CAST('[1]' AS "NULL"[])
+----
+[NULL]
+
+# children that are NULL or absent raise nothing
+query IIIII
+SELECT CAST('[]' AS UNION(i INTEGER)[]), CAST('[NULL]' AS UNION(i INTEGER)[]), CAST('{a: NULL}' AS STRUCT(a UNION(i INTEGER))),
+       CAST(NULL::VARCHAR AS UNION(i INTEGER)[]), CAST('{}' AS MAP(INTEGER, UNION(i INTEGER)))
+----
+[]	[NULL]	{'a': NULL}	NULL	{}
+
+query II
+SELECT id, CAST(x AS UNION(i INTEGER)[]) FROM (VALUES (1, '[]'), (2, NULL), (3, '[NULL, NULL]')) t(id, x) ORDER BY id
+----
+1	[]
+2	NULL
+3	[NULL, NULL]
+
+query II
+SELECT id, CAST(x AS UNION(i INTEGER)[2]) FROM (VALUES (1, NULL), (2, '[NULL, NULL]')) t(id, x) ORDER BY id
+----
+1	NULL
+2	[NULL, NULL]
+
+query III
+SELECT CAST('{}' AS STRUCT(a UNION(i INTEGER))), CAST('{b: 1}' AS STRUCT(a UNION(i INTEGER), b INTEGER)), CAST('{1=NULL}' AS MAP(INTEGER, UNION(i INTEGER)))
+----
+{'a': NULL}	{'a': NULL, 'b': 1}	{1=NULL}
+
+query II
+SELECT id, CAST(x AS MAP(INTEGER, UNION(i INTEGER))) FROM (VALUES (1, '{1=NULL}'), (2, NULL), (3, '{}')) t(id, x) ORDER BY id
+----
+1	{1=NULL}
+2	NULL
+3	{}
+
+# a possible member next to the impossible one
+query II
+SELECT CAST('[1, a]' AS UNION(i INTEGER, s VARCHAR)[]) l, [union_tag(e) for e in l]
+----
+[1, a]	[s, s]
+
+query II
+SELECT TRY_CAST('[1, a]' AS UNION(i INTEGER, s VARCHAR)[2]) l, [union_tag(e) for e in l]
+----
+[1, a]	[s, s]
+
+# ordinary casts from VARCHAR to nested types and their errors
+query IIII
+SELECT CAST('[1, 2]' AS INTEGER[]), CAST('[1, 2]' AS INTEGER[2]), CAST('{a: 1}' AS STRUCT(a INTEGER)), CAST('{1=2}' AS MAP(INTEGER, INTEGER))
+----
+[1, 2]	[1, 2]	{'a': 1}	{1=2}
+
+statement error
+SELECT CAST('[1, x]' AS INTEGER[])
+----
+Could not convert string 'x' to INT32
+
+query I
+SELECT TRY_CAST('[1, x]' AS INTEGER[])
+----
+[1, NULL]
+
+# a mixed column under TRY_CAST: NULL only for the bad rows and children, good rows keep their tags
+statement ok
+CREATE TABLE strs AS SELECT * FROM (VALUES (1, '[1, 2]'), (2, '[x]'), (3, NULL), (4, '[]'), (5, '[1, 2'), (6, '[NULL, 3]')) t(id, s)
+
+query III
+SELECT id, TRY_CAST(s AS INTEGER[]), TRY_CAST(s AS UNION(i INTEGER)[]) FROM strs ORDER BY id
+----
+1	[1, 2]	[NULL, NULL]
+2	[NULL]	[NULL]
+3	NULL	NULL
+4	[]	[]
+5	NULL	NULL
+6	[NULL, 3]	[NULL, NULL]
+
+query II
+SELECT id, [union_tag(e) for e in TRY_CAST(s AS UNION(i INTEGER, s VARCHAR)[])] FROM strs ORDER BY id
+----
+1	[s, s]
+2	[s]
+3	NULL
+4	[]
+5	NULL
+6	[s, s]
+
+statement error
+SELECT CAST(s AS UNION(i INTEGER)[]) FROM strs WHERE id = 1
+----
+can't be implicitly cast to any of the union member types
+
+query II
+SELECT id, TRY_CAST(x AS UNION(i INTEGER)[2]) FROM (VALUES (1, '[1]'), (2, '[NULL, NULL]'), (3, '[1, 2]'), (4, NULL), (5, '[1, 2')) t(id, x) ORDER BY id
+----
+1	NULL
+2	[NULL, NULL]
+3	[NULL, NULL]
+4	NULL
+5	NULL
+
+query II
+SELECT id, TRY_CAST(x AS STRUCT(a INTEGER, b UNION(i INTEGER))) FROM (VALUES (1, '{a: 1, b: 2}'), (2, '{a: x}'), (3, '{b: NULL}'), (4, NULL), (5, '{a: 1')) t(id, x) ORDER BY id
+----
+1	{'a': 1, 'b': NULL}
+2	{'a': NULL, 'b': NULL}
+3	{'a': NULL, 'b': NULL}
+4	NULL
+5	NULL
+
+query II
+SELECT id, TRY_CAST(x AS MAP(INTEGER, UNION(i INTEGER))) FROM (VALUES (1, '{1=NULL}'), (2, '{1=2'), (3, '{2=3}'), (4, '{x=1}'), (5, NULL)) t(id, x) ORDER BY id
+----
+1	{1=NULL}
+2	NULL
+3	{2=NULL}
+4	NULL
+5	NULL
+
+query II
+SELECT id, TRY_CAST(x AS MAP(INTEGER, UNION(i INTEGER, s VARCHAR))) m FROM (VALUES (1, '{1=a}'), (2, '{x=1}'), (3, '{2=3, 4=b}')) t(id, x) ORDER BY id
+----
+1	{1=a}
+2	NULL
+3	{2=3, 4=b}
+
+# a CSV column of such a type raises as well
+statement ok
+COPY (SELECT '[1, 2]' AS a) TO '{TEST_DIR}/union_cast_from_varchar_nested.csv' (HEADER false)
+
+statement error
+SELECT * FROM read_csv('{TEST_DIR}/union_cast_from_varchar_nested.csv', header = false, columns = {'a': 'UNION(i INTEGER)[]'})
+----
+Could not convert string
+
+# several vectors
+query II
+SELECT count(*), count(l[1]) FROM (SELECT TRY_CAST('[' || i || ']' AS UNION(i INTEGER)[]) l FROM range(5000) r(i))
+----
+5000	0
+
+query II
+SELECT count(*), sum(union_extract(l[1], 's')::INTEGER) FROM (SELECT CAST('[' || i || ']' AS UNION(i INTEGER, s VARCHAR)[]) l FROM range(5000) r(i))
+----
+5000	12497500
+
+statement error
+SELECT count(l) FROM (SELECT CAST(CASE WHEN i = 4321 THEN '[' || i || ']' END AS UNION(i INTEGER)[]) l FROM range(5000) r(i))
+----
+can't be implicitly cast to any of the union member types
+
+query II
+SELECT count(l), max(union_extract(l[1], 's')) FROM (SELECT CAST(CASE WHEN i = 4321 THEN '[' || i || ']' END AS UNION(i INTEGER, s VARCHAR)[]) l FROM range(5000) r(i))
+----
+1	4321

@@ -221,9 +221,8 @@ static bool ListToArrayCast(Vector &source, Vector &result, idx_t count, CastPar
 
 		CastParameters child_parameters(parameters, cast_data.child_cast_info.GetCastData(), parameters.local_state);
 
-		if (ldata.offset == 0) {
-			// Fast path: offset is zero, we can just cast `array_size` elements of the child vectors directly
-			// Since the list was constant, there can only be one sequence of data in the child vector
+		if (ldata.offset == 0 && source_cc.size() == array_size) {
+			// Fast path: the child holds exactly the one list, so it can be cast directly
 			return cast_data.child_cast_info.Cast(source_cc, result_cc, array_size, child_parameters);
 		}
 
@@ -234,6 +233,7 @@ static bool ListToArrayCast(Vector &source, Vector &result, idx_t count, CastPar
 
 		Vector payload_vector(source_cc.GetType(), array_size);
 		VectorOperations::Copy(source_cc, payload_vector, ldata.offset + array_size, ldata.offset, 0);
+		FlatVector::SetSize(payload_vector, array_size);
 		return cast_data.child_cast_info.Cast(payload_vector, result_cc, array_size, child_parameters);
 
 	} else {
@@ -314,6 +314,7 @@ static bool ListToArrayCast(Vector &source, Vector &result, idx_t count, CastPar
 
 				VectorOperations::Copy(source_cc, list_cast_input, list_entry.offset + array_size, list_entry.offset,
 				                       0);
+				FlatVector::SetSize(list_cast_input, array_size);
 
 				bool ok =
 				    cast_data.child_cast_info.Cast(list_cast_input, list_cast_output, array_size, child_parameters);

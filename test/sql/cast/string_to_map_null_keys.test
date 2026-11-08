@@ -18,7 +18,7 @@ NULL
 statement error
 SELECT CAST('{1=2}' AS MAP("NULL", "NULL"))
 ----
-Map keys can not be NULL
+Unimplemented type for cast (VARCHAR -> "NULL")
 
 query I
 SELECT TRY_CAST(x AS MAP("NULL", "NULL")) FROM (VALUES ('{1=1}'), ('{}'), (NULL)) t(x)

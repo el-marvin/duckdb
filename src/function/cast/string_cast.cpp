@@ -121,6 +121,7 @@ bool VectorStringToList::StringToNestedTypeCastLoop(const string_t *source_data,
 	}
 
 	Vector varchar_vector(LogicalType::VARCHAR, total_list_size);
+	FlatVector::SetSize(varchar_vector, total_list_size);
 
 	ListVector::Reserve(result, total_list_size);
 
@@ -193,6 +194,7 @@ bool VectorStringToStruct::StringToNestedTypeCastLoop(const string_t *source_dat
                                                       CastParameters &parameters, const SelectionVector *sel) {
 	auto varchar_struct_type = InitVarcharStructType(result.GetType());
 	Vector varchar_vector(varchar_struct_type, count);
+	FlatVector::SetSize(varchar_vector, count);
 	auto &child_vectors = StructVector::GetEntries(varchar_vector);
 	auto &result_children = StructVector::GetEntries(result);
 	auto is_unnamed = result.GetType().id() == LogicalTypeId::TUPLE;
@@ -307,6 +309,8 @@ bool VectorStringToMap::StringToNestedTypeCastLoop(const string_t *source_data, 
 		list_data[i].length = total - list_data[i].offset;
 	}
 	D_ASSERT(total <= total_elements);
+	FlatVector::SetSize(varchar_key_vector, total);
+	FlatVector::SetSize(varchar_val_vector, total);
 
 	auto &result_key_child = MapVector::GetKeys(result);
 	auto &result_val_child = MapVector::GetValues(result);
@@ -397,6 +401,7 @@ bool VectorStringToArray::StringToNestedTypeCastLoop(const string_t *source_data
 
 	auto child_count = array_size * count;
 	Vector varchar_vector(LogicalType::VARCHAR, child_count);
+	FlatVector::SetSize(varchar_vector, child_count);
 	auto child_data = FlatVector::GetDataMutable<string_t>(varchar_vector);
 
 	VectorTryCastData vector_cast_data(result, parameters);
