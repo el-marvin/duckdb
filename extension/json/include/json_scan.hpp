@@ -60,6 +60,9 @@ public:
 	//! Whether the detected JSON structure is kept around, so that the schemas of multiple files can be combined
 	//! into one later on - see JSONScan::CombineStructures
 	bool keep_structure = false;
+	//! Whether this file is bound only to determine the schema and its structure is combined with those of other
+	//! files, so that only the combined structure decides how the scan is read
+	bool structure_is_combined = false;
 	//! Whether "record_type" was auto-detected rather than specified by the user
 	bool record_type_auto_detected = false;
 	//! The detected structure - only set when "keep_structure" is set and the schema was auto-detected
@@ -182,8 +185,8 @@ public:
 	                                                     vector<shared_ptr<JSONReader>> &sampled_readers);
 	//! Derive the columns that are read from a detected JSON structure
 	static void StructureToColumns(ClientContext &context, JSONReaderOptions &options, const JSONStructureNode &node,
-	                               vector<JSONFeatureColumn> &feature_columns, vector<LogicalType> &return_types,
-	                               vector<Identifier> &names);
+	                               bool structure_is_combined, vector<JSONFeatureColumn> &feature_columns,
+	                               vector<LogicalType> &return_types, vector<Identifier> &names);
 
 	static void Serialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
 	                      const BoundTableFunction &function);

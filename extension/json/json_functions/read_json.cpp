@@ -150,9 +150,27 @@ private:
 	Vector string_vector;
 };
 
+//! Not Identifier equality, which always ignores case: the scan reads members under the reader's key rule
+static bool IsFeatureMember(const string &key, const char *member, const bool case_insensitive_keys) {
+	return case_insensitive_keys ? StringUtil::CIEquals(key, member) : key == member;
+}
+
+static constexpr const char *GEOJSON_FEATURE_MEMBERS[] = {"type", "geometry", "properties", "id", "bbox"};
+
+//! The Feature member that a key names only when case is ignored, or nullptr
+static const char *GetCaseVariantMember(const string &key) {
+	for (const auto member : GEOJSON_FEATURE_MEMBERS) {
+		if (IsFeatureMember(key, member, true) && !IsFeatureMember(key, member, false)) {
+			return member;
+		}
+	}
+	return nullptr;
+}
+
 //! A GeoJSON Feature: {"type": "Feature", "geometry": ..., "properties": {...}}, optionally with "id" and "bbox".
 //! Only these members are allowed, so that ordinary objects that happen to have a "geometry" are not unnested.
-static bool IsGeoJSONFeatureType(const LogicalType &type) {
+static bool HasGeoJSONFeatureMembers(const LogicalType &type, const bool case_insensitive_keys,
+                                     const bool skip_case_variants) {
 	if (type.id() != LogicalTypeId::STRUCT) {
 		return false;
 	}
@@ -160,25 +178,56 @@ static bool IsGeoJSONFeatureType(const LogicalType &type) {
 	bool has_geometry = false;
 	bool has_properties = false;
 	for (const auto &child : StructType::GetChildTypes(type)) {
-		if (child.first == "type") {
+		const auto &key = child.first.GetIdentifierName();
+		if (IsFeatureMember(key, "type", case_insensitive_keys)) {
 			has_type = true;
-		} else if (child.first == "geometry") {
+		} else if (IsFeatureMember(key, "geometry", case_insensitive_keys)) {
 			has_geometry = true;
-		} else if (child.first == "properties") {
+		} else if (IsFeatureMember(key, "properties", case_insensitive_keys)) {
 			has_properties = true;
-		} else if (child.first != "id" && child.first != "bbox") {
+		} else if (!IsFeatureMember(key, "id", case_insensitive_keys) &&
+		           !IsFeatureMember(key, "bbox", case_insensitive_keys) &&
+		           !(skip_case_variants && GetCaseVariantMember(key))) {
 			return false;
 		}
 	}
 	return has_type && has_geometry && has_properties;
 }
 
+//! Plain records would silently lose the properties wherever the columns are declared. ignore_errors drops a
+//! misspelled member like an unknown key, which the scan of a Feature skips. A structure that is combined with those
+//! of other files is left to the combined one, which other keys may make plain records.
+static bool IsGeoJSONFeatureType(const LogicalType &type, const JSONReaderOptions &options,
+                                 const bool structure_is_combined) {
+	if (HasGeoJSONFeatureMembers(type, options.case_insensitive_keys, false)) {
+		return true;
+	}
+	if (options.case_insensitive_keys || structure_is_combined || !HasGeoJSONFeatureMembers(type, true, false)) {
+		return false;
+	}
+	if (options.ignore_errors) {
+		return HasGeoJSONFeatureMembers(type, false, true);
+	}
+	for (const auto &child : StructType::GetChildTypes(type)) {
+		const auto &key = child.first.GetIdentifierName();
+		const auto member = GetCaseVariantMember(key);
+		if (member) {
+			throw BinderException("GeoJSON Feature member \"%s\" differs from \"%s\" only in case; set "
+			                      "case_insensitive_keys := true to read it as that member, or ignore_errors := "
+			                      "true to drop the misspelled member",
+			                      key, member);
+		}
+	}
+	throw InternalException("GeoJSON Feature members differ only in case, but no member was found");
+}
+
 //! Flatten a Feature into columns: the geometry and the "id"/"bbox" members come from the Feature itself, and
 //! every member of "properties" becomes a column of its own.
 //! The Feature's own members are emitted first, so that a property of the same name is the one that gets
 //! deduplicated by the usual column name collision handling.
-static void UnnestGeoJSONFeature(const LogicalType &type, const bool ignore_errors, vector<LogicalType> &return_types,
-                                 vector<Identifier> &names, vector<JSONFeatureColumn> &feature_columns) {
+static void UnnestGeoJSONFeature(const LogicalType &type, const bool ignore_errors, const bool case_insensitive_keys,
+                                 vector<LogicalType> &return_types, vector<Identifier> &names,
+                                 vector<JSONFeatureColumn> &feature_columns) {
 	const auto add_column = [&](const Identifier &name, const LogicalType &column_type, const bool from_properties,
 	                            string key) {
 		names.emplace_back(name);
@@ -191,13 +240,14 @@ static void UnnestGeoJSONFeature(const LogicalType &type, const bool ignore_erro
 	optional_ptr<const LogicalType> bbox_type;
 	optional_ptr<const LogicalType> properties_type;
 	for (const auto &child : StructType::GetChildTypes(type)) {
-		if (child.first == "geometry") {
+		const auto &key = child.first.GetIdentifierName();
+		if (IsFeatureMember(key, "geometry", case_insensitive_keys)) {
 			geometry_type = child.second;
-		} else if (child.first == "id") {
+		} else if (IsFeatureMember(key, "id", case_insensitive_keys)) {
 			id_type = child.second;
-		} else if (child.first == "bbox") {
+		} else if (IsFeatureMember(key, "bbox", case_insensitive_keys)) {
 			bbox_type = child.second;
-		} else if (child.first == "properties") {
+		} else if (IsFeatureMember(key, "properties", case_insensitive_keys)) {
 			properties_type = child.second;
 		}
 	}
@@ -226,16 +276,26 @@ static void UnnestGeoJSONFeature(const LogicalType &type, const bool ignore_erro
 //! Feature, so that e.g. a column named "id" reads an "id" property when there is no Feature-level id - which is
 //! where auto-detection would have found it too.
 static void BindGeoJSONFeatureColumns(const LogicalType &type, const vector<Identifier> &names,
-                                      vector<JSONFeatureColumn> &feature_columns) {
-	case_insensitive_set_t feature_members;
-	for (const auto &child : StructType::GetChildTypes(type)) {
-		if (child.first == "geometry" || child.first == "id" || child.first == "bbox") {
-			feature_members.insert(child.first.GetIdentifierName());
+                                      const bool case_insensitive_keys, vector<JSONFeatureColumn> &feature_columns) {
+	vector<const char *> feature_members;
+	for (const auto member : {"geometry", "id", "bbox"}) {
+		for (const auto &child : StructType::GetChildTypes(type)) {
+			if (IsFeatureMember(child.first.GetIdentifierName(), member, case_insensitive_keys)) {
+				feature_members.push_back(member);
+				break;
+			}
 		}
 	}
 	for (const auto &name : names) {
-		const auto from_properties = feature_members.find(name.GetIdentifierName()) == feature_members.end();
-		feature_columns.push_back(JSONFeatureColumn {from_properties, name.GetIdentifierName()});
+		const auto &key = name.GetIdentifierName();
+		bool from_properties = true;
+		for (const auto member : feature_members) {
+			if (IsFeatureMember(key, member, case_insensitive_keys)) {
+				from_properties = false;
+				break;
+			}
+		}
+		feature_columns.push_back(JSONFeatureColumn {from_properties, key});
 	}
 }
 
@@ -288,15 +348,15 @@ unique_ptr<JSONStructureNode> JSONScan::DetectStructure(ClientContext &context, 
 }
 
 void JSONScan::StructureToColumns(ClientContext &context, JSONReaderOptions &options, const JSONStructureNode &node,
-                                  vector<JSONFeatureColumn> &feature_columns, vector<LogicalType> &return_types,
-                                  vector<Identifier> &names) {
+                                  const bool structure_is_combined, vector<JSONFeatureColumn> &feature_columns,
+                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Convert structure to logical type
 	auto type = JSONStructure::StructureToType(context, node, options.max_depth, options.field_appearance_threshold,
 	                                           options.map_inference_threshold);
 
 	// Auto-detect record type
 	if (options.record_type == JSONRecordType::AUTO_DETECT) {
-		if (options.geojson.value_or(false) && IsGeoJSONFeatureType(type)) {
+		if (options.geojson.value_or(false) && IsGeoJSONFeatureType(type, options, structure_is_combined)) {
 			options.record_type = JSONRecordType::FEATURES;
 		} else if (type.id() == LogicalTypeId::STRUCT) {
 			options.record_type = JSONRecordType::RECORDS;
@@ -307,10 +367,11 @@ void JSONScan::StructureToColumns(ClientContext &context, JSONReaderOptions &opt
 
 	if (options.record_type == JSONRecordType::FEATURES) {
 		if (names.empty()) {
-			UnnestGeoJSONFeature(type, options.ignore_errors, return_types, names, feature_columns);
+			UnnestGeoJSONFeature(type, options.ignore_errors, options.case_insensitive_keys, return_types, names,
+			                     feature_columns);
 		} else {
 			// COPY - we already have names/types, but we still need to know where each of them is read from
-			BindGeoJSONFeatureColumns(type, names, feature_columns);
+			BindGeoJSONFeatureColumns(type, names, options.case_insensitive_keys, feature_columns);
 		}
 		return;
 	}
@@ -347,7 +408,8 @@ void JSONScan::AutoDetect(ClientContext &context, JSONScanData &json_data, const
                           vector<Identifier> &names) {
 	json_data.record_type_auto_detected = json_data.options.record_type == JSONRecordType::AUTO_DETECT;
 	auto node = DetectStructure(context, json_data, files, sampled_readers);
-	StructureToColumns(context, json_data.options, *node, json_data.feature_columns, return_types, names);
+	StructureToColumns(context, json_data.options, *node, json_data.structure_is_combined, json_data.feature_columns,
+	                   return_types, names);
 	if (json_data.keep_structure) {
 		// keep the structure around so it can be combined with the structures of other files later on
 		json_data.structure = std::move(node);

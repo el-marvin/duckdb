@@ -1,0 +1,94 @@
+# name: test/sql/json/table/read_json_key_case.test
+# description: JSON object keys that differ only in case match struct fields and columns exactly by default, at every entry point
+# group: [table]
+
+require json
+
+# top level keys are columns, read by their own key, so both spellings keep their values
+query II
+SELECT a, A_1 FROM read_json('data/json/key_case_rows.ndjson');
+----
+1	NULL
+NULL	2
+
+query II
+SELECT a, A_1 FROM read_json_auto('data/json/key_case_one_object.ndjson');
+----
+1	2
+
+# a struct can not hold both spellings, in a nested object or in an array of objects
+statement error
+SELECT * FROM read_json('data/json/key_case_nested.ndjson');
+----
+Duplicate name "A" in struct auto-detected in JSON
+
+query II
+SELECT o, l FROM read_json('data/json/key_case_nested.ndjson', ignore_errors := true);
+----
+{'a': 1}	[{'a': 1}]
+{'a': NULL}	[{'a': NULL}]
+
+query II
+SELECT o, l FROM read_json('data/json/key_case_nested.ndjson', case_insensitive_keys := true);
+----
+{'a': 1}	[{'a': 1}]
+{'a': 2}	[{'a': 2}]
+
+# map keys are data and keep their case
+query II
+SELECT typeof(json), json FROM read_json('data/json/key_case_one_object.ndjson', records := false, map_inference_threshold := 1);
+----
+MAP(VARCHAR, BIGINT)	{a=1, A=2}
+
+query I
+SELECT o FROM read_json('data/json/key_case_nested.ndjson', columns := {o: 'MAP(VARCHAR, BIGINT)'});
+----
+{a=1}
+{A=2}
+
+# a declared struct field matches its exact spelling
+query I
+SELECT o FROM read_json('data/json/key_case_nested.ndjson', columns := {o: 'STRUCT(a INTEGER)'});
+----
+{'a': 1}
+{'a': NULL}
+
+query I
+SELECT json_transform('{"o": {"A": 2}}', '{"o": {"a": "INTEGER"}}');
+----
+{'o': {'a': NULL}}
+
+statement error
+SELECT '{"A": 2}'::JSON::STRUCT(a INTEGER);
+----
+has unknown key "A"
+
+statement error
+SELECT '[{"A": 2}]'::JSON::STRUCT(a INTEGER)[];
+----
+has unknown key "A"
+
+# COPY FROM matches the table's columns the same way
+statement ok
+CREATE TABLE t (a INTEGER, o STRUCT(a INTEGER));
+
+statement ok
+COPY t FROM 'data/json/key_case_nested.ndjson';
+
+query II
+SELECT a, o FROM t;
+----
+NULL	{'a': 1}
+NULL	{'a': NULL}
+
+statement ok
+CREATE TABLE r (a INTEGER);
+
+statement ok
+COPY r FROM 'data/json/key_case_rows.ndjson' (case_insensitive_keys true);
+
+query I
+SELECT a FROM r;
+----
+1
+2

@@ -449,6 +449,34 @@ void JSONScan::DeduplicateColumnNames(vector<Identifier> &names) {
 	}
 }
 
+static yyjson_val *GetFeatureProperties(yyjson_val *feature, const idx_t object_index, JSONTransformOptions &options,
+                                        bool &success) {
+	if (!feature || !unsafe_yyjson_is_obj(feature)) {
+		return nullptr;
+	}
+	static constexpr JSONKey PROPERTIES {"properties", 10};
+	const JSONKeyOptionalCaseEquality equality {options.key_match == JSONKeyMatch::CASE_INSENSITIVE};
+	yyjson_val *properties = nullptr;
+	size_t idx, max;
+	yyjson_val *key, *val;
+	yyjson_obj_foreach(feature, idx, max, key, val) {
+		const JSONKey json_key {unsafe_yyjson_get_str(key), unsafe_yyjson_get_len(key)};
+		if (!equality(json_key, PROPERTIES)) {
+			continue;
+		}
+		if (!properties) {
+			properties = val;
+		} else if (success && options.error_duplicate_key) {
+			options.error_message =
+			    StringUtil::Format("Object %s has duplicate key \"%s\"", JSONCommon::ValToString(feature, 50),
+			                       string(json_key.ptr, json_key.len));
+			options.object_index = object_index;
+			success = false;
+		}
+	}
+	return properties;
+}
+
 //! GeoJSON Features are read as two groups of columns: those taken from the Feature itself, and those taken from
 //! its "properties" object
 static bool TransformGeoJSONFeatures(yyjson_val *values[], yyjson_alc *alc, const idx_t count,
@@ -480,11 +508,11 @@ static bool TransformGeoJSONFeatures(yyjson_val *values[], yyjson_alc *alc, cons
 	if (success && !property_names.empty()) {
 		vector<yyjson_val *> property_values(count);
 		for (idx_t i = 0; i < count; i++) {
-			auto &val = values[i];
-			property_values[i] = val && unsafe_yyjson_is_obj(val) ? yyjson_obj_get(val, "properties") : nullptr;
+			property_values[i] = GetFeatureProperties(values[i], i, transform_options, success);
 		}
-		success = JSONTransform::TransformObject(property_values.data(), alc, count, property_names, property_vectors,
-		                                         transform_options, property_indices, false);
+		success =
+		    success && JSONTransform::TransformObject(property_values.data(), alc, count, property_names,
+		                                              property_vectors, transform_options, property_indices, false);
 	}
 	return success;
 }

@@ -132,6 +132,10 @@ static unique_ptr<FunctionData> ReadSingleJSONFileBind(ClientContext &context, T
 	// keep the detected structure around - it is used to combine the schema of this file with that of other files
 	// when this function is wrapped into a multi-file function. This is only needed when the columns are not known
 	result->keep_structure = options.name_list.empty();
+	const auto &scan_options = file_input.multi_file_options;
+	result->structure_is_combined = result->keep_structure && file_input.schema_only && file_input.multi_file_scan &&
+	                                scan_options &&
+	                                (scan_options->union_by_name || scan_options->maximum_sample_files > 1);
 
 	SimpleMultiFileList file_list(vector<OpenFileInfo> {result->file});
 	vector<shared_ptr<JSONReader>> sampled_readers;
@@ -275,7 +279,7 @@ static unique_ptr<FunctionData> ReadSingleJSONFileCombineSchema(ClientContext &c
 	// the merged structure describes the schema of the scan by itself
 	return_types.clear();
 	names.clear();
-	JSONScan::StructureToColumns(context, result->options, merged, result->feature_columns, return_types, names);
+	JSONScan::StructureToColumns(context, result->options, merged, false, result->feature_columns, return_types, names);
 
 	// the JSON reader looks columns up by their exact key, so the keys are kept before the column names that are
 	// duplicates for us (e.g. "id" and "Id") are renamed

@@ -1,0 +1,273 @@
+# name: test/sql/json/table/read_geojson_member_case.test
+# description: GeoJSON Feature members match under the same key rule as every other key: exactly, or ignoring case with case_insensitive_keys
+# group: [table]
+
+require json
+
+# a Feature that spells a member in another case is an error by default, since it can not be read as a Feature
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_properties.geojson');
+----
+GeoJSON Feature member "Properties" differs from "properties" only in case; set case_insensitive_keys := true to read it as that member, or ignore_errors := true to drop the misspelled member
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_properties.geojson', case_insensitive_keys := true);
+----
+POINT (1 2)	lower
+POINT (3 4)	upper
+
+# ignore_errors drops the misspelled member like an unknown key, so the other Features keep their properties
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_properties.geojson', ignore_errors := true);
+----
+POINT (1 2)	lower
+POINT (3 4)	NULL
+
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_properties_only.geojson');
+----
+GeoJSON Feature member "Properties" differs from "properties" only in case
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_properties_only.geojson', case_insensitive_keys := true);
+----
+POINT (3 4)	upper
+
+# when every Feature misspells it, no properties member is left, so the objects are plain records
+query III
+SELECT type, ST_AsText(geometry), Properties FROM read_json('data/json/geojson/member_case_properties_only.geojson', ignore_errors := true);
+----
+Feature	POINT (3 4)	{'name': upper}
+
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_geometry.geojsonl');
+----
+GeoJSON Feature member "Geometry" differs from "geometry" only in case
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_geometry.geojsonl', case_insensitive_keys := true);
+----
+POINT (3 4)	upper
+POINT (1 2)	lower
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_geometry.geojsonl', ignore_errors := true);
+----
+NULL	upper
+POINT (1 2)	lower
+
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_id.geojsonl');
+----
+GeoJSON Feature member "ID" differs from "id" only in case
+
+query III
+SELECT ST_AsText(geometry), id, name FROM read_json('data/json/geojson/member_case_id.geojsonl', case_insensitive_keys := true);
+----
+POINT (3 4)	7	upper
+POINT (1 2)	8	lower
+
+query III
+SELECT ST_AsText(geometry), id, name FROM read_json('data/json/geojson/member_case_id.geojsonl', ignore_errors := true);
+----
+POINT (3 4)	NULL	upper
+POINT (1 2)	8	lower
+
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_type.geojsonl');
+----
+GeoJSON Feature member "Type" differs from "type" only in case
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_type.geojsonl', case_insensitive_keys := true);
+----
+POINT (1 2)	upper
+
+query III
+SELECT Type, ST_AsText(geometry), properties FROM read_json('data/json/geojson/member_case_type.geojsonl', ignore_errors := true);
+----
+Feature	POINT (1 2)	{'name': upper}
+
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_bbox.geojsonl');
+----
+GeoJSON Feature member "BBox" differs from "bbox" only in case
+
+query III
+SELECT ST_AsText(geometry), bbox, name FROM read_json('data/json/geojson/member_case_bbox.geojsonl', case_insensitive_keys := true);
+----
+POINT (1 2)	[1.0, 2.0, 1.0, 2.0]	upper
+
+# declared columns take the same error instead of reading the properties as NULL
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_id.geojsonl', columns := {geometry: 'GEOMETRY', name: 'VARCHAR'});
+----
+GeoJSON Feature member "ID" differs from "id" only in case
+
+# a property projected alone
+query I
+SELECT name FROM read_json('data/json/geojson/member_case_properties.geojson', case_insensitive_keys := true);
+----
+lower
+upper
+
+# several files are detected together, so one file with another spelling decides for all of them
+statement error
+SELECT * FROM read_json(['data/json/geojson/features.geojson', 'data/json/geojson/member_case_properties_only.geojson']);
+----
+GeoJSON Feature member "Properties" differs from "properties" only in case
+
+query I
+SELECT name FROM read_json(['data/json/geojson/features.geojson', 'data/json/geojson/member_case_properties_only.geojson'], case_insensitive_keys := true, union_by_name := true) ORDER BY name;
+----
+alpha
+beta
+delta
+gamma
+upper
+
+statement error
+SELECT * FROM read_json(['data/json/geojson/features.geojson', 'data/json/geojson/member_case_properties_only.geojson'], union_by_name := true);
+----
+GeoJSON Feature member "Properties" differs from "properties" only in case
+
+# the combined structure decides: here the other file's keys make it plain records, as in one file with all rows
+query IIIIIII
+SELECT * FROM read_json(['data/json/geojson/member_case_id.geojsonl', 'data/json/key_case_rows.ndjson'], geojson := true);
+----
+Feature	7	POINT (3 4)	{'name': upper}	NULL	NULL	NULL
+Feature	NULL	POINT (1 2)	{'name': lower}	8	NULL	NULL
+NULL	NULL	NULL	NULL	NULL	1	NULL
+NULL	NULL	NULL	NULL	NULL	NULL	2
+
+query IIIIIII
+SELECT * FROM read_json(['data/json/key_case_rows.ndjson', 'data/json/geojson/member_case_id.geojsonl'], geojson := true, union_by_name := true);
+----
+1	NULL	NULL	NULL	NULL	NULL	NULL
+NULL	2	NULL	NULL	NULL	NULL	NULL
+NULL	NULL	Feature	7	POINT (3 4)	{'name': upper}	NULL
+NULL	NULL	Feature	NULL	POINT (1 2)	{'name': lower}	8
+
+# with one sampled file, that file decides
+statement error
+SELECT * FROM read_json(['data/json/geojson/member_case_id.geojsonl', 'data/json/key_case_rows.ndjson'], geojson := true, maximum_sample_files := 1);
+----
+GeoJSON Feature member "ID" differs from "id" only in case
+
+# a given schema is not combined from the files, so each file is read under the rule on its own
+statement error
+SELECT name FROM read_json(['data/json/geojson/member_case_id.geojsonl', 'data/json/geojson/member_case_type.geojsonl'], schema := MAP {'name': {'name': 'name', 'type': 'VARCHAR', 'default_value': NULL}});
+----
+only in case; set case_insensitive_keys := true to read it as that member
+
+query I
+SELECT name FROM read_json(['data/json/geojson/member_case_id.geojsonl', 'data/json/geojson/member_case_type.geojsonl'], case_insensitive_keys := true, schema := MAP {'name': {'name': 'name', 'type': 'VARCHAR', 'default_value': NULL}}) ORDER BY ALL;
+----
+lower
+upper
+upper
+
+# properties and Properties in one Feature are duplicate keys with case_insensitive_keys
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_duplicate.geojsonl');
+----
+GeoJSON Feature member "Properties" differs from "properties" only in case
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_duplicate.geojsonl', ignore_errors := true);
+----
+POINT (1 2)	first
+
+statement error
+SELECT * FROM read_json('data/json/geojson/member_case_duplicate.geojsonl', case_insensitive_keys := true);
+----
+has duplicate key "Properties"
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_case_duplicate.geojsonl', case_insensitive_keys := true, ignore_errors := true);
+----
+POINT (1 2)	first
+
+# a repeated properties member is a duplicate key like any other key the reader reads
+statement error
+SELECT * FROM read_json('data/json/geojson/member_duplicate_properties.geojsonl');
+----
+has duplicate key "properties"
+
+query II
+SELECT ST_AsText(geometry), name FROM read_json('data/json/geojson/member_duplicate_properties.geojsonl', ignore_errors := true);
+----
+POINT (1 2)	first
+
+# as for any other key, only a projected property is checked
+query I
+SELECT ST_AsText(geometry) FROM read_json('data/json/geojson/member_duplicate_properties.geojsonl');
+----
+POINT (1 2)
+
+# COPY FROM matches the table's columns to the Feature's members and properties under the same rule
+statement ok
+CREATE TABLE f (geometry GEOMETRY, id BIGINT, name VARCHAR);
+
+statement error
+COPY f FROM 'data/json/geojson/member_case_id.geojsonl';
+----
+GeoJSON Feature member "ID" differs from "id" only in case
+
+statement error
+COPY f FROM 'data/json/geojson/member_case_properties.geojson' (FORMAT GEOJSON);
+----
+GeoJSON Feature member "Properties" differs from "properties" only in case
+
+statement ok
+COPY f FROM 'data/json/geojson/member_case_id.geojsonl' (case_insensitive_keys true);
+
+statement ok
+COPY f FROM 'data/json/geojson/member_case_properties.geojson' (FORMAT GEOJSON, case_insensitive_keys true);
+
+query III
+SELECT ST_AsText(geometry), id, name FROM f;
+----
+POINT (3 4)	7	upper
+POINT (1 2)	8	lower
+POINT (1 2)	NULL	lower
+POINT (3 4)	NULL	upper
+
+statement ok
+DELETE FROM f;
+
+statement ok
+COPY f FROM 'data/json/geojson/member_case_id.geojsonl' (ignore_errors true);
+
+statement ok
+COPY f FROM 'data/json/geojson/member_case_properties.geojson' (FORMAT GEOJSON, ignore_errors true);
+
+query III
+SELECT ST_AsText(geometry), id, name FROM f;
+----
+POINT (3 4)	NULL	upper
+POINT (1 2)	8	lower
+POINT (1 2)	NULL	lower
+POINT (3 4)	NULL	NULL
+
+statement ok
+CREATE TABLE g ("GEOMETRY" GEOMETRY, "NAME" VARCHAR);
+
+statement ok
+COPY g FROM 'data/json/geojson/features.geojson';
+
+query II
+SELECT ST_AsText("GEOMETRY"), "NAME" FROM g LIMIT 1;
+----
+NULL	NULL
+
+statement ok
+DELETE FROM g;
+
+statement ok
+COPY g FROM 'data/json/geojson/features.geojson' (case_insensitive_keys true);
+
+query II
+SELECT ST_AsText("GEOMETRY"), "NAME" FROM g LIMIT 1;
+----
+POINT (1 2)	alpha

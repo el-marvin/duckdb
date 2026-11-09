@@ -1,0 +1,2 @@
+{"type":"Feature","Geometry":{"type":"Point","coordinates":[3.0,4.0]},"properties":{"name":"upper"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[1.0,2.0]},"properties":{"name":"lower"}}
