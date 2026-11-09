@@ -1,0 +1,540 @@
+# name: test/sql/match_recognize/test_match_recognize_lambda_variable_columns.test
+# description: MATCH_RECOGNIZE - a column behind a pattern variable inside a lambda body
+# group: [match_recognize]
+
+statement ok
+CREATE TABLE t AS FROM (VALUES (10, 1, 'X', {'f': 10, 'g': {'h': 'Q'}}), (20, 2, 'Y', {'f': 20, 'g': {'h': 'R'}})) v(s, i, w, st);
+
+# A.s names column s of the rows A matched, whatever the enclosing lambda calls its parameter
+
+query II
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([1], lambda s: A.s > 15))
+)
+----
+1	2
+
+query II
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([1], lambda y: A.s > 15))
+)
+----
+1	2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([[1]], lambda s: list_bool_or(list_transform(s, lambda s: A.s > 15))))
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([{'f': 0}], lambda st: A.st.f > 15))
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform(['q'], lambda w: A.w.lower() = 'y'))
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform(['z'], lambda st: A.st.g.h.lower() = 'r'))
+)
+----
+2
+
+query I
+FROM (VALUES (10, 1), (20, 2)) v("a.b", i) MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([1], lambda "a.b": A."a.b" > 15))
+)
+----
+2
+
+# another variable's column is the one on its last row so far, also from inside a lambda
+query II
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS a_i, FIRST(B.i) AS b_i PATTERN (A B)
+    DEFINE A AS true, B AS list_bool_or(list_transform([100], lambda s: B.s > A.s))
+)
+----
+1	2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A B)
+    DEFINE A AS true, B AS list_bool_or(list_transform([{'f': 0}], lambda st: A.st.f = 10))
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A B) SUBSET U = (A, B)
+    DEFINE A AS true, B AS list_bool_or(list_transform([1], lambda s: U.s > 15))
+)
+----
+2
+
+query II
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS first_i PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([100], lambda s: sum(A.s) <= 10))
+)
+----
+1	1
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([100], lambda s: FIRST(A.s) = 10))
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([100], lambda s: PREV(A.s) = 10))
+)
+----
+2
+
+# a bare name inside the lambda is still its parameter, and where the parameter cannot be read, the
+# error says so
+
+query I rowsort
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([100], lambda s: s > 15))
+)
+----
+1
+2
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([100], lambda s: sum(s) > 0))
+)
+----
+aggregate functions cannot reference lambda parameters
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([100], lambda s: PREV(s) > 0))
+)
+----
+window functions cannot reference lambda parameters
+
+# a column no lambda binds is the row being tested
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([1], lambda y: s > 15))
+)
+----
+2
+
+# A lambda parameter spelled like the pattern variable is the lambda's, so A.s is its field, in a
+# navigation and an aggregate too, where a parameter cannot be read
+
+query I rowsort
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], lambda A: A.s > 15))
+)
+----
+1
+2
+
+query I rowsort
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], lambda A: list_bool_or(list_transform([1], lambda s: A.s > 15))))
+)
+----
+1
+2
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], lambda A: sum(A.s) > 0))
+)
+----
+aggregate functions cannot reference lambda parameters
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], lambda A: PREV(A.s) > 0))
+)
+----
+window functions cannot reference lambda parameters
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], lambda A: FIRST(A.s) > 0))
+)
+----
+window functions cannot reference lambda parameters
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform(['A'], lambda A: CLASSIFIER(A) = 'A'))
+)
+----
+CLASSIFIER() takes a pattern variable
+
+# MEASURES reads a variable's column the same way
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: A.s) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[20]
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: sum(A.s)) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[30]
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: FIRST(A.s)) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[10]
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda st: A.st.f) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[20]
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda w: A.w.lower()) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[y]
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: sum(U.s)) AS m PATTERN (A B) SUBSET U = (A, B)
+    DEFINE A AS true, B AS true
+)
+----
+[30]
+
+query II
+SELECT i, m FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: PREV(A.s)) AS m ALL ROWS PER MATCH PATTERN (A+)
+    DEFINE A AS true
+) ORDER BY i
+----
+1	[NULL]
+2	[10]
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda y: s) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[20]
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([{'s': 100}], lambda A: sum(A.s)) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+window functions cannot reference lambda parameters
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform(['A'], lambda A: CLASSIFIER(A)) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+CLASSIFIER() takes a pattern variable
+
+# a column the input does not have is still the enclosing query's, and no lambda takes it either
+query I
+SELECT (
+    FROM t MATCH_RECOGNIZE (
+        ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+        DEFINE A AS list_bool_or(list_transform([100], lambda z: A.z = 5))
+    )
+) FROM (SELECT 5 AS z)
+----
+2
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A+)
+    DEFINE A AS list_bool_or(list_transform([100], lambda zz: A.zz = 5))
+)
+----
+Referenced column "zz" not found
+
+# the column behind a variable is computed against the input like any other reference, so one two
+# tables of the input both have is ambiguous, as it is without the variable
+statement error
+FROM ((VALUES (1)) a(j) CROSS JOIN (VALUES (2)) b(j)) MATCH_RECOGNIZE (
+    MEASURES count(*) AS n PATTERN (X) DEFINE X AS X.j > 0
+)
+----
+Ambiguous reference to column name "j"
+
+statement error
+FROM ((VALUES (1)) a(j) CROSS JOIN (VALUES (2)) b(j)) MATCH_RECOGNIZE (
+    MEASURES X.j AS v PATTERN (X) DEFINE X AS true
+)
+----
+Ambiguous reference to column name "j"
+
+# the input's columns are still what ALL ROWS PER MATCH reports, and nothing the clause computes for them
+query IIIII
+SELECT i, m, s, w, st.f FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES A.s AS m ALL ROWS PER MATCH PATTERN (A+) DEFINE A AS A.s > 0
+) ORDER BY i
+----
+1	10	10	X	10
+2	20	20	Y	20
+
+query I
+SELECT count(*) FROM (DESCRIBE FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES A.s AS m ALL ROWS PER MATCH PATTERN (A+) DEFINE A AS A.s > 0
+))
+----
+5
+
+# a dot call names the column it is called on, before its own arguments; the qualified name of a
+# catalog function is still that function, also where a pattern variable is spelled like the catalog
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES A.w.concat(B.w.lower(), '-') AS m PATTERN (A B) DEFINE A AS true, B AS true
+)
+----
+Xy-
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES system.main.lower(w) AS m PATTERN (system+) DEFINE system AS true
+)
+----
+y
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (system+) DEFINE system AS system.main.lower(system.w) = 'x'
+)
+----
+1
+
+query I rowsort
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([{'w': 'Q'}], lambda A: A.w.lower() = 'q'))
+)
+----
+1
+2
+
+# steps and RUNNING or FINAL over a variable's column, in MEASURES
+query II
+SELECT i, m FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES PREV(B.w.lower()) AS m ALL ROWS PER MATCH PATTERN (A B) DEFINE A AS true, B AS true
+) ORDER BY i
+----
+1	NULL
+2	x
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES NEXT(A.st.f) AS m PATTERN (A B) DEFINE A AS true, B AS true
+)
+----
+20
+
+query II
+SELECT i, m FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: FINAL LAST(A.s)) AS m ALL ROWS PER MATCH PATTERN (A+)
+    DEFINE A AS true
+) ORDER BY i
+----
+1	[20]
+2	[20]
+
+query II
+SELECT i, m FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: RUNNING LAST(A.s)) AS m ALL ROWS PER MATCH PATTERN (A+)
+    DEFINE A AS true
+) ORDER BY i
+----
+1	[10]
+2	[20]
+
+# an empty match has no row of A to read, inside a lambda as outside one
+query II
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda s: A.s) AS m, list_transform([1], lambda s: count(A.s)) AS c
+    PATTERN (A*) DEFINE A AS false
+)
+----
+[NULL]	[0]
+[NULL]	[0]
+
+query I
+SELECT (
+    FROM t MATCH_RECOGNIZE (
+        ORDER BY i MEASURES list_transform([100], lambda z: A.z) AS m PATTERN (A+) DEFINE A AS true
+    )
+) FROM (SELECT 5 AS z)
+----
+[5]
+
+# behind a variable, a table of the input reads as its row, as it does without the variable
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A) DEFINE A AS A.t.s > 15
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.t).i AS m PATTERN (A+) DEFINE A AS true
+)
+----
+1
+
+# a variable's column keeps the name plain SQL gives the column, and a struct field reached through it
+# none, here and as the receiver of a dot call
+query III
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(struct_pack(A.s)) AS m, FIRST(struct_pack(A.S)) AS v, FIRST(A.w.struct_pack()) AS d
+    PATTERN (A+) DEFINE A AS struct_pack(A.s).s > 0
+)
+----
+{'s': 10}	{'s': 10}	{'w': X}
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(struct_pack(A.st.f)) AS m PATTERN (A) DEFINE A AS true
+)
+----
+No function matches the given name and argument types 'struct_pack(INTEGER)'
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A) DEFINE A AS struct_pack(A.st.f) IS NOT NULL
+)
+----
+No function matches the given name and argument types 'struct_pack(INTEGER)'
+
+# a lambda inside a navigation or an aggregate binds its own names, CLASSIFIER(X) included
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(list_transform(['Z'], lambda A: CLASSIFIER(A))) AS m PATTERN (A) DEFINE A AS true
+)
+----
+CLASSIFIER() takes a pattern variable
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list(list_transform(['Z'], lambda A: CLASSIFIER(A))) AS m PATTERN (A) DEFINE A AS true
+)
+----
+CLASSIFIER() takes a pattern variable
+
+# an arrow is a lambda or the JSON operator, so a variable spelled like its parameter is left as written
+statement ok
+SET lambda_syntax='ENABLE_SINGLE_ARROW'
+
+query I rowsort
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], A -> A.s > 15))
+)
+----
+1
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([1], s -> A.s > 15))
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(list_transform([{'s': 100}], A -> A.s)) AS m PATTERN (A+) DEFINE A AS true
+)
+----
+[100]
+
+# an arrow's parameter spelled like an input column is still the parameter where the arrow is a lambda
+query II
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(list_transform([1], s -> s + 1)) AS m, FIRST(list_transform([1], (s, i) -> s + i)) AS m2
+    PATTERN (A+) DEFINE A AS list_bool_or(list_transform([1], s -> s = 1))
+)
+----
+[2]	[2]
+
+statement ok
+RESET lambda_syntax
+
+statement error
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES FIRST(A.i) AS first_i PATTERN (A)
+    DEFINE A AS list_bool_or(list_transform([{'s': 100}], A -> A.s > 15))
+)
+----
+Deprecated lambda arrow (->) detected
+
+# what stands in for a variable's column is read as that column only, also where a pattern variable is
+# spelled like the column or like a name the clause generates
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A st) DEFINE A AS true, st AS A.st.f = 10 AND PREV(A.st.f) IS NULL
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES count(*) AS n PATTERN (A __mr_ref_0) DEFINE A AS true, __mr_ref_0 AS A.st.f = 10 AND A.s = 10
+)
+----
+2
+
+query I
+FROM t MATCH_RECOGNIZE (
+    ORDER BY i MEASURES list_transform([1], lambda st: sum(U.st.f)) AS m PATTERN (A B) SUBSET U = (A, B)
+    DEFINE A AS true, B AS U.st.f > 15
+)
+----
+[30]

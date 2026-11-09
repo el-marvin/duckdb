@@ -257,8 +257,9 @@ void ColumnQualifier::QualifyColumnNames(unique_ptr<ParsedExpression> &expr, vec
 	});
 }
 
-optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &function) {
+optional_ptr<CatalogEntry> ColumnQualifier::FindFunction(FunctionExpression &function, bool &dot_call) {
 	D_ASSERT(!ExpressionBinder::IsUnnestFunction(function.FunctionName()));
+	dot_call = false;
 	// lookup the function in the catalog
 	QueryErrorContext error_context(function.GetQueryLocation());
 	// promote a lone qualifier that names an attached database to a catalog, so that "db.f()" is not mistaken for a
@@ -288,6 +289,16 @@ optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &
 	if (!func) {
 		// we could not find the function - bail
 		return nullptr;
+	}
+	dot_call = true;
+	return func;
+}
+
+optional_ptr<CatalogEntry> ColumnQualifier::QualifyFunction(FunctionExpression &function) {
+	bool dot_call;
+	auto func = FindFunction(function, dot_call);
+	if (!dot_call) {
+		return func;
 	}
 	// the function exists in the system catalog - turn this into a dot call
 	ErrorData error;

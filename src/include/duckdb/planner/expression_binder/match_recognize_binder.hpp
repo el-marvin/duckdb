@@ -16,6 +16,8 @@
 
 namespace duckdb {
 
+class LambdaExpression;
+
 //! Names for the columns a MATCH_RECOGNIZE clause generates. The input is bound first, so a generated
 //! name is one the input demonstrably does not have, and no two of them are the same.
 struct GeneratedNames {
@@ -98,6 +100,10 @@ enum class MatchRecognizeScope : uint8_t {
 	ORDER_BY
 };
 
+//! Whether a name is a pattern variable. The two clauses hold their symbols differently, so which
+//! names are theirs is the caller's to say.
+using MatchRecognizeIsSymbol = std::function<bool(const string &)>;
+
 //! Binds a DEFINE condition. The matcher settles a condition one candidate row at a time, so
 //! anything a condition reads that is not the row being tested - a navigation over the match, a
 //! neighbour in the ordered partition - becomes a column of the projection below it.
@@ -136,6 +142,8 @@ private:
 	                         int64_t step = 0);
 	//! Reject something that only means anything while the matcher is assembling a match
 	void OutsideMatch(const string &what) const;
+	//! The pattern variables a name can denote here
+	MatchRecognizeIsSymbol Variables() const;
 
 	MatchRecognizeConditionInputs &inputs;
 	const WindowExpression &window_template;
@@ -172,6 +180,8 @@ private:
 	unique_ptr<ParsedExpression> StateField(const string &field);
 	//! Bind an expression this binder built, whose own parts are not the clause's to interpret again
 	BindResult BindGenerated(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth, bool root_expression);
+	//! The pattern variables and SUBSETs a name can denote here
+	MatchRecognizeIsSymbol Variables() const;
 	BindResult BindNavigation(FunctionExpression &function, const string &function_name,
 	                          unique_ptr<ParsedExpression> &expr_ptr, idx_t depth, bool root_expression);
 	//! PREV/NEXT around CLASSIFIER(): the classifier of a row a fixed distance from a row of the match,
@@ -228,10 +238,6 @@ void MatchRecognizeRejectNavigationInAggregate(const ParsedExpression &argument,
 //! CLASSIFIER(), with or without a variable in front of it, anywhere in the expression
 bool MatchRecognizeContainsClassifier(const ParsedExpression &expr);
 
-//! Whether a name is a pattern variable. The two clauses hold their symbols differently, so which
-//! names are theirs is the caller's to say.
-using MatchRecognizeIsSymbol = std::function<bool(const string &)>;
-
 //! The pattern variable a navigation reads its row from. What it reports is an expression of the
 //! clause's own, so a variable may appear anywhere within it rather than only in front of it - but it
 //! navigates to one row, so the expression cannot name two variables to read it from, nor one variable
@@ -250,5 +256,8 @@ unique_ptr<ParsedExpression> MatchRecognizeStateField(const string &state, const
 //! The names a lambda binds for its body, or false when the expression is only spelled like one: the
 //! arrow form is also the JSON operator, and which it is only settles when the function is bound.
 bool MatchRecognizeLambdaParameters(const ParsedExpression &expr, identifier_set_t &parameters);
+//! The names an expression of either lambda spelling binds if it is a lambda, or false when its left
+//! side is no parameter list
+bool MatchRecognizeArrowParameters(const LambdaExpression &lambda, identifier_set_t &parameters);
 
 } // namespace duckdb

@@ -44,6 +44,8 @@ public:
 	                        const bool within_function_expression = false);
 
 	optional_ptr<CatalogEntry> QualifyFunction(FunctionExpression &function);
+	//! The catalog's function for the qualified name, or else the bare name's, with dot_call set (x.f() is f(x))
+	optional_ptr<CatalogEntry> FindFunction(FunctionExpression &function, bool &dot_call);
 
 private:
 	Binder &binder;

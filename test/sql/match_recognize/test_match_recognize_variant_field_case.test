@@ -1,0 +1,29 @@
+# name: test/sql/match_recognize/test_match_recognize_variant_field_case.test
+# description: MATCH_RECOGNIZE - VARIANT keys that differ only in case stay apart when computed against the input
+# group: [match_recognize]
+
+require json
+
+statement ok
+CREATE TABLE t AS SELECT '{"foo": 10, "FOO": 20}'::JSON::VARIANT AS v;
+
+query II
+FROM t MATCH_RECOGNIZE (
+    MEASURES A.v.foo::INT AS lower_key, A.v.FOO::INT AS upper_key PATTERN (A) DEFINE A AS true
+)
+----
+10	20
+
+query II
+FROM t MATCH_RECOGNIZE (
+    MEASURES v.foo::INT AS lower_key, v.FOO::INT AS upper_key PATTERN (A) DEFINE A AS true
+)
+----
+10	20
+
+query I
+FROM t MATCH_RECOGNIZE (
+    MEASURES count(*) AS n PATTERN (A) DEFINE A AS A.v.FOO::INT = 20 AND v.foo::INT = 10
+)
+----
+1

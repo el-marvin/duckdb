@@ -24,6 +24,7 @@
 
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/column_binding_map.hpp"
+#include "duckdb/planner/column_qualifier.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
@@ -100,9 +101,9 @@ static unique_ptr<MatchRecognizePattern> BuildPattern(const ParsedExpression &ex
 }
 
 //! A reference into the input only resolves where the input still is one, and every clause here is
-//! evaluated above a subquery of it - so it is computed down there verbatim and read back under a name
-//! of its own. Computing rather than rewriting is what keeps two tables' columns of the same name
-//! apart, and a struct field behind a qualifier from reading as a column.
+//! evaluated above a subquery of it - so it is computed down there and read back under a name of its
+//! own. Computing rather than rewriting is what keeps two tables' columns of the same name apart, and
+//! a struct field behind a qualifier from reading as a column.
 struct HoistedInputRefs {
 	HoistedInputRefs(GeneratedNames &names_p, const case_insensitive_set_t &input_columns_p,
 	                 const case_insensitive_set_t &input_tables_p)
@@ -111,19 +112,11 @@ struct HoistedInputRefs {
 
 	//! The subquery column standing for this reference, allocated on first use
 	const string &Hoist(const ColumnRefExpression &colref) {
-		// length prefixed, so a dot inside a quoted identifier cannot read as a component boundary
-		string key;
-		for (auto &name : colref.ColumnNames()) {
-			const auto &identifier = name.GetIdentifierName();
-			key += to_string(identifier.size());
-			key += ":";
-			key += identifier;
-		}
+		auto key = Key(colref.ColumnNames());
 		auto entry = columns.find(key);
 		if (entry != columns.end()) {
 			return entry->second;
 		}
-		auto hoisted = colref.Copy();
 		auto column = names.Reserve("__mr_ref_" + to_string(columns.size()));
 		// a reference the input itself answers reads the row pattern input, and so every row of the
 		// match; one it does not is the surrounding query's, and the same value on all of them
@@ -131,6 +124,50 @@ struct HoistedInputRefs {
 		if (input_columns.count(root) || input_tables.count(root)) {
 			universal.emplace(column, colref.ToString());
 		}
+		return Add(std::move(key), colref.Copy(), std::move(column));
+	}
+
+	//! X.c.f reads input column c on X's rows: c is computed below, and X.<generated>.f stands in, named as c
+	unique_ptr<ParsedExpression> HoistVariableColumn(const ColumnRefExpression &colref) {
+		auto &parts = colref.ColumnNames();
+		D_ASSERT(parts.size() >= 2);
+		// a column spelled with a variable in front is kept apart from the same spelling without one
+		auto key = "variable " + Key({parts[1]});
+		auto entry = columns.find(key);
+		string generated;
+		if (entry != columns.end()) {
+			generated = entry->second;
+		} else {
+			auto column = make_uniq<ColumnRefExpression>(parts[1]);
+			column->SetQueryLocation(colref.GetQueryLocation());
+			generated = Add(key, std::move(column), names.Reserve("__mr_ref_" + to_string(columns.size())));
+		}
+		vector<Identifier> stand_in {parts[0], Identifier(generated)};
+		stand_in.insert(stand_in.end(), parts.begin() + 2, parts.end());
+		auto result = make_uniq<ColumnRefExpression>(std::move(stand_in));
+		result->SetQueryLocation(colref.GetQueryLocation());
+		if (!colref.GetAlias().empty()) {
+			result->SetAlias(colref.GetAlias());
+		} else if (parts.size() == 2) {
+			auto stored = input_columns.find(parts[1].GetIdentifierName());
+			result->SetAlias(stored == input_columns.end() ? parts[1] : Identifier(*stored));
+		}
+		return std::move(result);
+	}
+
+	//! Length prefixed, so a dot inside a quoted identifier cannot read as a component boundary
+	static string Key(const vector<Identifier> &parts) {
+		string key;
+		for (auto &part : parts) {
+			const auto &identifier = part.GetIdentifierName();
+			key += to_string(identifier.size());
+			key += ":";
+			key += identifier;
+		}
+		return key;
+	}
+
+	const string &Add(string key, unique_ptr<ParsedExpression> hoisted, string column) {
 		hoisted->SetAlias(Identifier(column));
 		select_list.push_back(std::move(hoisted));
 		return columns.emplace(std::move(key), std::move(column)).first->second;
@@ -139,27 +176,38 @@ struct HoistedInputRefs {
 	GeneratedNames &names;
 	const case_insensitive_set_t &input_columns;
 	const case_insensitive_set_t &input_tables;
-	//! Keyed by what the reference spells, so that one written twice is computed once
-	case_insensitive_map_t<string> columns;
+	//! Keyed by what the reference spells, so that one written twice is computed once. The spelling is
+	//! compared exactly, since a field name can be case sensitive (a VARIANT key) where a column is not.
+	unordered_map<string, string> columns;
 	//! The generated names standing for a reference into the input, by what it was written as
 	case_insensitive_map_t<string> universal;
 	//! The expressions to add to the subquery the input is reached through
 	vector<unique_ptr<ParsedExpression>> select_list;
 };
 
-//! A reference whose first name is a pattern variable, or one a lambda binds, is not the input's.
-//! Everything else is computed against the input, which is also what makes an ambiguous reference say
-//! so rather than quietly taking the first of them.
-static void HoistInputReferences(unique_ptr<ParsedExpression> &expr, const case_insensitive_set_t &symbols,
+//! Everything but a lambda parameter or a measure name is computed against the input, also behind a
+//! pattern variable, which is what makes an ambiguous reference say so rather than take the first one.
+static void HoistInputReferences(unique_ptr<ParsedExpression> &expr, const case_insensitive_set_t &variables,
                                  const case_insensitive_set_t &aliases, HoistedInputRefs &refs,
-                                 vector<identifier_set_t> &lambda_parameters) {
+                                 ColumnQualifier &qualifier, vector<identifier_set_t> &lambda_parameters,
+                                 vector<identifier_set_t> &arrow_parameters) {
 	if (expr->GetExpressionClass() == ExpressionClass::LAMBDA) {
+		auto &lambda = expr->Cast<LambdaExpression>();
 		identifier_set_t parameters;
 		if (MatchRecognizeLambdaParameters(*expr, parameters)) {
-			auto &lambda = expr->Cast<LambdaExpression>();
 			lambda_parameters.push_back(std::move(parameters));
-			HoistInputReferences(lambda.RightMutable(), symbols, aliases, refs, lambda_parameters);
+			HoistInputReferences(lambda.RightMutable(), variables, aliases, refs, qualifier, lambda_parameters,
+			                     arrow_parameters);
 			lambda_parameters.pop_back();
+			return;
+		}
+		// only binding settles whether an arrow is a lambda, so a variable named like its parameter is kept
+		if (MatchRecognizeArrowParameters(lambda, parameters)) {
+			arrow_parameters.push_back(std::move(parameters));
+			ParsedExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<ParsedExpression> &child) {
+				HoistInputReferences(child, variables, aliases, refs, qualifier, lambda_parameters, arrow_parameters);
+			});
+			arrow_parameters.pop_back();
 			return;
 		}
 	}
@@ -169,10 +217,17 @@ static void HoistInputReferences(unique_ptr<ParsedExpression> &expr, const case_
 		if (LambdaExpression::IsLambdaParameter(lambda_parameters, names[0])) {
 			return;
 		}
+		const auto &first = names[0].GetIdentifierName();
+		if (variables.count(first)) {
+			if (names.size() >= 2 && !LambdaExpression::IsLambdaParameter(arrow_parameters, names[0])) {
+				expr = refs.HoistVariableColumn(colref);
+			}
+			return;
+		}
 		// alias.<name> names one of this clause's own measures rather than a column of the input
-		const auto is_alias = names.size() == 2 && StringUtil::CIEquals("alias", names[0].GetIdentifierName()) &&
+		const auto is_alias = names.size() == 2 && StringUtil::CIEquals("alias", first) &&
 		                      aliases.count(names[1].GetIdentifierName()) > 0;
-		if (!is_alias && !symbols.count(names[0].GetIdentifierName())) {
+		if (!is_alias && !aliases.count(first)) {
 			auto alias = expr->GetAlias();
 			expr = make_uniq<ColumnRefExpression>(Identifier(refs.Hoist(colref)));
 			expr->SetAlias(std::move(alias));
@@ -180,14 +235,35 @@ static void HoistInputReferences(unique_ptr<ParsedExpression> &expr, const case_
 		return;
 	}
 	ParsedExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<ParsedExpression> &child) {
-		HoistInputReferences(child, symbols, aliases, refs, lambda_parameters);
+		HoistInputReferences(child, variables, aliases, refs, qualifier, lambda_parameters, arrow_parameters);
 	});
+	if (expr->GetExpressionType() == ExpressionType::FUNCTION) {
+		// the binder makes X.c.f() the call f(X.c) only after dropping X, so it is made here, by its rule
+		auto &function = expr->Cast<FunctionExpression>();
+		auto &path = function.GetQualifiedName().Path();
+		bool dot_call = false;
+		if (path.size() >= 3 && variables.count(path[0].GetIdentifierName()) &&
+		    !LambdaExpression::IsLambdaParameter(lambda_parameters, path[0]) &&
+		    !LambdaExpression::IsLambdaParameter(arrow_parameters, path[0]) &&
+		    !ExpressionBinder::IsUnnestFunction(function.FunctionName())) {
+			qualifier.FindFunction(function, dot_call);
+		}
+		if (dot_call) {
+			ColumnRefExpression receiver(vector<Identifier>(path.begin(), path.end() - 1));
+			receiver.SetQueryLocation(function.GetQueryLocation());
+			function.GetArgumentsMutable().insert(function.GetArgumentsMutable().begin(),
+			                                      FunctionArgument(refs.HoistVariableColumn(receiver)));
+			function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Name()));
+		}
+	}
 }
 
-static void HoistInputReferences(unique_ptr<ParsedExpression> &expr, const case_insensitive_set_t &symbols,
-                                 const case_insensitive_set_t &aliases, HoistedInputRefs &refs) {
+static void HoistInputReferences(unique_ptr<ParsedExpression> &expr, const case_insensitive_set_t &variables,
+                                 const case_insensitive_set_t &aliases, HoistedInputRefs &refs,
+                                 ColumnQualifier &qualifier) {
 	vector<identifier_set_t> lambda_parameters;
-	HoistInputReferences(expr, symbols, aliases, refs, lambda_parameters);
+	vector<identifier_set_t> arrow_parameters;
+	HoistInputReferences(expr, variables, aliases, refs, qualifier, lambda_parameters, arrow_parameters);
 }
 
 //! Whether any part of the pattern sits inside a {- -}
@@ -431,16 +507,16 @@ static unique_ptr<WindowExpression> BuildWindowTemplate(const MatchRecognizeConf
 
 //! Rewrite every reference that means something to the input into one of the projection over it
 static void HoistClauseReferences(MatchRecognizeConfig &config, const MatchRecognizeSymbols &symbols,
-                                  HoistedInputRefs &input_refs) {
+                                  HoistedInputRefs &input_refs, ColumnQualifier &qualifier) {
 	const case_insensitive_set_t no_aliases;
 	for (auto &expr : config.partition_expressions) {
-		HoistInputReferences(expr, symbols.qualifying, no_aliases, input_refs);
+		HoistInputReferences(expr, symbols.qualifying, no_aliases, input_refs, qualifier);
 	}
 	for (auto &order : config.order_by_expressions) {
-		HoistInputReferences(order.expression, symbols.qualifying, no_aliases, input_refs);
+		HoistInputReferences(order.expression, symbols.qualifying, no_aliases, input_refs, qualifier);
 	}
 	for (auto &expr : config.defines_expression_list) {
-		HoistInputReferences(expr, symbols.qualifying, no_aliases, input_refs);
+		HoistInputReferences(expr, symbols.qualifying, no_aliases, input_refs, qualifier);
 	}
 	// a measure may name one written before it, which is not the input's to compute - though a column
 	// of the input by the same name still wins, where the measures are bound
@@ -448,12 +524,8 @@ static void HoistClauseReferences(MatchRecognizeConfig &config, const MatchRecog
 	for (auto &expr : config.measures_expression_list) {
 		measure_aliases.insert(expr->GetAlias().GetIdentifierName());
 	}
-	auto measure_names = symbols.qualifying;
-	for (auto &alias : measure_aliases) {
-		measure_names.insert(alias);
-	}
 	for (auto &expr : config.measures_expression_list) {
-		HoistInputReferences(expr, measure_names, measure_aliases, input_refs);
+		HoistInputReferences(expr, symbols.qualifying, measure_aliases, input_refs, qualifier);
 	}
 }
 
@@ -953,12 +1025,15 @@ BoundStatement Binder::Bind(MatchRecognizeRef &ref) {
 	HoistedInputRefs input_refs(names, input_column_names, input_tables);
 
 	const auto symbols = CollectSymbols(*ref.config);
+	// a generated name spelled like a pattern variable would read as one where the variable is dropped
+	names.taken.insert(symbols.qualifying.begin(), symbols.qualifying.end());
 	// {- -} only decides which of a match's rows reach the output, so it is also read again below
 	const bool has_exclusion = HasExclusion(*ref.config->pattern);
 	ValidateClauses(*ref.config, symbols, has_exclusion);
 
 	const auto reported = CollectReportedNames(*ref.config, input_column_names);
-	HoistClauseReferences(*ref.config, symbols, input_refs);
+	ColumnQualifier qualifier(*this);
+	HoistClauseReferences(*ref.config, symbols, input_refs, qualifier);
 
 	// The hoisted references sit in a projection of their own, so the navigation windows a DEFINE turns
 	// into can order by them. It is there even when nothing was hoisted, because it is also what makes
