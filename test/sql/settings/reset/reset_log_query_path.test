@@ -1,0 +1,95 @@
+# name: test/sql/settings/reset/reset_log_query_path.test
+# description: A RESET of log_query_path passes the path the session reads afterwards, and the log appends
+# group: [reset]
+
+require skip_reload
+
+statement ok
+SET GLOBAL log_query_path = '{TEST_DIR}/reset_log_query_path_global.log'
+
+statement ok
+SELECT 'first'
+
+# a reset that falls back to the path this connection already logs to keeps its log open
+statement ok
+RESET log_query_path
+
+statement ok
+SELECT 'second'
+
+# a session reset with a global value logs to the global path again, after what is already there
+statement ok
+SET SESSION log_query_path = '{TEST_DIR}/reset_log_query_path_session.log'
+
+statement ok
+RESET SESSION log_query_path
+
+query I
+SELECT current_setting('log_query_path') = '{TEST_DIR}/reset_log_query_path_global.log'
+----
+true
+
+statement ok
+SET SESSION log_query_path = ''
+
+query I
+SELECT * FROM read_csv('{TEST_DIR}/reset_log_query_path_global.log', columns={'sql': 'VARCHAR'}, auto_detect=false)
+----
+SELECT 'first'
+RESET log_query_path
+SELECT 'second'
+SET SESSION log_query_path = '{TEST_DIR}/reset_log_query_path_session.log'
+SELECT current_setting('log_query_path') = '{TEST_DIR}/reset_log_query_path_global.log'
+SET SESSION log_query_path = ''
+
+# without a global value a session reset passes the default, the empty path, which stops the log
+statement ok
+RESET GLOBAL log_query_path
+
+statement ok
+SET SESSION log_query_path = '{TEST_DIR}/reset_log_query_path_default.log'
+
+statement ok
+RESET SESSION log_query_path
+
+statement ok
+SELECT 'not logged'
+
+query I
+SELECT * FROM read_csv('{TEST_DIR}/reset_log_query_path_default.log', columns={'sql': 'VARCHAR'}, auto_detect=false)
+----
+RESET SESSION log_query_path
+
+# the path is compared after expanding ~, so a reset after the home directory changed opens the log in the new home
+statement ok
+COPY (SELECT 1 AS a, 1 AS p) TO '{TEST_DIR}/reset_log_query_path_home' (FORMAT csv, PARTITION_BY p)
+
+statement ok
+SET home_directory = '{TEST_DIR}'
+
+statement ok
+SET GLOBAL log_query_path = '~/reset_log_query_path_home.log'
+
+statement ok
+SET home_directory = '{TEST_DIR}/reset_log_query_path_home'
+
+statement ok
+RESET SESSION log_query_path
+
+statement ok
+SELECT 'in the new home'
+
+statement ok
+SET SESSION log_query_path = ''
+
+query I
+SELECT * FROM read_csv('{TEST_DIR}/reset_log_query_path_home.log', columns={'sql': 'VARCHAR'}, auto_detect=false)
+----
+SET home_directory = '{TEST_DIR}/reset_log_query_path_home'
+RESET SESSION log_query_path
+
+query I
+SELECT * FROM read_csv('{TEST_DIR}/reset_log_query_path_home/reset_log_query_path_home.log', columns={'sql': 'VARCHAR'}, auto_detect=false)
+----
+SELECT 'in the new home'
+SET SESSION log_query_path = ''

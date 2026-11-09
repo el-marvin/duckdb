@@ -22,6 +22,8 @@
         "test/sql/logging/http_logging.test",
         "test/sql/logging/file_system_logging.test",
         "test/sql/pragma/test_query_log.test",
+        "test/sql/settings/reset/reset_log_query_path.test",
+        "test/sql/settings/reset/reset_log_query_path_connections.test",
         "test/sql/logging/logging_file_truncate_rewrite.test"
       ]
     },

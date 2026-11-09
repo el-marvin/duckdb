@@ -139,7 +139,8 @@ functions:
     lifecycle:
       - [ "unstable", "v2.0.0", "2026-10-11" ]
     description: |
-      Sets the default value of the custom option: its value until it is set, and the value `RESET` restores.
+      Sets the default value of the custom option: its value until it is set, and the value a GLOBAL reset restores
+      unless the update callback replaces it.
 
       The value is borrowed and copied, and cast to the option's type at registration, which fails when the cast
       does. Without a default value the option reads as NULL until it is set.
@@ -300,9 +301,10 @@ functions:
     lifecycle:
       - [ "unstable", "v2.0.0", "2026-10-11" ]
     description: |
-      Retrieves the value the option is updated to, already cast to the option's type. On a reset this is the
-      default value, which may be NULL. The returned value is owned by the caller and must be destroyed via
-      `[[value_destroy]]`.
+      Retrieves the value the option is updated to, already cast to the option's type. On a reset this is the value
+      the scope reads once the reset is done: for a SESSION reset the GLOBAL value when one is set, else the default
+      value; for a GLOBAL reset the default value. It may be NULL. The returned value is owned by the caller and must
+      be destroyed via `[[value_destroy]]`.
     parameters:
       info:
         type: custom_option_update_info
@@ -323,7 +325,8 @@ functions:
       - [ "unstable", "v2.0.0", "2026-10-11" ]
     description: |
       Replaces the value the option is updated to, e.g. to normalize it. The value is borrowed and copied, and cast to
-      the option's type, which fails when the cast does.
+      the option's type, which fails when the cast does. A SESSION reset stores no value, so a replacement then has
+      no effect.
     parameters:
       info:
         type: custom_option_update_info
@@ -361,7 +364,7 @@ functions:
   custom_option_update_is_reset:
     lifecycle:
       - [ "unstable", "v2.0.0", "2026-10-11" ]
-    description: Retrieves whether the update is a reset to the default value, like SQL `RESET`.
+    description: Retrieves whether the update is a reset, like SQL `RESET`.
     parameters:
       info:
         type: custom_option_update_info

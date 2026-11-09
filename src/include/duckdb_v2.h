@@ -8368,7 +8368,8 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_custom_option_set_type(duckdb_v2_custom_o
 
 #if DUCKDB_V2_API_ALLOW_UNSTABLE
 /*!
- * Sets the default value of the custom option: its value until it is set, and the value `RESET` restores.
+ * Sets the default value of the custom option: its value until it is set, and the value a GLOBAL reset restores unless
+ * the update callback replaces it.
  *
  * The value is borrowed and copied, and cast to the option's type at registration, which fails when the cast does.
  * Without a default value the option reads as NULL until it is set.
@@ -8517,8 +8518,9 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_custom_option_update_get_user_data(
 
 #if DUCKDB_V2_API_ALLOW_UNSTABLE
 /*!
- * Retrieves the value the option is updated to, already cast to the option's type. On a reset this is the default
- * value, which may be NULL. The returned value is owned by the caller and must be destroyed via
+ * Retrieves the value the option is updated to, already cast to the option's type. On a reset this is the value the
+ * scope reads once the reset is done: for a SESSION reset the GLOBAL value when one is set, else the default value; for
+ * a GLOBAL reset the default value. It may be NULL. The returned value is owned by the caller and must be destroyed via
  * `duckdb_v2_value_destroy()`.
  *
  * history:
@@ -8538,7 +8540,7 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_custom_option_update_get_value(duckdb_v2_
 #if DUCKDB_V2_API_ALLOW_UNSTABLE
 /*!
  * Replaces the value the option is updated to, e.g. to normalize it. The value is borrowed and copied, and cast to the
- * option's type, which fails when the cast does.
+ * option's type, which fails when the cast does. A SESSION reset stores no value, so a replacement then has no effect.
  *
  * history:
  * - unstable: v2.0.0
@@ -8575,7 +8577,7 @@ DUCKDB_C_API DUCKDB_V2_ERROR duckdb_v2_custom_option_update_get_scope(duckdb_v2_
 
 #if DUCKDB_V2_API_ALLOW_UNSTABLE
 /*!
- * Retrieves whether the update is a reset to the default value, like SQL `RESET`.
+ * Retrieves whether the update is a reset, like SQL `RESET`.
  *
  * history:
  * - unstable: v2.0.0

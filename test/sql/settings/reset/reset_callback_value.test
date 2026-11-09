@@ -1,0 +1,122 @@
+# name: test/sql/settings/reset/reset_callback_value.test
+# description: A RESET passes the set callback the value the option reads afterwards
+# group: [reset]
+
+# debug_fs applies its options database wide, and at its first delayed I/O it logs the seed of its random engine
+require debug_fs
+
+require skip_reload
+
+statement ok
+COPY (SELECT 42 AS i) TO '{TEST_DIR}/reset_callback_value.csv'
+
+statement ok
+CALL enable_logging(level := 'info', storage := 'memory')
+
+# a RESET SESSION without a global value passes the default, so no I/O is delayed
+statement ok
+SET SESSION debug_fs_delay_mean_ms = 1
+
+statement ok
+RESET SESSION debug_fs_delay_mean_ms
+
+query I
+SELECT current_setting('debug_fs_delay_mean_ms')
+----
+0.0
+
+query I
+SELECT i FROM read_csv('{TEST_DIR}/reset_callback_value.csv')
+----
+42
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'DebugFileSystem initialized%'
+----
+0
+
+# a RESET GLOBAL passes the default for the global scope, while this connection keeps its own value
+statement ok
+SET SESSION debug_fs_delay_mean_ms = 1
+
+statement ok
+RESET GLOBAL debug_fs_delay_mean_ms
+
+query II
+SELECT value, scope FROM duckdb_settings() WHERE name = 'debug_fs_delay_mean_ms'
+----
+1.0	LOCAL
+
+query I
+SELECT i FROM read_csv('{TEST_DIR}/reset_callback_value.csv')
+----
+42
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'DebugFileSystem initialized%'
+----
+0
+
+statement ok
+RESET debug_fs_delay_mean_ms
+
+# a RESET SESSION with a global value passes the global value, which stays in force
+statement ok
+SET GLOBAL debug_fs_delay_mean_ms = 1
+
+statement ok
+SET SESSION debug_fs_delay_mean_ms = 2
+
+statement ok
+RESET debug_fs_delay_mean_ms
+
+query I
+SELECT current_setting('debug_fs_delay_mean_ms')
+----
+1.0
+
+query I
+SELECT i FROM read_csv('{TEST_DIR}/reset_callback_value.csv')
+----
+42
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'DebugFileSystem initialized%'
+----
+1
+
+# a fresh database, whose debug file system has not initialized its random engine yet
+load {TEST_DIR}/reset_callback_value.db
+
+statement ok
+CALL enable_logging(level := 'info', storage := 'memory')
+
+statement ok
+SET GLOBAL debug_fs_random_seed = 424242
+
+statement ok
+SET SESSION debug_fs_random_seed = 7
+
+statement ok
+RESET SESSION debug_fs_random_seed
+
+query I
+SELECT current_setting('debug_fs_random_seed')
+----
+424242
+
+statement ok
+SET GLOBAL debug_fs_delay_mean_ms = 1
+
+query I
+SELECT i FROM read_csv('{TEST_DIR}/reset_callback_value.csv')
+----
+42
+
+query I
+SELECT message FROM duckdb_logs WHERE message LIKE 'DebugFileSystem initialized%'
+----
+DebugFileSystem initialized with random seed: 424242
+
+statement ok
+RESET GLOBAL debug_fs_delay_mean_ms

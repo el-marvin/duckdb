@@ -35,6 +35,8 @@
       "reason": "Extra queries mess up logs",
       "paths": [
         "test/sql/pragma/test_query_log.test",
+        "test/sql/settings/reset/reset_log_query_path.test",
+        "test/sql/settings/reset/reset_log_query_path_connections.test",
         "test/sql/cte/warn_deprecated_union_in_using_key.test",
         "test/sql/logging/test_logging_function.test",
         "test/sql/logging/logging_buffer_size.test",

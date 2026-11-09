@@ -1,0 +1,41 @@
+# name: test/sql/settings/reset/reset_log_query_path_connections.test
+# description: A RESET falling back to the global query log appends after what another connection logged
+# group: [reset]
+
+# a query log writer holds a write lock, which on Windows refuses a second writer on the same file
+require notwindows
+
+require skip_reload
+
+statement ok con1
+SET GLOBAL log_query_path = '{TEST_DIR}/reset_log_query_path_connections.log'
+
+statement ok con1
+SELECT 'con1 first'
+
+statement ok con2
+SET SESSION log_query_path = '{TEST_DIR}/reset_log_query_path_connections_session.log'
+
+statement ok con2
+RESET SESSION log_query_path
+
+statement ok con2
+SELECT 'con2 after its reset'
+
+statement ok con1
+SELECT 'con1 second'
+
+statement ok con1
+SET SESSION log_query_path = ''
+
+statement ok con2
+SET SESSION log_query_path = ''
+
+query I con1
+SELECT * FROM read_csv('{TEST_DIR}/reset_log_query_path_connections.log', columns={'sql': 'VARCHAR'}, auto_detect=false)
+----
+SELECT 'con1 first'
+SELECT 'con2 after its reset'
+SELECT 'con1 second'
+SET SESSION log_query_path = ''
+SET SESSION log_query_path = ''

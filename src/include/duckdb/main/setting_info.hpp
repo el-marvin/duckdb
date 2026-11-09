@@ -115,8 +115,9 @@ typedef void (*set_option_callback_t)(ClientContext &context, SetScope scope, Va
 struct ExtensionOptionInfo {
 	DUCKDB_API virtual ~ExtensionOptionInfo();
 
-	//! Called when the option is set or reset, with the scope resolved to SESSION or GLOBAL, before the value is
-	//! stored. May replace the value, or throw to refuse it
+	//! Called when the option is set or reset, with the resolved scope, before anything is stored; on a reset with the
+	//! value the scope reads afterwards. May replace the value, which a SESSION reset does not store, or throw to
+	//! refuse it
 	virtual void OnSet(ClientContext &context, SetScope scope, Value &parameter, bool is_reset) const = 0;
 
 	template <class TARGET>

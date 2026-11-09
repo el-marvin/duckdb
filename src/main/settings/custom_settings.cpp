@@ -1294,10 +1294,17 @@ void LogQueryPathSetting::OnSet(SettingCallbackInfo &info, Value &input) {
 	if (path.empty()) {
 		// empty path: clean up query writer
 		client_data.log_query_writer = nullptr;
-	} else {
-		client_data.log_query_writer = make_uniq<BufferedFileWriter>(FileSystem::GetFileSystem(*info.context), path,
-		                                                             BufferedFileWriter::DEFAULT_OPEN_FLAGS);
+		return;
 	}
+	auto &fs = FileSystem::GetFileSystem(*info.context);
+	path = fs.ExpandPath(path);
+	// a reset to the path this connection logs to changes nothing, and on Windows a second writer's lock would fail
+	if (info.is_reset && client_data.log_query_writer && client_data.log_query_writer->path == path) {
+		return;
+	}
+	// another connection may be writing the same log, so a writer opened later must not write over it
+	client_data.log_query_writer =
+	    make_uniq<BufferedFileWriter>(fs, path, BufferedFileWriter::DEFAULT_OPEN_FLAGS | FileFlags::FILE_FLAGS_APPEND);
 }
 
 //===----------------------------------------------------------------------===//

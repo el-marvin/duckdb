@@ -592,8 +592,8 @@ public:
 	/// Sets the type every value written to the option is cast to. Optional when a default value is set, whose type
 	/// the option then takes.
 	auto SetType(const LogicalType &type) & -> CustomOption &;
-	/// Sets the value the option has until it is set, and that `RESET` restores. Cast to the option's type at
-	/// registration. Without one, the option reads as NULL until it is set.
+	/// Sets the value the option has until it is set, and that a GLOBAL reset restores unless the update callback
+	/// replaces it. Cast to the option's type at registration. Without one, the option reads as NULL until it is set.
 	auto SetDefaultValue(const Value &value) & -> CustomOption &;
 	/// Sets the description `OptionDescription::GetDescription` and `duckdb_settings()` report.
 	auto SetDescription(std::string_view description) & -> CustomOption &;
@@ -638,13 +638,16 @@ public:
 			return *static_cast<T *>(GetUserDataInternal());
 		}
 
-		/// The value the option is updated to, cast to its type. On a reset, the default value, which may be NULL.
+		/// The value the option is updated to, cast to its type. On a reset, the value the scope reads once the reset
+		/// is done: for a SESSION reset the GLOBAL value when one is set, else the default; for a GLOBAL reset the
+		/// default. May be NULL.
 		auto GetValue() const -> Value;
-		/// Replaces the value the option is updated to. Cast to the option's type.
+		/// Replaces the value the option is updated to. Cast to the option's type. A SESSION reset stores no value, so
+		/// a replacement then has no effect.
 		auto SetValue(const Value &value) -> void;
 		/// The scope the value is written at: GLOBAL or SESSION, a DEFAULT write resolved to the default scope.
 		auto GetScope() const -> SettingScope;
-		/// Whether the update is a reset to the default value, like SQL `RESET`.
+		/// Whether the update is a reset, like SQL `RESET`.
 		auto IsReset() const -> bool;
 
 		/// The context setting the option. When the option is written through the config of an `Instance`, or given

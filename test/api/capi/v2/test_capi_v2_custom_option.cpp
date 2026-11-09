@@ -24,9 +24,12 @@ struct UpdateLog {
 	DUCKDB_V2_SETTING_SCOPE last_scope = DUCKDB_V2_SETTING_SCOPE_DEFAULT;
 	bool last_reset = false;
 	int64_t last_value = -1;
+	//! The largest value accepted at SESSION scope.
+	int64_t session_cap = 100;
 };
 
-// Refuses negative values and clamps values above 100, recording every update.
+// Refuses negative values and SESSION values above the session cap, and clamps values above 100. Records every
+// update; last_value only when it is accepted.
 void ClampUpdate(duckdb_v2_custom_option_update_info_handle info, duckdb_v2_context_handle context,
                  duckdb_v2_error_info_handle *err) {
 	void *user_data = nullptr;
@@ -48,6 +51,12 @@ void ClampUpdate(duckdb_v2_custom_option_update_info_handle info, duckdb_v2_cont
 	if (number < 0) {
 		duckdb_v2_error_info_set_code(*err, DUCKDB_V2_ERROR_INPUT_INVALID);
 		std::string_view text = "cpu_budget cannot be negative";
+		duckdb_v2_error_info_set_text(*err, text.data(), text.size());
+		return;
+	}
+	if (log.last_scope == DUCKDB_V2_SETTING_SCOPE_SESSION && number > log.session_cap) {
+		duckdb_v2_error_info_set_code(*err, DUCKDB_V2_ERROR_INPUT_INVALID);
+		std::string_view text = "a session cannot exceed the session cap";
 		duckdb_v2_error_info_set_text(*err, text.data(), text.size());
 		return;
 	}
@@ -260,13 +269,116 @@ TEST_CASE("V2 custom option: the update callback validates and normalizes", "[ca
 	        DUCKDB_V2_ERROR_INPUT_INVALID);
 	duckdb_v2_value_destroy(&negative);
 
-	// A reset passes the default value, and a session reset then reads the global value.
+	// A session reset passes the global value, which the session then reads.
 	REQUIRE(RunSql(fx.conn, "RESET cpu_budget") == DUCKDB_V2_ERROR_NONE);
 	REQUIRE(log->last_reset);
-	REQUIRE(log->last_value == 10);
+	REQUIRE(log->last_value == 100);
 	DUCKDB_V2_SETTING_SCOPE scope = DUCKDB_V2_SETTING_SCOPE_DEFAULT;
 	REQUIRE(ReadOption(fx.config, "cpu_budget", &scope) == 100);
 	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+}
+
+TEST_CASE("V2 custom option: a reset passes the value the option reads afterwards", "[capi_v2][custom_option]") {
+	EnvFixture fx;
+	auto log = new UpdateLog();
+	auto default_value = MakeInt64Value(fx.factory, 10);
+	auto option = MakeOption(fx.factory, "io_budget", true, default_value);
+	duckdb_v2_value_destroy(&default_value);
+	duckdb_v2_opaque user_data = {log, [](void *ptr) { delete static_cast<UpdateLog *>(ptr); }, nullptr};
+	REQUIRE(duckdb_v2_custom_option_set_user_data(option, &user_data, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_custom_option_set_update_callback(option, ClampUpdate, nullptr) == DUCKDB_V2_ERROR_NONE);
+	RegisterOption(fx.conn, option);
+	DUCKDB_V2_SETTING_SCOPE scope = DUCKDB_V2_SETTING_SCOPE_DEFAULT;
+
+	// Never set: the default, and nothing changes.
+	REQUIRE(RunSql(fx.conn, "RESET io_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->calls == 1);
+	REQUIRE(log->last_reset);
+	REQUIRE(log->last_scope == DUCKDB_V2_SETTING_SCOPE_SESSION);
+	REQUIRE(log->last_value == 10);
+	REQUIRE(ReadOption(fx.config, "io_budget", &scope) == 10);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+
+	// A session reset without a global value: the default.
+	REQUIRE(RunSql(fx.conn, "SET io_budget = 20") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(RunSql(fx.conn, "RESET SESSION io_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->last_value == 10);
+	REQUIRE(ReadOption(fx.config, "io_budget") == 10);
+
+	// A session reset with a global value: the global value.
+	REQUIRE(RunSql(fx.conn, "SET GLOBAL io_budget = 30") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(RunSql(fx.conn, "SET io_budget = 40") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(RunSql(fx.conn, "RESET SESSION io_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->last_reset);
+	REQUIRE(log->last_scope == DUCKDB_V2_SETTING_SCOPE_SESSION);
+	REQUIRE(log->last_value == 30);
+	REQUIRE(ReadOption(fx.config, "io_budget", &scope) == 30);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+
+	// SET TO DEFAULT is a reset.
+	REQUIRE(RunSql(fx.conn, "SET io_budget = 40") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE_FALSE(log->last_reset);
+	REQUIRE(RunSql(fx.conn, "SET io_budget TO DEFAULT") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->last_reset);
+	REQUIRE(log->last_value == 30);
+	REQUIRE(ReadOption(fx.config, "io_budget") == 30);
+
+	// A session that has no value of its own: the global value, and nothing changes.
+	auto calls = log->calls;
+	REQUIRE(RunSql(fx.conn, "RESET io_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->calls == calls + 1);
+	REQUIRE(log->last_value == 30);
+	REQUIRE(ReadOption(fx.config, "io_budget") == 30);
+
+	// A global reset passes the default for the GLOBAL scope, while this session keeps its own value.
+	REQUIRE(RunSql(fx.conn, "SET io_budget = 40") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(RunSql(fx.conn, "RESET GLOBAL io_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->last_reset);
+	REQUIRE(log->last_scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+	REQUIRE(log->last_value == 10);
+	REQUIRE(ReadOption(fx.config, "io_budget", &scope) == 40);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_SESSION);
+	REQUIRE(ReadOption(fx.instance_config, "io_budget") == 10);
+
+	// A session reset to a global value the callback refuses for a session fails, and the session keeps its value.
+	REQUIRE(RunSql(fx.conn, "SET GLOBAL io_budget = 60") == DUCKDB_V2_ERROR_NONE);
+	log->session_cap = 50;
+	REQUIRE(RunSql(fx.conn, "RESET io_budget") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	REQUIRE(ReadOption(fx.config, "io_budget", &scope) == 40);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_SESSION);
+	log->session_cap = 100;
+	REQUIRE(RunSql(fx.conn, "RESET io_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->last_value == 60);
+	REQUIRE(ReadOption(fx.config, "io_budget", &scope) == 60);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+
+	// So does a reset that changes nothing, on a session without a value of its own.
+	log->session_cap = 50;
+	REQUIRE(RunSql(fx.conn, "RESET io_budget") == DUCKDB_V2_ERROR_INPUT_INVALID);
+	REQUIRE(ReadOption(fx.config, "io_budget", &scope) == 60);
+	REQUIRE(scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+}
+
+TEST_CASE("V2 custom option: a global reset stores the value the callback puts in place of the default",
+          "[capi_v2][custom_option]") {
+	EnvFixture fx;
+	auto log = new UpdateLog();
+	auto default_value = MakeInt64Value(fx.factory, 500);
+	auto option = MakeOption(fx.factory, "net_budget", true, default_value);
+	duckdb_v2_value_destroy(&default_value);
+	duckdb_v2_opaque user_data = {log, [](void *ptr) { delete static_cast<UpdateLog *>(ptr); }, nullptr};
+	REQUIRE(duckdb_v2_custom_option_set_user_data(option, &user_data, nullptr) == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(duckdb_v2_custom_option_set_update_callback(option, ClampUpdate, nullptr) == DUCKDB_V2_ERROR_NONE);
+	RegisterOption(fx.conn, option);
+
+	// The callback does not see the default at registration.
+	REQUIRE(log->calls == 0);
+	REQUIRE(ReadOption(fx.instance_config, "net_budget") == 500);
+	REQUIRE(RunSql(fx.conn, "RESET GLOBAL net_budget") == DUCKDB_V2_ERROR_NONE);
+	REQUIRE(log->last_reset);
+	REQUIRE(log->last_scope == DUCKDB_V2_SETTING_SCOPE_GLOBAL);
+	REQUIRE(log->last_value == 100);
+	REQUIRE(ReadOption(fx.instance_config, "net_budget") == 100);
 }
 
 TEST_CASE("V2 custom option: registration validates the option", "[capi_v2][custom_option]") {
