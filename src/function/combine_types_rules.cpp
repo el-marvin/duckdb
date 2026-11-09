@@ -14,6 +14,10 @@ static bool CombineNoAliasTypes(LogicalTypeResolver &logical_type_resolver, cons
 	if (left.IsAggregateState() != right.IsAggregateState()) {
 		return false;
 	}
+	// a state is read by the aggregate its type names, so states of different aggregates have no common type
+	if (left.IsAggregateState() && left != right) {
+		return false;
+	}
 	// we always prefer aliased types
 	if (!left.GetAlias().empty()) {
 		result = left;

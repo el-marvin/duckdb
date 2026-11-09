@@ -851,13 +851,12 @@ void ToAggregateStateFunction(DataChunk &input, ExpressionState &state, Vector &
 	result.Reinterpret(input.data[0]);
 }
 
-} // namespace
-
-unique_ptr<ParsedExpression> ExportAggregateFunction::StateToSQL(const LogicalType &type,
-                                                                 unique_ptr<ParsedExpression> value) {
+// reads the function name and the arguments an AGGREGATE_STATE type names - false if the type names none
+bool GetStateSignature(const LogicalType &type, string &function_name, vector<LogicalType> &types,
+                       map<idx_t, Value> &constants) {
 	auto info = type.GetExtensionInfo();
 	if (!type.IsAggregateState() || !info) {
-		return nullptr;
+		return false;
 	}
 	auto name = info->properties.find("function_name");
 	auto parameters = info->properties.find("parameters");
@@ -866,11 +865,24 @@ unique_ptr<ParsedExpression> ExportAggregateFunction::StateToSQL(const LogicalTy
 	const bool has_parameters = parameters != info->properties.end() && !parameters->second.IsNull() &&
 	                            parameters->second.type().id() == LogicalTypeId::LIST;
 	if (!has_function_name || !has_parameters) {
-		return nullptr;
+		return false;
 	}
+	function_name = StringValue::Get(name->second);
+	ParseStateParameters(parameters->second, types, constants);
+	return true;
+}
+
+} // namespace
+
+unique_ptr<ParsedExpression> ExportAggregateFunction::StateToSQL(const LogicalType &type,
+                                                                 unique_ptr<ParsedExpression> value) {
+	string function_name;
 	vector<LogicalType> types;
 	map<idx_t, Value> constants;
-	ParseStateParameters(parameters->second, types, constants);
+	if (!GetStateSignature(type, function_name, types, constants)) {
+		return nullptr;
+	}
+	auto info = type.GetExtensionInfo();
 	// Concrete TYPE values retain collations that the SQL type name alone cannot express.
 	// Canonical ANY arguments are signature markers, not SQL value types.
 	const bool has_any = std::find(types.begin(), types.end(), LogicalType::ANY) != types.end();
@@ -895,7 +907,7 @@ unique_ptr<ParsedExpression> ExportAggregateFunction::StateToSQL(const LogicalTy
 	}
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(std::move(value));
-	arguments.push_back(ConstantExpression::FromValue(name->second));
+	arguments.push_back(ConstantExpression::FromValue(Value(function_name)));
 	try {
 		arguments.push_back(ConstantExpression::FromValue(
 		    Value::LIST(has_any ? LogicalType::VARCHAR : LogicalType::TYPE(), std::move(signature))));
@@ -909,6 +921,35 @@ unique_ptr<ParsedExpression> ExportAggregateFunction::StateToSQL(const LogicalTy
 		arguments.push_back(ConstantExpression::FromValue(orders->second));
 	}
 	return make_uniq<FunctionExpression>(QualifiedName("system", "main", "to_aggregate_state"), std::move(arguments));
+}
+
+string ExportAggregateFunction::StateToString(const LogicalType &state_type) {
+	string function_name;
+	vector<LogicalType> types;
+	map<idx_t, Value> constants;
+	if (!GetStateSignature(state_type, function_name, types, constants)) {
+		return state_type.ToString();
+	}
+	vector<string> arguments;
+	for (idx_t i = 0; i < types.size(); i++) {
+		auto constant = constants.find(i);
+		arguments.push_back(constant == constants.end() ? types[i].ToString() : constant->second.ToSQLString());
+	}
+	auto result = function_name + "(" + StringUtil::Join(arguments, ", ");
+	auto info = state_type.GetExtensionInfo();
+	if (info->properties.find("order_bys") != info->properties.end()) {
+		vector<SortedAggregateStateOrder> orders;
+		GetSortedStateOrders(state_type, orders);
+		vector<string> keys;
+		for (auto &order : orders) {
+			keys.push_back(StringUtil::Format("column %llu %s", static_cast<uint64_t>(order.column),
+			                                  OrderModifierToString(order.order_type, order.null_order)));
+		}
+		// the buffer carries the sort key types and any user given column names, so it is part of the identity
+		return result + " ORDER BY " + StringUtil::Join(keys, ", ") + ") buffering " +
+		       ListType::GetChildType(state_type).ToString();
+	}
+	return result + ")";
 }
 
 void ExportAggregateFunction::GetSortedStateOrders(const LogicalType &state_type,

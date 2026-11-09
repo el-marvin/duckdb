@@ -75,7 +75,7 @@ SELECT finalize(combine_aggr(s)) FROM (
     UNION ALL
     SELECT approx_quantile(i, 0.5) EXPORT_STATE AS s FROM range(500, 1001) t(i)
     UNION ALL
-    SELECT approx_quantile(i, 0.5) EXPORT_STATE AS s FROM (SELECT 1 AS i WHERE false) t
+    SELECT approx_quantile(i, 0.5) EXPORT_STATE AS s FROM (SELECT 1::BIGINT AS i WHERE false) t
 ) t;
 ----
 500

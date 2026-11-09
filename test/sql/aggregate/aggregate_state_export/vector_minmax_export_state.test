@@ -93,7 +93,7 @@ query I
 SELECT finalize(combine_aggr(s)) FROM (
     SELECT min({'a': v}) EXPORT_STATE AS s FROM (VALUES (3)) t(v)
     UNION ALL
-    SELECT min({'a': v}) EXPORT_STATE AS s FROM (SELECT NULL::struct(a int) AS v WHERE false) t
+    SELECT min({'a': v}) EXPORT_STATE AS s FROM (SELECT NULL::INTEGER AS v WHERE false) t
 ) t;
 ----
 {'a': 3}

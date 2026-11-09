@@ -442,6 +442,10 @@ int64_t CastRules::ImplicitCast(const LogicalType &from, const LogicalType &to) 
 
 		return -1;
 	}
+	// there is no cast between the states of different aggregates (CastFunctionSet::GetCastFunction refuses it)
+	if (from.IsAggregateState() && from != to) {
+		return -1;
+	}
 	if (from.id() == LogicalTypeId::LIST && to.id() == LogicalTypeId::LIST) {
 		// Lists can be cast if their child types can be cast
 		auto child_cost = ImplicitCast(ListType::GetChildType(from), ListType::GetChildType(to));

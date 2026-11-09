@@ -6,6 +6,8 @@
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/types/type_map.hpp"
 #include "duckdb/function/cast_rules.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/function/scalar/generic_common.hpp"
 #include "duckdb/planner/collation_binding.hpp"
 #include "duckdb/main/config.hpp"
 
@@ -81,6 +83,13 @@ BoundCastInfo CastFunctionSet::GetCastFunction(const LogicalType &source, const 
 		BoundCastInfo result(DefaultCasts::NopCast);
 		result.SetStatisticsCallback(CastStatistics::Propagate);
 		return result;
+	}
+	// a state is read by the aggregate its type names, so relabeling it as the state of another aggregate is wrong
+	if (source.IsAggregateState() && target.IsAggregateState()) {
+		throw BinderException(Exception::InitializeExtraInfo(get_input.query_location),
+		                      StringUtil::Format("Cannot cast an aggregate state of %s to an aggregate state of %s",
+		                                         ExportAggregateFunction::StateToString(source),
+		                                         ExportAggregateFunction::StateToString(target)));
 	}
 	if (registration_probe) {
 		// VARIANT selects additional casts from runtime values.

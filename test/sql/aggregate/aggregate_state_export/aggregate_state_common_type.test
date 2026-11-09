@@ -1,0 +1,337 @@
+# name: test/sql/aggregate/aggregate_state_export/aggregate_state_common_type.test
+# description: Aggregate states of different aggregates have no common type and do not cast into each other
+# group: [aggregate_state_export]
+
+# avg over SMALLINT and over DECIMAL(4,2) share the layout STRUCT(count BIGINT, value BIGINT): 1.00 is stored as 100
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::SMALLINT) EXPORT_STATE st UNION ALL SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE st UNION ALL SELECT avg(1::SMALLINT) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(SMALLINT) to an aggregate state of avg(DECIMAL(4,2))
+
+statement error
+SELECT finalize(combine_aggr(st)) FROM (
+	SELECT avg(170141183460469231731687303715884105727::HUGEINT) EXPORT_STATE st
+	UNION ALL
+	SELECT avg(1::SMALLINT) EXPORT_STATE
+);
+----
+Cannot cast an aggregate state of avg(SMALLINT) to an aggregate state of avg(HUGEINT)
+
+# avg over INTEGER and over DECIMAL(9,0) both return DOUBLE, the argument types tell them apart
+statement error
+SELECT finalize(combine_aggr(st)) FROM (SELECT avg(1::INTEGER) EXPORT_STATE st UNION ALL SELECT avg(1::DECIMAL(9,0)) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(9,0)) to an aggregate state of avg(INTEGER)
+
+statement error
+SELECT finalize(combine_aggr(st)) FROM (SELECT avg(1::INTEGER) EXPORT_STATE st UNION ALL SELECT avg(1::BIGINT) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(BIGINT) to an aggregate state of avg(INTEGER)
+
+query I
+SELECT finalize(combine_aggr(st)) FROM (SELECT avg(1::BIGINT) EXPORT_STATE st UNION ALL SELECT avg(x::BIGINT) EXPORT_STATE FROM range(0) t(x));
+----
+1.0
+
+# an empty state of another argument type does not combine either
+statement error
+SELECT finalize(combine_aggr(s)) FROM (
+	SELECT approx_quantile(i, 0.5) EXPORT_STATE s FROM range(1, 1001) t(i)
+	UNION ALL
+	SELECT approx_quantile(i, 0.5) EXPORT_STATE FROM (SELECT 1 AS i WHERE false) t
+);
+----
+Cannot cast an aggregate state of approx_quantile(INTEGER, 0.5) to an aggregate state of approx_quantile(BIGINT, 0.5)
+
+query I
+SELECT finalize(combine_aggr(s)) FROM (
+	SELECT approx_quantile(i, 0.5) EXPORT_STATE s FROM range(1, 1001) t(i)
+	UNION ALL
+	SELECT approx_quantile(i, 0.5) EXPORT_STATE FROM (SELECT 1::BIGINT AS i WHERE false) t
+);
+----
+500
+
+statement error
+SELECT finalize(combine_aggr(s)) FROM (
+	SELECT min({'a': v}) EXPORT_STATE s FROM (VALUES (3)) t(v)
+	UNION ALL
+	SELECT min({'a': v}) EXPORT_STATE FROM (SELECT NULL::STRUCT(a INTEGER) AS v WHERE false) t
+);
+----
+Cannot cast an aggregate state of min(STRUCT(a STRUCT(a INTEGER))) to an aggregate state of min(STRUCT(a INTEGER))
+
+query I
+SELECT finalize(combine_aggr(s)) FROM (
+	SELECT min({'a': v}) EXPORT_STATE s FROM (VALUES (3)) t(v)
+	UNION ALL
+	SELECT min({'a': v}) EXPORT_STATE FROM (SELECT NULL::INTEGER AS v WHERE false) t
+);
+----
+{'a': 3}
+
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::DECIMAL(4,1)) EXPORT_STATE st UNION ALL SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(DECIMAL(4,1))
+
+# the other set operations
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::SMALLINT) EXPORT_STATE st UNION SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::SMALLINT) EXPORT_STATE st EXCEPT SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::SMALLINT) EXPORT_STATE st INTERSECT SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement error
+SELECT finalize(st) FROM (SELECT avg(1::SMALLINT) EXPORT_STATE st UNION ALL BY NAME SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE st);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement error
+SELECT s.st FROM (SELECT {'st': avg(1::SMALLINT) EXPORT_STATE} s UNION ALL SELECT {'st': avg(1::DECIMAL(4,2)) EXPORT_STATE});
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+# different aggregates with the same layout
+statement error
+SELECT finalize(combine_aggr(st)) FROM (SELECT min(1) EXPORT_STATE st UNION ALL SELECT max(5) EXPORT_STATE);
+----
+Cannot cast an aggregate state of max(INTEGER) to an aggregate state of min(INTEGER)
+
+statement error
+SELECT finalize(st) FROM (SELECT count(1) EXPORT_STATE st UNION ALL SELECT count_star() EXPORT_STATE);
+----
+Cannot cast an aggregate state of count_star() to an aggregate state of count(ANY)
+
+statement error
+SELECT finalize(st) FROM (SELECT sum(1) EXPORT_STATE st UNION ALL SELECT avg(5) EXPORT_STATE);
+----
+Cannot cast an aggregate state of sum(INTEGER) to an aggregate state of avg(INTEGER)
+
+# a constant argument and an ORDER BY are part of the state
+statement error
+SELECT finalize(combine_aggr(st)) FROM (SELECT string_agg('a', ',') EXPORT_STATE st UNION ALL SELECT string_agg('b', '|') EXPORT_STATE);
+----
+Cannot cast an aggregate state of string_agg(VARCHAR, '|') to an aggregate state of string_agg(VARCHAR, ',')
+
+statement error
+SELECT finalize(combine_aggr(st)) FROM (
+	SELECT list(x ORDER BY x DESC) EXPORT_STATE st FROM range(3) t(x)
+	UNION ALL
+	SELECT list(x ORDER BY x) EXPORT_STATE FROM range(3) t(x)
+);
+----
+Cannot cast an aggregate state of list(BIGINT ORDER BY column 0 ASCENDING NULLS LAST) buffering STRUCT(v0 BIGINT) to an aggregate state of list(BIGINT ORDER BY column 0 DESCENDING NULLS LAST) buffering STRUCT(v0 BIGINT)
+
+# the type of a sort key that is not an argument is part of the state as well
+statement error
+SELECT finalize(combine_aggr(s)) FROM (
+	SELECT list(x ORDER BY y) EXPORT_STATE s FROM (VALUES (1::BIGINT, 2::BIGINT)) t(x, y)
+	UNION ALL
+	SELECT list(x ORDER BY y) EXPORT_STATE FROM (VALUES (3::BIGINT, 1::INTEGER)) t(x, y)
+);
+----
+Cannot cast an aggregate state of list(BIGINT ORDER BY column 1 ASCENDING NULLS LAST) buffering STRUCT(v0 BIGINT, v1 INTEGER) to an aggregate state of list(BIGINT ORDER BY column 1 ASCENDING NULLS LAST) buffering STRUCT(v0 BIGINT, v1 BIGINT)
+
+query I
+SELECT finalize(combine_aggr(s)) FROM (
+	SELECT list(x ORDER BY y) EXPORT_STATE s FROM (VALUES (1::BIGINT, 2::BIGINT)) t(x, y)
+	UNION ALL
+	SELECT list(x ORDER BY y) EXPORT_STATE FROM (VALUES (3::BIGINT, 1::BIGINT)) t(x, y)
+);
+----
+[3, 1]
+
+statement error
+SELECT finalize(st) FROM (SELECT list(1 ORDER BY 1) EXPORT_STATE st UNION ALL SELECT list(2) EXPORT_STATE);
+----
+Cannot cast an aggregate state of list(INTEGER) to an aggregate state of list(INTEGER ORDER BY column 0 ASCENDING NULLS LAST) buffering STRUCT(v0 INTEGER)
+
+# expressions that need a common type
+statement error
+SELECT finalize(CASE WHEN true THEN avg(1::DECIMAL(4,2)) EXPORT_STATE ELSE avg(1::SMALLINT) EXPORT_STATE END);
+----
+Cannot mix values of type AGGREGATE_STATE and AGGREGATE_STATE in CASE expression
+
+statement error
+SELECT finalize(coalesce(avg(1::DECIMAL(4,2)) EXPORT_STATE, avg(1::SMALLINT) EXPORT_STATE));
+----
+Cannot mix values of type AGGREGATE_STATE and AGGREGATE_STATE in COALESCE operator
+
+statement error
+SELECT [avg(1::SMALLINT) EXPORT_STATE, avg(1::DECIMAL(4,2)) EXPORT_STATE];
+----
+No function matches the given name and argument types 'list_value(AGGREGATE_STATE, AGGREGATE_STATE)'
+
+# an equality comparison falls back to the left type, so the cast refuses it
+statement error
+SELECT avg(1::SMALLINT) EXPORT_STATE = avg(1::DECIMAL(4,2)) EXPORT_STATE;
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement error
+SELECT finalize(greatest(avg(1::SMALLINT) EXPORT_STATE, avg(1::DECIMAL(4,2)) EXPORT_STATE));
+----
+Cannot combine types of AGGREGATE_STATE and AGGREGATE_STATE
+
+statement error
+SELECT avg(1::SMALLINT) EXPORT_STATE < avg(1::DECIMAL(4,2)) EXPORT_STATE;
+----
+Cannot compare values of type AGGREGATE_STATE and type AGGREGATE_STATE
+
+statement error
+SELECT avg(1::SMALLINT) EXPORT_STATE IN (avg(1::DECIMAL(4,2)) EXPORT_STATE, avg(2::SMALLINT) EXPORT_STATE);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+# a state casts implicitly only into its own type, so a union picks the member of the same aggregate in any order
+query II
+SELECT can_cast_implicitly(avg(1::SMALLINT) EXPORT_STATE, avg(1::DECIMAL(4,2)) EXPORT_STATE),
+       can_cast_implicitly(avg(1::SMALLINT) EXPORT_STATE, avg(2::SMALLINT) EXPORT_STATE);
+----
+false	true
+
+query II
+WITH wide_first AS (
+	SELECT union_value(wide := avg(1::HUGEINT) EXPORT_STATE) u
+	UNION ALL
+	SELECT union_value(narrow := avg(1::SMALLINT) EXPORT_STATE)
+), narrow_first AS (
+	SELECT union_value(narrow := avg(1::SMALLINT) EXPORT_STATE) u
+	UNION ALL
+	SELECT union_value(wide := avg(1::HUGEINT) EXPORT_STATE)
+)
+SELECT union_tag(cast_to_type(avg(2::SMALLINT) EXPORT_STATE, (SELECT u FROM wide_first LIMIT 1))),
+       union_tag(cast_to_type(avg(2::SMALLINT) EXPORT_STATE, (SELECT u FROM narrow_first LIMIT 1)));
+----
+narrow	narrow
+
+statement error
+SELECT cast_to_type(avg(2::INTEGER) EXPORT_STATE, union_value(narrow := avg(1::SMALLINT) EXPORT_STATE));
+----
+AGGREGATE_STATE can't be implicitly cast to any of the union member types
+
+statement ok
+SET old_implicit_casting = true;
+
+statement error
+SELECT finalize(coalesce(avg(1::DECIMAL(4,2)) EXPORT_STATE, avg(1::SMALLINT) EXPORT_STATE));
+----
+Cannot cast an aggregate state of avg(SMALLINT) to an aggregate state of avg(DECIMAL(4,2))
+
+statement ok
+RESET old_implicit_casting;
+
+# a table column holds the states of one aggregate
+statement ok
+CREATE TABLE states AS SELECT avg(1::SMALLINT) EXPORT_STATE st;
+
+statement error
+INSERT INTO states SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE;
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+statement ok
+INSERT INTO states SELECT avg(x::SMALLINT) EXPORT_STATE FROM range(4) t(x);
+
+query II
+SELECT finalize(combine_aggr(st)), (SELECT avg(x::SMALLINT) FROM (VALUES (1), (0), (1), (2), (3)) t(x)) FROM states;
+----
+1.4	1.4
+
+# states of one aggregate and argument type still combine, including the exact finalizer over wide sums
+query I
+SELECT finalize(combine_aggr(st)) FROM (
+	SELECT avg(85070591730234625310576617597232480257::HUGEINT) EXPORT_STATE st
+	UNION ALL
+	SELECT avg(x::HUGEINT) EXPORT_STATE FROM range(0) t(x)
+);
+----
+8.507059173023463e+37
+
+query I
+SELECT finalize(combine_aggr(st)) FROM (
+	SELECT avg(0.0000000000000000000000049976::DECIMAL(38,28)) EXPORT_STATE st
+	UNION
+	SELECT avg(0.0000000000000000000000049976::DECIMAL(38,28)) EXPORT_STATE FROM range(2)
+);
+----
+4.9976e-24
+
+query IIIIII
+SELECT finalize(combine_aggr(s)), finalize(combine_aggr(i)), finalize(combine_aggr(b)), finalize(combine_aggr(h)),
+       finalize(combine_aggr(d)), finalize(combine_aggr(w))
+FROM (
+	SELECT avg(x::SMALLINT) EXPORT_STATE s, avg(x::INTEGER) EXPORT_STATE i, avg(x::BIGINT) EXPORT_STATE b,
+	       avg(x::HUGEINT) EXPORT_STATE h, avg(x::DECIMAL(4,2)) EXPORT_STATE d, avg(x::DECIMAL(38,10)) EXPORT_STATE w
+	FROM range(3) t(x)
+	UNION ALL
+	SELECT avg(x::SMALLINT) EXPORT_STATE, avg(x::INTEGER) EXPORT_STATE, avg(x::BIGINT) EXPORT_STATE,
+	       avg(x::HUGEINT) EXPORT_STATE, avg(x::DECIMAL(4,2)) EXPORT_STATE, avg(x::DECIMAL(38,10)) EXPORT_STATE
+	FROM range(3, 5) t(x)
+);
+----
+2.0	2.0	2.0	2.0	2.0	2.0
+
+query III
+SELECT finalize(CASE WHEN true THEN avg(1::DECIMAL(4,2)) EXPORT_STATE ELSE avg(3::DECIMAL(4,2)) EXPORT_STATE END),
+       finalize(coalesce(avg(2::DECIMAL(4,2)) EXPORT_STATE, avg(3::DECIMAL(4,2)) EXPORT_STATE)),
+       [finalize(x) for x in [avg(1::SMALLINT) EXPORT_STATE, avg(5::SMALLINT) EXPORT_STATE]];
+----
+1.0	2.0	[1.0, 5.0]
+
+query II
+SELECT avg(1::SMALLINT) EXPORT_STATE = avg(1::SMALLINT) EXPORT_STATE,
+       avg(1::SMALLINT) EXPORT_STATE IN (avg(2::SMALLINT) EXPORT_STATE, avg(3::SMALLINT) EXPORT_STATE);
+----
+true	false
+
+query I
+SELECT finalize(st) FROM (SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE st EXCEPT SELECT avg(2::DECIMAL(4,2)) EXPORT_STATE);
+----
+1.0
+
+query I
+SELECT finalize(st) FROM (SELECT avg(1::DECIMAL(4,2)) EXPORT_STATE st UNION ALL SELECT NULL) ORDER BY ALL;
+----
+1.0
+NULL
+
+# Parquet keeps the layout, to_aggregate_state gives the identity back
+require parquet
+
+statement ok
+COPY (SELECT avg(1::SMALLINT) EXPORT_STATE s, avg(1::DECIMAL(4,2)) EXPORT_STATE d) TO '{TEST_DIR}/avg_states.parquet';
+
+statement error
+SELECT finalize(st) FROM (
+	SELECT to_aggregate_state(s, 'avg', ['SMALLINT']) st FROM '{TEST_DIR}/avg_states.parquet'
+	UNION ALL
+	SELECT to_aggregate_state(d, 'avg', ['DECIMAL(4,2)']) FROM '{TEST_DIR}/avg_states.parquet'
+);
+----
+Cannot cast an aggregate state of avg(DECIMAL(4,2)) to an aggregate state of avg(SMALLINT)
+
+query II
+SELECT finalize(combine_aggr(st)), finalize(combine_aggr(st2)) FROM (
+	SELECT to_aggregate_state(d, 'avg', ['DECIMAL(4,2)']) st, to_aggregate_state(s, 'avg', ['SMALLINT']) st2
+	FROM '{TEST_DIR}/avg_states.parquet'
+	UNION ALL
+	SELECT avg(2::DECIMAL(4,2)) EXPORT_STATE, avg(2::SMALLINT) EXPORT_STATE
+);
+----
+1.5	1.5

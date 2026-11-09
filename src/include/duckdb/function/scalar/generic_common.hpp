@@ -35,6 +35,9 @@ struct ExportAggregateFunction {
 	static unique_ptr<ParsedExpression> StateToSQL(const LogicalType &type, unique_ptr<ParsedExpression> value);
 	//! The per-key (column, modifiers) of the AGGREGATE_STATE type of an ordered aggregate
 	static void GetSortedStateOrders(const LogicalType &state_type, vector<SortedAggregateStateOrder> &orders);
+	//! The aggregate an AGGREGATE_STATE type belongs to, rendered for messages as function(argument types), with the
+	//! ORDER BY and the buffer layout of an ordered aggregate
+	static string StateToString(const LogicalType &state_type);
 };
 
 } // namespace duckdb
