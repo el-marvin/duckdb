@@ -107,6 +107,12 @@
       "paths": [
         "test/sql/trigger/trigger_body_search_path.test"
       ]
+    },
+    {
+      "reason": "RESET search_path drops this config's USE of the attached database, so the statements after it read the in memory database.",
+      "paths": [
+        "test/sql/trigger/trigger_body_writer_scope.test"
+      ]
     }
   ]
 }
