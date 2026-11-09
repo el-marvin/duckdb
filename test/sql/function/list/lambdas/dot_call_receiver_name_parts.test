@@ -37,10 +37,16 @@ SELECT sc.ts.s.f.lower(), lower(sc.ts.s.f) FROM sc.ts;
 ----
 scf	scf
 
+statement ok
+ATTACH ':memory:' AS cat;
+
+statement ok
+CREATE TABLE cat.main.ts AS SELECT 'CK' AS k, {'f': 'CF'} AS s;
+
 query TTTT
-SELECT memory.main.ts.k.lower(), lower(memory.main.ts.k), memory.main.ts.s.f.lower(), lower(memory.main.ts.s.f) FROM ts;
+SELECT cat.main.ts.k.lower(), lower(cat.main.ts.k), cat.main.ts.s.f.lower(), lower(cat.main.ts.s.f) FROM cat.main.ts;
 ----
-k	k	abc	abc
+ck	ck	cf	cf
 
 query TT
 SELECT ts.s.f.lower().upper(), upper(lower(ts.s.f)) FROM ts;
@@ -129,8 +135,14 @@ CREATE SCHEMA ns.inner;
 statement ok
 CREATE MACRO ns.inner.twice(x) AS 2 * x;
 
+statement ok
+CREATE SCHEMA cat.ns;
+
+statement ok
+CREATE MACRO cat.ns.twice(x) AS 2 * x;
+
 query II
-SELECT ns.inner.twice(4), memory.ns.inner.twice(4);
+SELECT ns.inner.twice(4), cat.ns.twice(4);
 ----
 8	8
 
