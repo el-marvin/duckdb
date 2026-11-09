@@ -55,7 +55,8 @@
         "test/sql/pivot/pivot_identical_aggregates_names.test",
         "test/sql/pivot/pivot_value_collisions.test",
         "test/sql/pivot/pivot_aggregate_filter.test",
-        "test/sql/pivot/pivot_value_group_name_clash.test"
+        "test/sql/pivot/pivot_value_group_name_clash.test",
+        "test/sql/parser/parsed_expression_equality.test"
       ]
     },
     {
