@@ -42,15 +42,15 @@ ErrorData::ErrorData(const string &message)
 		return;
 	}
 
-	// JSON-formatted message.
+	// JSON-formatted message. The parsed values are moved, not copied: the error may be that memory ran out.
 	auto info = StringUtil::ParseJSONMap(message);
 	for (auto &entry : info) {
 		if (entry.first == "exception_type") {
 			type = Exception::StringToExceptionType(entry.second);
 		} else if (entry.first == "exception_message") {
-			raw_message = SanitizeErrorMessage(entry.second);
+			raw_message = SanitizeErrorMessage(std::move(entry.second));
 		} else {
-			extra_info[entry.first] = entry.second;
+			extra_info[entry.first] = std::move(entry.second);
 		}
 	}
 	final_message = ConstructFinalMessage();
@@ -125,8 +125,9 @@ void ErrorData::ConvertErrorToJSON() {
 		// empty or already JSON
 		return;
 	}
-	raw_message = StringUtil::ExceptionToJSONMap(type, raw_message, extra_info);
-	final_message = raw_message;
+	auto json = StringUtil::ExceptionToJSONMap(type, raw_message, extra_info);
+	final_message = json;
+	raw_message = std::move(json);
 }
 
 void ErrorData::FinalizeError() {

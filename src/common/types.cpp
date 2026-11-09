@@ -30,6 +30,7 @@
 #include "duckdb/common/serializer/deserializer.hpp"
 
 #include <cmath>
+#include <new>
 #include "duckdb/common/types/geometry.hpp"
 
 namespace duckdb {
@@ -1430,6 +1431,8 @@ void LogicalType::Serialize(Serializer &serializer) const {
 		} catch (const OutOfMemoryException &) {
 			// binding allocates, and a failure to allocate is not a failure to bind: falling back here reports it
 			// as "Cannot serialize non-constant type parameter", which says nothing about what went wrong
+			throw;
+		} catch (const std::bad_alloc &) {
 			throw;
 		} catch (const InterruptException &) {
 			throw;

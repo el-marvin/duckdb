@@ -17,6 +17,8 @@
 #include "duckdb/storage/external_file_cache/external_file_cache.hpp"
 #include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
 
+#include <new>
+
 namespace duckdb {
 
 // Forward declaration.
@@ -42,6 +44,7 @@ BufferHandle AllocateUncachedReadBuffer(BufferManager &buffer_manager, idx_t siz
 				buffer = buffer_manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, capacity - header_size);
 			} catch (const OutOfMemoryException &) {
 				// Concurrent allocations may have consumed the headroom.
+			} catch (const std::bad_alloc &) {
 			}
 		}
 	}

@@ -56,6 +56,8 @@
 #include "duckdb/parser/statement/transaction_statement.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 
+#include <new>
+
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 
@@ -229,11 +231,18 @@ void ClientContext::Destroy() {
 }
 
 void ClientContext::ProcessError(ErrorData &error, const string &query) const {
-	error.FinalizeError();
-	if (Settings::Get<ErrorsAsJSONSetting>(*this)) {
-		error.ConvertErrorToJSON();
-	} else {
-		error.AddErrorLocation(query);
+	const auto as_json = Settings::Get<ErrorsAsJSONSetting>(*this);
+	try {
+		auto rendered = error;
+		rendered.FinalizeError();
+		if (as_json) {
+			rendered.ConvertErrorToJSON();
+		} else {
+			rendered.AddErrorLocation(query);
+		}
+		error = std::move(rendered);
+	} catch (const std::bad_alloc &) {
+		// Rendering needs memory the process does not have: report the error itself rather than the allocation failure.
 	}
 }
 

@@ -350,10 +350,12 @@ public:
 
 	//! JSON method that parses a { string: value } JSON blob into a flat key -> value map. Nested objects/arrays are
 	//! kept as their (re-serialized) JSON string value.
-	//! NOTE: this method is not efficient
 	//! NOTE: this method is used in Exception construction - as such it does NOT throw on invalid JSON, instead an
 	//! empty map is returned
 	DUCKDB_API static unordered_map<string, string> ParseJSONMap(const string &json, bool ignore_errors = false);
+	//! Reads the object of strings without whitespace that ExceptionToJSONMap and ToJSONMap write without a JSON
+	//! document, allocating only the strings of the result. Returns false, with an empty result, for any other input.
+	DUCKDB_API static bool TryParseFlatJSONMap(const string &json, unordered_map<string, string> &result);
 
 	//! JSON method that constructs a { string: value } JSON map
 	//! This is the inverse of ParseJSONMap

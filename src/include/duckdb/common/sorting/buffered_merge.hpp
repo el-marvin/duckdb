@@ -14,6 +14,8 @@
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
 
+#include <new>
+
 namespace duckdb {
 
 //! Scratch buffer for merging sorted runs: the merge is correct without it, so the allocation must never fail a sort.
@@ -37,8 +39,9 @@ public:
 				data = allocator.Allocate(keys * key_size);
 				count = keys;
 				return;
-			} catch (OutOfMemoryException &) {
+			} catch (const OutOfMemoryException &) {
 				// try a smaller buffer
+			} catch (const std::bad_alloc &) {
 			}
 		}
 	}

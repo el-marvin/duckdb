@@ -18,6 +18,8 @@
 #include "duckdb/storage/temporary_memory_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <new>
+
 namespace duckdb {
 
 RadixPartitionedHashTable::RadixPartitionedHashTable(GroupingSet &grouping_set_p, const GroupedAggregateData &op_p,
@@ -344,6 +346,7 @@ void RadixHTLocalSinkState::PrepareForSpill(RadixHTGlobalSinkState &gstate) {
 			ht->Resize(gstate.config.sink_capacity);
 		} catch (const OutOfMemoryException &) {
 			// Keep the existing table if the temporary replacement allocation cannot fit.
+		} catch (const std::bad_alloc &) {
 		}
 		spilling = true;
 	}

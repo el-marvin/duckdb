@@ -4,6 +4,8 @@
 #include "duckdb/common/helper.hpp"
 #include "yyjson.hpp"
 
+#include <new>
+
 using namespace duckdb_yyjson; // NOLINT
 
 namespace duckdb {
@@ -42,6 +44,21 @@ static yyjson_write_flag TranslateWriteFlags(JSONWriteFlags flags) {
 		result |= YYJSON_WRITE_PRETTY;
 	}
 	return result;
+}
+
+//! yyjson returns NULL from a creating call on valid inputs only when its pools cannot grow
+template <class T>
+static T *CheckAllocation(T *result) {
+	if (!result) {
+		throw std::bad_alloc();
+	}
+	return result;
+}
+
+//! Copies a buffer that yyjson allocated and frees it, also when the copy runs out of memory
+static string TakeWrittenJSON(char *json, size_t len) {
+	unique_ptr<char, void (*)(void *)> buffer(json, free);
+	return string(json, len);
 }
 
 //===--------------------------------------------------------------------===//
@@ -170,9 +187,7 @@ string JSONValue::ToString(JSONWriteFlags flags) const {
 		}
 		throw SerializationException("Failed to write JSON string");
 	}
-	string result(json, len);
-	free(json);
-	return result;
+	return TakeWrittenJSON(json, len);
 }
 
 //===--------------------------------------------------------------------===//
@@ -232,13 +247,15 @@ JSONValue JSONDocument::GetRoot() const {
 
 string JSONDocument::ToString(JSONWriteFlags flags) const {
 	size_t len;
-	auto json = yyjson_write(doc, TranslateWriteFlags(flags), &len);
+	yyjson_write_err write_error;
+	auto json = yyjson_write_opts(doc, TranslateWriteFlags(flags), nullptr, &len, &write_error);
 	if (!json) {
+		if (write_error.code == YYJSON_WRITE_ERROR_MEMORY_ALLOCATION) {
+			throw std::bad_alloc();
+		}
 		throw SerializationException("Failed to write JSON string");
 	}
-	string result(json, len);
-	free(json);
-	return result;
+	return TakeWrittenJSON(json, len);
 }
 
 //===--------------------------------------------------------------------===//
@@ -255,13 +272,13 @@ bool JSONMutableValue::IsValid() const {
 }
 
 void JSONMutableValue::Add(const string &key, JSONMutableValue value) {
-	auto key_val = yyjson_mut_strncpy(doc, key.c_str(), key.size());
+	auto key_val = CheckAllocation(yyjson_mut_strncpy(doc, key.c_str(), key.size()));
 	yyjson_mut_obj_add(val, key_val, value.val);
 }
 
 void JSONMutableValue::AddString(const string &key, const string &value) {
-	auto key_val = yyjson_mut_strncpy(doc, key.c_str(), key.size());
-	auto value_val = yyjson_mut_strncpy(doc, value.c_str(), value.size());
+	auto key_val = CheckAllocation(yyjson_mut_strncpy(doc, key.c_str(), key.size()));
+	auto value_val = CheckAllocation(yyjson_mut_strncpy(doc, value.c_str(), value.size()));
 	yyjson_mut_obj_add(val, key_val, value_val);
 }
 
@@ -270,14 +287,14 @@ void JSONMutableValue::Append(JSONMutableValue value) {
 }
 
 void JSONMutableValue::AppendString(const string &value) {
-	auto value_val = yyjson_mut_strncpy(doc, value.c_str(), value.size());
+	auto value_val = CheckAllocation(yyjson_mut_strncpy(doc, value.c_str(), value.size()));
 	yyjson_mut_arr_append(val, value_val);
 }
 
 //===--------------------------------------------------------------------===//
 // JSONWriter
 //===--------------------------------------------------------------------===//
-JSONWriter::JSONWriter() : doc(yyjson_mut_doc_new(nullptr)) {
+JSONWriter::JSONWriter() : doc(CheckAllocation(yyjson_mut_doc_new(nullptr))) {
 }
 
 JSONWriter::~JSONWriter() {
@@ -296,39 +313,42 @@ JSONWriter &JSONWriter::operator=(JSONWriter &&other) noexcept {
 }
 
 JSONMutableValue JSONWriter::CreateObject() {
-	return JSONMutableValue(doc, yyjson_mut_obj(doc));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_obj(doc)));
 }
 
 JSONMutableValue JSONWriter::CreateArray() {
-	return JSONMutableValue(doc, yyjson_mut_arr(doc));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_arr(doc)));
 }
 
 JSONMutableValue JSONWriter::CreateString(const string &value) {
-	return JSONMutableValue(doc, yyjson_mut_strncpy(doc, value.c_str(), value.size()));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_strncpy(doc, value.c_str(), value.size())));
 }
 
 JSONMutableValue JSONWriter::CreateNull() {
-	return JSONMutableValue(doc, yyjson_mut_null(doc));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_null(doc)));
 }
 
 JSONMutableValue JSONWriter::CreateBoolean(bool value) {
-	return JSONMutableValue(doc, yyjson_mut_bool(doc, value));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_bool(doc, value)));
 }
 
 JSONMutableValue JSONWriter::CreateUnsignedInteger(uint64_t value) {
-	return JSONMutableValue(doc, yyjson_mut_uint(doc, value));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_uint(doc, value)));
 }
 
 JSONMutableValue JSONWriter::CreateSignedInteger(int64_t value) {
-	return JSONMutableValue(doc, yyjson_mut_sint(doc, value));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_sint(doc, value)));
 }
 
 JSONMutableValue JSONWriter::CreateDouble(double value) {
-	return JSONMutableValue(doc, yyjson_mut_real(doc, value));
+	return JSONMutableValue(doc, CheckAllocation(yyjson_mut_real(doc, value)));
 }
 
 JSONMutableValue JSONWriter::CreateCopy(const JSONValue &value) {
-	return JSONMutableValue(doc, yyjson_val_mut_copy(doc, value.val));
+	if (!value.IsValid()) {
+		return JSONMutableValue(doc, nullptr);
+	}
+	return JSONMutableValue(doc, CheckAllocation(yyjson_val_mut_copy(doc, value.val)));
 }
 
 void JSONWriter::SetRoot(JSONMutableValue value) {
@@ -340,11 +360,12 @@ string JSONWriter::ToString(JSONWriteFlags flags) const {
 	size_t len;
 	auto json = yyjson_mut_write_opts(doc, TranslateWriteFlags(flags), nullptr, &len, &err);
 	if (!json) {
+		if (err.code == YYJSON_WRITE_ERROR_MEMORY_ALLOCATION) {
+			throw std::bad_alloc();
+		}
 		throw SerializationException("Failed to write JSON string: %s", err.msg);
 	}
-	string result(json, len);
-	free(json);
-	return result;
+	return TakeWrittenJSON(json, len);
 }
 
 } // namespace duckdb

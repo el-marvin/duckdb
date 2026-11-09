@@ -5,6 +5,8 @@
 #include "duckdb/execution/radix_ht_sink_state.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <new>
+
 namespace duckdb {
 
 bool RadixHTAdaptivity::TryGrow(RadixHTGlobalSinkState &gstate, RadixHTLocalSinkState &lstate) {
@@ -70,6 +72,9 @@ bool RadixHTAdaptivity::TryGrow(RadixHTGlobalSinkState &gstate, RadixHTLocalSink
 		ht.Resize(next_capacity);
 	} catch (const OutOfMemoryException &) {
 		// Other operators may consume the reservation before the allocation succeeds.
+		ht.EnableHLL(false);
+		return false;
+	} catch (const std::bad_alloc &) {
 		ht.EnableHLL(false);
 		return false;
 	}

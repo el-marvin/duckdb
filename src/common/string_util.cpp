@@ -859,9 +859,128 @@ static string JSONValueToString(const string &json, JSONValue value) {
 	}
 }
 
+//! Reads the JSON string at pos, appending its bytes to result unless result is null. Accepts the escapes that
+//! WriteJSONString writes, \/ and any \u00XX below 0x80; returns false for anything else.
+static bool ReadFlatJSONString(const string &json, idx_t &pos, idx_t &length, string *result) {
+	if (pos >= json.size() || json[pos] != '"') {
+		return false;
+	}
+	pos++;
+	length = 0;
+	while (pos < json.size()) {
+		auto c = json[pos++];
+		if (c == '"') {
+			return true;
+		}
+		if (static_cast<unsigned char>(c) < 0x20) {
+			return false;
+		}
+		if (c == '\\') {
+			if (pos >= json.size()) {
+				return false;
+			}
+			switch (json[pos++]) {
+			case '"':
+				c = '"';
+				break;
+			case '\\':
+				c = '\\';
+				break;
+			case '/':
+				c = '/';
+				break;
+			case 'b':
+				c = '\b';
+				break;
+			case 'f':
+				c = '\f';
+				break;
+			case 'n':
+				c = '\n';
+				break;
+			case 'r':
+				c = '\r';
+				break;
+			case 't':
+				c = '\t';
+				break;
+			case 'u': {
+				if (pos + 4 > json.size() || json[pos] != '0' || json[pos + 1] != '0' ||
+				    !StringUtil::CharacterIsHex(json[pos + 2]) || !StringUtil::CharacterIsHex(json[pos + 3]) ||
+				    StringUtil::GetHexValue(json[pos + 2]) > 7) {
+					return false;
+				}
+				c = static_cast<char>(StringUtil::GetHexValue(json[pos + 2]) << 4 |
+				                      StringUtil::GetHexValue(json[pos + 3]));
+				pos += 4;
+				break;
+			}
+			default:
+				return false;
+			}
+		}
+		length++;
+		if (result) {
+			*result += c;
+		}
+	}
+	return false;
+}
+
+static bool ReadFlatJSONString(const string &json, idx_t &pos, string &result) {
+	auto start = pos;
+	idx_t length = 0;
+	if (!ReadFlatJSONString(json, pos, length, nullptr)) {
+		return false;
+	}
+	result.reserve(length);
+	pos = start;
+	return ReadFlatJSONString(json, pos, length, &result);
+}
+
+static bool TryReadFlatJSONMap(const string &json, unordered_map<string, string> &result) {
+	idx_t pos = 0;
+	if (pos >= json.size() || json[pos++] != '{') {
+		return false;
+	}
+	if (pos < json.size() && json[pos] == '}') {
+		return pos + 1 == json.size();
+	}
+	while (true) {
+		string key;
+		string value;
+		if (!ReadFlatJSONString(json, pos, key) || pos >= json.size() || json[pos++] != ':' ||
+		    !ReadFlatJSONString(json, pos, value) || pos >= json.size()) {
+			return false;
+		}
+		result[std::move(key)] = std::move(value);
+		auto separator = json[pos++];
+		if (separator == '}') {
+			return pos == json.size();
+		}
+		if (separator != ',') {
+			return false;
+		}
+	}
+}
+
+bool StringUtil::TryParseFlatJSONMap(const string &json, unordered_map<string, string> &result) {
+	// A fresh map, as a map that held entries keeps its buckets, which changes the order its keys iterate in.
+	unordered_map<string, string> parsed;
+	if (!TryReadFlatJSONMap(json, parsed)) {
+		result = unordered_map<string, string>();
+		return false;
+	}
+	result = std::move(parsed);
+	return true;
+}
+
 unordered_map<string, string> StringUtil::ParseJSONMap(const string &json, bool ignore_errors) {
 	unordered_map<string, string> result;
 	if (json.empty()) {
+		return result;
+	}
+	if (TryParseFlatJSONMap(json, result)) {
 		return result;
 	}
 	JSONParseError error;

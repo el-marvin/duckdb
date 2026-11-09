@@ -150,7 +150,7 @@ public:
 	//! The root value of the document
 	JSONValue GetRoot() const;
 
-	//! Serialize the (immutable) document to a string
+	//! Serialize the (immutable) document to a string. Throws bad_alloc when memory runs out.
 	string ToString(JSONWriteFlags flags = JSONWriteFlags::NONE) const;
 
 private:
@@ -189,7 +189,8 @@ private:
 	duckdb_yyjson::yyjson_mut_val *val;
 };
 
-//! Builds a JSON document out of JSONMutableValues and serializes it to a string.
+//! Builds a JSON document out of JSONMutableValues and serializes it to a string. Every call that allocates throws
+//! bad_alloc when memory runs out, instead of leaving the value out of the document.
 class JSONWriter {
 public:
 	JSONWriter();

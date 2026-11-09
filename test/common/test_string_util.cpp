@@ -644,6 +644,20 @@ static string JSONWriterExceptionMap(ExceptionType type, const string &message,
 	return writer.ToString(JSONWriteFlags::ALLOW_INVALID_UNICODE);
 }
 
+//! The map a JSON document reads from an object whose values are all strings
+static bool JSONDocumentStringMap(const string &json, unordered_map<string, string> &result) {
+	JSONParseError error;
+	auto doc = JSONDocument::TryParse(json.c_str(), json.size(), error, JSONReadFlags::ALLOW_INVALID_UNICODE);
+	if (!doc || !doc->GetRoot().IsObject()) {
+		return false;
+	}
+	doc->GetRoot().IterateObject([&](const string &key, JSONValue value) {
+		REQUIRE(value.IsString());
+		result[key] = value.GetString();
+	});
+	return true;
+}
+
 TEST_CASE("Exception JSON is written as the JSON writer writes it", "[string_util]") {
 	string every_byte;
 	for (idx_t i = 0; i < 256; i++) {
@@ -670,6 +684,14 @@ TEST_CASE("Exception JSON is written as the JSON writer writes it", "[string_uti
 				REQUIRE(json == JSONWriterExceptionMap(type, message, extra_info));
 
 				auto parsed = StringUtil::ParseJSONMap(json);
+				unordered_map<string, string> expected;
+				REQUIRE(JSONDocumentStringMap(json, expected));
+				REQUIRE(parsed == expected);
+				unordered_map<string, string> flat;
+				REQUIRE(StringUtil::TryParseFlatJSONMap(json, flat));
+				REQUIRE(flat == expected);
+				REQUIRE(StringUtil::TryParseFlatJSONMap(StringUtil::ToJSONMap(extra_info), flat));
+				REQUIRE(flat == extra_info);
 				REQUIRE(parsed.size() == extra_info.size() + 2);
 				REQUIRE(parsed["exception_type"] == Exception::ExceptionTypeToString(type));
 				REQUIRE(parsed["exception_message"] == message);
@@ -679,4 +701,107 @@ TEST_CASE("Exception JSON is written as the JSON writer writes it", "[string_uti
 			}
 		}
 	}
+}
+
+TEST_CASE("A flat JSON map is read as the JSON document reads it", "[string_util]") {
+	// what the exception and map writers can write: read without a JSON document
+	duckdb::vector<string> flat = {"{}",
+	                               R"({"":""})",
+	                               R"({"a":"b"})",
+	                               R"({"a":"b","a":"c"})",
+	                               R"({"a\"b":"c\\d"})",
+	                               R"({"k":"\/ \b\f\n\r\t"})",
+	                               R"({"k":"A\u007f\u001F\u007F\u0000"})",
+	                               "{\"k\":\"h\xc3\xa9llo \xf0\x9d\x84\x9e\"}",
+	                               "{\"k\":\"invalid \xff\xfe \x80\"}"};
+	// valid JSON the writers do not write: read as a JSON document
+	duckdb::vector<string> document = {R"({"k":"\u00e9 \u20AC \uD834\uDD1E"})",
+	                                   R"({"k":"\u0080"})",
+	                                   R"({ "a" : "b" })",
+	                                   "{\"a\":\"b\"}\n",
+	                                   "{\"a\":\"x\ty\"}",
+	                                   string("{\"a\":\"x\0y\"}", 11)};
+	for (auto &json : flat) {
+		INFO(json);
+		unordered_map<string, string> expected;
+		REQUIRE(JSONDocumentStringMap(json, expected));
+		unordered_map<string, string> result;
+		REQUIRE(StringUtil::TryParseFlatJSONMap(json, result));
+		REQUIRE(result == expected);
+		REQUIRE(StringUtil::ParseJSONMap(json) == expected);
+	}
+	for (auto &json : document) {
+		INFO(json);
+		unordered_map<string, string> expected;
+		REQUIRE(JSONDocumentStringMap(json, expected));
+		unordered_map<string, string> result;
+		REQUIRE(!StringUtil::TryParseFlatJSONMap(json, result));
+		REQUIRE(result.empty());
+		REQUIRE(StringUtil::ParseJSONMap(json) == expected);
+	}
+	duckdb::vector<string> unreadable = {"{",
+	                                     R"({"a")",
+	                                     R"({"a":)",
+	                                     R"({"a":"b")",
+	                                     R"({"a":"b)",
+	                                     R"({"a":"b",})",
+	                                     R"({"a":"b"}x)",
+	                                     R"({"a":"b"}{"c":"d"})",
+	                                     R"({"a"})",
+	                                     R"({"a":"\x"})",
+	                                     R"({"a":"\u00"})",
+	                                     R"({"a":"\u00G0"})",
+	                                     R"(["a","b"])",
+	                                     R"("a")"};
+	for (auto &json : unreadable) {
+		INFO(json);
+		unordered_map<string, string> expected;
+		REQUIRE(!JSONDocumentStringMap(json, expected));
+		unordered_map<string, string> result;
+		REQUIRE(!StringUtil::TryParseFlatJSONMap(json, result));
+		REQUIRE(result.empty());
+		REQUIRE_THROWS_AS(StringUtil::ParseJSONMap(json), SerializationException);
+		REQUIRE(StringUtil::ParseJSONMap(json, true).empty());
+	}
+	auto decoded = StringUtil::ParseJSONMap(R"({"k":"A\u007f\u001F\u0000\/"})");
+	REQUIRE(decoded["k"] == string("A\x7f\x1f\0/", 5));
+}
+
+TEST_CASE("A JSON map that TryParseFlatJSONMap refuses late keeps the key order of a JSON document read",
+          "[string_util]") {
+	string json = "{";
+	for (idx_t i = 0; i < 200; i++) {
+		json += (i ? ",\"k" : "\"k") + to_string(i) + "\":\"v\"";
+	}
+	// the trailing newline makes TryParseFlatJSONMap refuse the object after it has read every key
+	json += "}\n";
+	unordered_map<string, string> expected;
+	REQUIRE(JSONDocumentStringMap(json, expected));
+	auto result = StringUtil::ParseJSONMap(json);
+	duckdb::vector<string> result_keys;
+	for (auto &entry : result) {
+		result_keys.push_back(entry.first);
+	}
+	duckdb::vector<string> expected_keys;
+	for (auto &entry : expected) {
+		expected_keys.push_back(entry.first);
+	}
+	REQUIRE(result_keys == expected_keys);
+
+	// a map that held entries before gets the key order of a fresh read too
+	unordered_map<string, string> reused;
+	REQUIRE(!StringUtil::TryParseFlatJSONMap(json, reused));
+	string small = R"({"a":"1","b":"2","c":"3"})";
+	REQUIRE(StringUtil::TryParseFlatJSONMap(json.substr(0, json.size() - 1), reused));
+	REQUIRE(StringUtil::TryParseFlatJSONMap(small, reused));
+	auto fresh = StringUtil::ParseJSONMap(small);
+	duckdb::vector<string> reused_keys;
+	for (auto &entry : reused) {
+		reused_keys.push_back(entry.first);
+	}
+	duckdb::vector<string> fresh_keys;
+	for (auto &entry : fresh) {
+		fresh_keys.push_back(entry.first);
+	}
+	REQUIRE(reused_keys == fresh_keys);
 }

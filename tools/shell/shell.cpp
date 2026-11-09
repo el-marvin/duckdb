@@ -70,6 +70,7 @@
 #include "shell_extension.hpp"
 #include <ctype.h>
 #include <algorithm>
+#include <new>
 
 #if !defined(_WIN32) && !defined(WIN32)
 #include <signal.h>
@@ -1672,21 +1673,39 @@ static string ErrorToJSON(const string &message) {
 }
 
 void ShellState::PrintDatabaseError(ErrorData error, const string &query) {
-	if (agent_mode_active) {
-		error.ConvertErrorToJSON();
-	} else {
-		error.AddErrorLocation(query);
+	try {
+		if (agent_mode_active) {
+			error.ConvertErrorToJSON();
+		} else {
+			error.AddErrorLocation(query);
+		}
+	} catch (const std::bad_alloc &) {
+		// Rendering needs memory the process does not have: print the error as it is.
+		Print(PrintOutput::STDERR, error.Message());
+		Print(PrintOutput::STDERR, "\n");
+		return;
 	}
 	PrintDatabaseError(error.Message());
 }
 
 void ShellState::PrintDatabaseError(const string &zErr) {
 	if (agent_mode_active) {
-		PrintF(PrintOutput::STDERR, "%s\n", ErrorToJSON(zErr).c_str());
+		string json;
+		try {
+			json = ErrorToJSON(zErr);
+		} catch (const std::bad_alloc &) {
+			// Rendering needs memory the process does not have: print the error as it is.
+			Print(PrintOutput::STDERR, zErr);
+			Print(PrintOutput::STDERR, "\n");
+			return;
+		}
+		Print(PrintOutput::STDERR, json);
+		Print(PrintOutput::STDERR, "\n");
 		return;
 	}
 	if (!HighlightErrors()) {
-		PrintF(PrintOutput::STDERR, "%s\n", zErr.c_str());
+		Print(PrintOutput::STDERR, zErr);
+		Print(PrintOutput::STDERR, "\n");
 		return;
 	}
 	// detect dark-light mode if we haven't yet
