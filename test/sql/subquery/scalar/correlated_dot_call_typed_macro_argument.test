@@ -1,0 +1,195 @@
+# name: test/sql/subquery/scalar/correlated_dot_call_typed_macro_argument.test
+# description: The overload probe of a typed macro reads a dot call receiver in its argument as a column, so an aggregate or a group key in the argument binds as its plain spelling does
+# group: [scalar]
+
+statement ok
+CREATE TABLE src(k INTEGER, g INTEGER, s STRUCT(f INTEGER), l INTEGER[]);
+
+statement ok
+INSERT INTO src VALUES (-1, 1, {'f': -10}, [-1, -2]), (2, 1, {'f': 20}, [3]), (-4, 2, {'f': -40}, [5]);
+
+statement ok
+CREATE MACRO mt_one(x BIGINT) AS TABLE SELECT x AS v;
+
+statement ok
+CREATE MACRO mt_t(x BIGINT) AS TABLE (SELECT 'bigint ' || x AS v), (x VARCHAR) AS TABLE (SELECT 'varchar ' || x AS v);
+
+statement ok
+CREATE MACRO mt_u(x) AS TABLE SELECT typeof(x) || ' ' || x AS v;
+
+statement ok
+CREATE MACRO ms_t(x BIGINT) AS 'bigint ' || x, (x VARCHAR) AS 'varchar ' || x;
+
+statement ok
+CREATE MACRO m_abs(x) AS abs(x);
+
+# the reported case: one typed overload, an aggregate over an outer column
+
+query II
+SELECT (SELECT v FROM mt_one(sum(k.abs())::BIGINT)), (SELECT v FROM mt_one(sum(abs(k))::BIGINT)) FROM src;
+----
+7	7
+
+# two typed overloads, picked by the argument's type
+
+query II
+SELECT (SELECT v FROM mt_t(sum(k.abs())::BIGINT)), (SELECT v FROM mt_t(sum(abs(k))::BIGINT)) FROM src;
+----
+bigint 7	bigint 7
+
+query II
+SELECT (SELECT v FROM mt_t(sum(k.abs())::VARCHAR)), (SELECT v FROM mt_t(sum(abs(k))::VARCHAR)) FROM src;
+----
+varchar 7	varchar 7
+
+# without a cast the sum is a HUGEINT, which casts implicitly to neither overload
+
+statement error
+SELECT (SELECT v FROM mt_t(sum(k.abs()))) FROM src;
+----
+Macro mt_t() does not support the supplied arguments
+
+statement error
+SELECT (SELECT v FROM mt_t(sum(abs(k)))) FROM src;
+----
+Macro mt_t() does not support the supplied arguments
+
+# an untyped table macro takes the same arguments without a probe
+
+query II
+SELECT (SELECT v FROM mt_u(sum(k.abs()))), (SELECT v FROM mt_u(sum(abs(k)))) FROM src;
+----
+HUGEINT 7	HUGEINT 7
+
+# receivers: a qualified column, a struct field, a nested dot call, a macro around a dot call, a dot call on a macro
+
+query II
+SELECT (SELECT v FROM mt_t(sum(src.k.abs())::BIGINT)), (SELECT v FROM mt_t(sum(abs(src.k))::BIGINT)) FROM src;
+----
+bigint 7	bigint 7
+
+query II
+SELECT (SELECT v FROM mt_t(sum(s.f.abs())::BIGINT)), (SELECT v FROM mt_t(sum(abs(s.f))::BIGINT)) FROM src;
+----
+bigint 70	bigint 70
+
+query II
+SELECT (SELECT v FROM mt_t(sum(k.abs().abs())::BIGINT)), (SELECT v FROM mt_t(sum(abs(abs(k)))::BIGINT)) FROM src;
+----
+bigint 7	bigint 7
+
+query II
+SELECT (SELECT v FROM mt_t(sum(m_abs(k.abs()))::BIGINT)), (SELECT v FROM mt_t(sum(m_abs(abs(k)))::BIGINT)) FROM src;
+----
+bigint 7	bigint 7
+
+query II
+SELECT (SELECT v FROM mt_t(sum(k.m_abs())::BIGINT)), (SELECT v FROM mt_t(sum(m_abs(k))::BIGINT)) FROM src;
+----
+bigint 7	bigint 7
+
+# a lambda in the argument reading its own parameter and an outer column as receivers
+
+query II
+SELECT (SELECT v FROM mt_t(sum(list_sum(list_transform(l, lambda e: e.abs() + k.abs())))::BIGINT)),
+       (SELECT v FROM mt_t(sum(list_sum(list_transform(l, lambda e: abs(e) + abs(k))))::BIGINT))
+FROM src;
+----
+bigint 19	bigint 19
+
+# a lambda parameter named like a VARCHAR column of the caller is the parameter
+
+statement ok
+CREATE TABLE sv(k VARCHAR, n INTEGER);
+
+statement ok
+INSERT INTO sv VALUES ('Ab', -1), ('cD', 2);
+
+query II
+SELECT (SELECT v FROM mt_t(list_transform([-5], lambda k: k.abs())[1])),
+       (SELECT v FROM mt_t(list_transform([-5], lambda k: abs(k))[1]))
+FROM sv;
+----
+bigint 5	bigint 5
+bigint 5	bigint 5
+
+# grouped callers: an aggregate argument, and a bare dot call matched to a group key
+
+query III
+SELECT g, (SELECT v FROM mt_t(sum(k.abs())::BIGINT)), (SELECT v FROM mt_t(sum(abs(k))::BIGINT)) FROM src GROUP BY g ORDER BY g;
+----
+1	bigint 3	bigint 3
+2	bigint 4	bigint 4
+
+query II
+SELECT (SELECT v FROM mt_t(k.abs())), (SELECT v FROM mt_t(abs(k))) FROM src GROUP BY abs(k) ORDER BY 1;
+----
+bigint 1	bigint 1
+bigint 2	bigint 2
+bigint 4	bigint 4
+
+query II
+SELECT (SELECT v FROM mt_t(k.lower())), (SELECT v FROM mt_t(lower(k))) FROM sv GROUP BY lower(k) ORDER BY 1;
+----
+varchar ab	varchar ab
+varchar cd	varchar cd
+
+query II
+SELECT (SELECT v FROM mt_t(max(k.lower()))), (SELECT v FROM mt_t(max(lower(k)))) FROM sv;
+----
+varchar cd	varchar cd
+
+# a named argument, and a lateral call outside a subquery
+
+query II
+SELECT (SELECT v FROM mt_t(x := sum(k.abs())::VARCHAR)), (SELECT v FROM mt_t(x := sum(abs(k))::VARCHAR)) FROM src;
+----
+varchar 7	varchar 7
+
+query II
+SELECT a.v, b.v FROM src, mt_t(k.abs()) a, mt_t(abs(k)) b ORDER BY a.v;
+----
+bigint 1	bigint 1
+bigint 2	bigint 2
+bigint 4	bigint 4
+
+# a typed scalar macro overload in a subquery select list and WHERE
+
+query II
+SELECT (SELECT ms_t(sum(k.abs())::VARCHAR)), (SELECT ms_t(sum(abs(k))::VARCHAR)) FROM src;
+----
+varchar 7	varchar 7
+
+query II
+SELECT (SELECT 1 WHERE ms_t(sum(k.abs())::VARCHAR) = 'varchar 7'), (SELECT 1 WHERE ms_t(sum(abs(k))::VARCHAR) = 'varchar 7') FROM src;
+----
+1	1
+
+query II
+SELECT (SELECT 1 FROM range(1) WHERE ms_t(k.abs()::VARCHAR) IS NOT NULL), (SELECT 1 FROM range(1) WHERE ms_t(abs(k)::VARCHAR) IS NOT NULL) FROM src GROUP BY abs(k);
+----
+1	1
+1	1
+1	1
+
+# a receiver that does not exist gives the binder's error in both spellings
+
+statement error
+SELECT (SELECT v FROM mt_one(sum(nope.abs())::BIGINT)) FROM src;
+----
+Referenced column "nope" not found
+
+statement error
+SELECT (SELECT v FROM mt_one(sum(abs(nope))::BIGINT)) FROM src;
+----
+Referenced column "nope" not found
+
+statement error
+SELECT v FROM src, mt_one(nope.abs()::BIGINT);
+----
+Referenced column "nope" not found
+
+statement error
+SELECT v FROM src, mt_one(abs(nope)::BIGINT);
+----
+Referenced column "nope" not found
