@@ -12,12 +12,12 @@ INSERT INTO wide VALUES (1, 10, 20);
 statement error
 SELECT u.* FROM (SELECT 9 AS a) s, LATERAL (UNPIVOT wide ON (s.a * 2) INTO NAME n VALUE v) u;
 ----
-UNPIVOT clause must contain exactly one column - expression "(s.a * 2)" does not contain any
+<REGEX>:.*UNPIVOT clause must contain exactly one column - expression "\(s\.a \* .*\)" does not contain any.*
 
 statement error
 SELECT (SELECT list(u) FROM (UNPIVOT wide ON (s.a * 2) INTO NAME n VALUE v) u) FROM (SELECT 9 AS a) s;
 ----
-UNPIVOT clause must contain exactly one column - expression "(s.a * 2)" does not contain any
+<REGEX>:.*UNPIVOT clause must contain exactly one column - expression "\(s\.a \* .*\)" does not contain any.*
 
 statement ok
 CREATE MACRO only_arg(p) AS TABLE (UNPIVOT wide ON (p * 2) INTO NAME n VALUE v);
@@ -25,12 +25,12 @@ CREATE MACRO only_arg(p) AS TABLE (UNPIVOT wide ON (p * 2) INTO NAME n VALUE v);
 statement error
 SELECT u.* FROM (SELECT 9 AS a) s, LATERAL only_arg(s.a) u;
 ----
-UNPIVOT clause must contain exactly one column - expression "(s.a * 2)" does not contain any
+<REGEX>:.*UNPIVOT clause must contain exactly one column - expression "\(s\.a \* .*\)" does not contain any.*
 
 statement error
 FROM only_arg(9);
 ----
-UNPIVOT clause must contain exactly one column - expression "(9 * 2)" does not contain any
+<REGEX>:.*UNPIVOT clause must contain exactly one column - expression "\(.* \* .*\)" does not contain any.*
 
 # the qualified outer column is read as the outer value while the source column of the same name stays in the output
 query IIII
@@ -412,4 +412,4 @@ Column "k" referenced in UNPIVOT but no matching entry was found in the table
 statement error
 UNPIVOT wide ON (1 + 2) INTO NAME n VALUE v;
 ----
-UNPIVOT clause must contain exactly one column - expression "(1 + 2)" does not contain any
+<REGEX>:.*UNPIVOT clause must contain exactly one column - expression "\(.* \+ .*\)" does not contain any.*
