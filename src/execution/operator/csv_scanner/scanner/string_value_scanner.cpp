@@ -856,7 +856,9 @@ void StringValueResult::InvalidateUnwrittenColumns(idx_t first_unwritten_col) {
 }
 
 bool StringValueResult::AddRowInternal() {
-	LinePosition current_line_start = {iterator.pos.buffer_idx, iterator.pos.buffer_pos, buffer_size};
+	// the iterator can sit one past the data of a last line, a position the parallel validator relies on
+	LinePosition current_line_start = {iterator.pos.buffer_idx, MinValue(iterator.pos.buffer_pos, buffer_size),
+	                                   buffer_size};
 	idx_t current_line_size = current_line_start - current_line_position.end;
 	current_line_position.begin = current_line_position.end;
 	current_line_position.end = current_line_start;
@@ -1525,10 +1527,16 @@ void StringValueScanner::ProcessOverBufferValue() {
 		}
 		j++;
 	}
-	bool skip_value = false;
-	if (result.projecting_columns) {
+	// a quote still open at the end of the file ends no value, the end of file branch reports it as unterminated
+	const bool unterminated_quote = states.IsQuotedCurrent() && cur_buffer_handle->is_last_buffer &&
+	                                iterator.pos.buffer_pos >= cur_buffer_handle->actual_size &&
+	                                state_machine->dialect_options.state_machine_options.strict_mode.GetValue();
+	bool skip_value = unterminated_quote;
+	if (!skip_value && result.projecting_columns) {
 		if (result.cur_col_id < result.number_of_columns && !result.projected_columns[result.cur_col_id]) {
-			result.cur_col_id++;
+			if (!result.comment || !over_buffer_string.empty()) {
+				result.cur_col_id++;
+			}
 			skip_value = true;
 		}
 	}
@@ -1648,6 +1656,9 @@ void StringValueScanner::ProcessOverBufferValue() {
 	if (states.IsCarriageReturn() &&
 	    state_machine->dialect_options.state_machine_options.new_line == NewLineIdentifier::CARRY_ON) {
 		result.last_position = {iterator.pos.buffer_idx, ++iterator.pos.buffer_pos + 1, result.buffer_size};
+	} else if (unterminated_quote) {
+		// the unterminated value is reported where it starts, which last_position still holds
+		++iterator.pos.buffer_pos;
 	} else {
 		result.last_position = {iterator.pos.buffer_idx, ++iterator.pos.buffer_pos, result.buffer_size};
 	}
@@ -1681,11 +1692,26 @@ StringValueScanner::MoveBufferResult StringValueScanner::TryMoveToNextBuffer() {
 	buffer_handle_ptr = nullptr;
 	// We do not care if it's a quoted new line on the last row of our file.
 	result.quoted_new_line = false;
+	const bool strict_mode = state_machine->dialect_options.state_machine_options.strict_mode.GetValue();
 	// This means we reached the end of the file, we must add a last line if there is any to be added
-	if (states.EmptyLine() || states.NewRow() || result.added_last_line || states.IsCurrentNewRow() ||
-	    states.IsNotSet()) {
-		if (result.cur_col_id == result.number_of_columns && !result.IsStateCurrent(CSVState::INVALID)) {
-			result.number_of_rows++;
+	if (states.IsQuotedCurrent() && strict_mode) {
+		// tested before added_last_line, which ProcessOverBufferValue also sets for an unterminated last value
+		LinePosition current_line_start = {iterator.pos.buffer_idx,
+		                                   MinValue(iterator.pos.buffer_pos, result.buffer_size), result.buffer_size};
+		result.current_line_position.begin = result.current_line_position.end;
+		result.current_line_position.end = current_line_start;
+		if (result.added_last_line) {
+			// ProcessOverBufferValue did not add the unterminated value and cleared result.quoted
+			result.current_errors.Insert(UNTERMINATED_QUOTES, result.cur_col_id, result.chunk_col_id,
+			                             result.last_position);
+		} else {
+			result.InvalidState(result);
+		}
+	} else if (states.EmptyLine() || states.NewRow() || result.added_last_line || states.IsCurrentNewRow() ||
+	           states.IsNotSet()) {
+		if (result.cur_col_id >= result.number_of_columns && !result.IsStateCurrent(CSVState::INVALID)) {
+			result.AddRowInternal();
+			lines_read++;
 		}
 		result.cur_col_id = 0;
 		result.chunk_col_id = 0;
@@ -1699,19 +1725,11 @@ StringValueScanner::MoveBufferResult StringValueScanner::TryMoveToNextBuffer() {
 			result.AddRow(result, previous_buffer_handle->actual_size);
 		}
 		lines_read++;
-	} else if (states.IsQuotedCurrent() &&
-	           state_machine->dialect_options.state_machine_options.strict_mode.GetValue()) {
-		// Unterminated quote
-		LinePosition current_line_start = {iterator.pos.buffer_idx, iterator.pos.buffer_pos, result.buffer_size};
-		result.current_line_position.begin = result.current_line_position.end;
-		result.current_line_position.end = current_line_start;
-		result.InvalidState(result);
 	} else {
 		if (result.IsCommentSet(result)) {
 			result.UnsetComment(result, iterator.pos.buffer_pos);
 		} else {
-			if (result.quoted && states.IsDelimiterBytes() &&
-			    state_machine->dialect_options.state_machine_options.strict_mode.GetValue()) {
+			if (result.quoted && states.IsDelimiterBytes() && strict_mode) {
 				result.current_errors.Insert(UNTERMINATED_QUOTES, result.cur_col_id, result.chunk_col_id,
 				                             result.last_position);
 			}
@@ -2020,25 +2038,19 @@ void StringValueScanner::FinishBoundaryScan(const bool moved) {
 	}
 	const bool found_error =
 	    result.current_errors.HasErrorType(UNTERMINATED_QUOTES) || result.current_errors.HasErrorType(INVALID_STATE);
-	auto chunk_col_id_before = result.chunk_col_id;
-	if (result.current_errors.HandleErrors(result)) {
-		result.InvalidateUnwrittenColumns(chunk_col_id_before);
-		result.number_of_rows++;
-	}
 	if (states.IsQuotedCurrent() && !found_error) {
 		if (state_machine->dialect_options.state_machine_options.strict_mode.GetValue()) {
-			// If we finish the execution of a buffer, and we end in a quoted state, it means we have unterminated
-			// quotes
+			// an unterminated quote joins the errors the line already has, so that the line takes one row
 			result.current_errors.Insert(UNTERMINATED_QUOTES, result.cur_col_id, result.chunk_col_id,
 			                             result.last_position);
-			chunk_col_id_before = result.chunk_col_id;
-			if (result.current_errors.HandleErrors(result)) {
-				result.InvalidateUnwrittenColumns(chunk_col_id_before);
-				result.number_of_rows++;
-			}
 		} else {
 			used_unstrictness = true;
 		}
+	}
+	const auto chunk_col_id_before = result.chunk_col_id;
+	if (result.current_errors.HandleErrors(result)) {
+		result.InvalidateUnwrittenColumns(chunk_col_id_before);
+		result.number_of_rows++;
 	}
 	if (!iterator.done) {
 		if (iterator.pos.buffer_pos >= iterator.GetEndPos() || iterator.pos.buffer_idx > iterator.GetBufferIdx() ||

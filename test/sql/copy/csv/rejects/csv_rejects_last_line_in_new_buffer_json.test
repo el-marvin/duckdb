@@ -1,0 +1,44 @@
+# name: test/sql/copy/csv/rejects/csv_rejects_last_line_in_new_buffer_json.test
+# description: An invalid UTF-8 last line that starts a new buffer is rejected once when read into a JSON column
+# group: [rejects]
+
+require skip_reload
+
+require json
+
+# the buffer size puts the last line at the start of the last buffer, which depends on the exact bytes of the file
+require notwindows
+
+query I
+SELECT j FROM read_csv('{DATA_DIR}/csv/rejects/last_line/invalid_utf8.csv', columns={'j': 'JSON'}, auto_detect=false,
+    buffer_size=6, delim=NULL, store_rejects=true);
+----
+1
+2
+3
+
+query IIIIIII
+SELECT line, line_byte_position, byte_position, column_idx, column_name, error_type, csv_line FROM reject_errors
+ORDER BY ALL;
+----
+4	7	7	1	j	INVALID ENCODING	?
+
+statement ok
+DROP TABLE reject_errors;
+
+statement ok
+DROP TABLE reject_scans;
+
+# a JSON value with an unterminated quote is not parsed, so it adds no cast error of its own
+query I
+SELECT j FROM read_csv('{DATA_DIR}/csv/rejects/last_line/unterminated_quote.csv', columns={'j': 'JSON'},
+    auto_detect=false, buffer_size=6, store_rejects=true);
+----
+1
+2
+3
+
+query IIII
+SELECT line, line_byte_position, error_type, csv_line FROM reject_errors ORDER BY ALL;
+----
+4	7	UNQUOTED VALUE	"abc
