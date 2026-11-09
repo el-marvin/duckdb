@@ -111,6 +111,8 @@ struct ICUMakeTimestampTZFunc : public ICUDateFunc {
 		const auto millis = int32_t(ss);
 		int64_t micros = LossyNumericCast<int64_t, double>(std::round((ss - millis) * Interval::MICROS_PER_MSEC));
 
+		// The year is read in the era the calendar took from its creation instant, so only a failure is dropped
+		calendar->ClearFailure();
 		calendar->Set(CAL_YEAR, year);
 		calendar->Set(CAL_MONTH, month);
 		calendar->Set(CAL_DATE, day);

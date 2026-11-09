@@ -88,6 +88,8 @@ public:
 	virtual void SetTime(int64_t millis) = 0;
 	//! Unsets all fields and drops any failure, so that the time is computed from the fields set afterwards alone
 	virtual void Clear() = 0;
+	//! Starts a new operation, which is not affected by whatever went wrong before it; the fields stay
+	virtual void ClearFailure() = 0;
 	//! Whether a day its month lacks (see HandleHasMonth) moves into the next month, the default, or fails
 	virtual void SetLenientDays(bool lenient) = 0;
 	//! The instant that the calendar is set to, computing it from the fields if needed
@@ -100,7 +102,7 @@ public:
 	virtual void Set(CalendarField field, int32_t value) = 0;
 	//! Adds an amount to a field, keeping the wall clock time invariant for date fields.
 	//! Several adds make up one operation, so a failure in any of them is kept until the
-	//! next call to SetTime or Clear rather than being cleared by the add that follows it.
+	//! next operation starts rather than being cleared by the add that follows it.
 	virtual void Add(CalendarField field, int32_t amount) = 0;
 	//! The number of times the field has to be incremented to reach the target instant
 	virtual int32_t FieldDifference(int64_t target, CalendarField field) = 0;
@@ -137,6 +139,9 @@ public:
 
 	void SetTime(int64_t millis) override;
 	void Clear() override;
+	void ClearFailure() override {
+		failed = false;
+	}
 	void SetLenientDays(bool lenient) override {
 		lenient_days = lenient;
 	}
@@ -234,10 +239,6 @@ protected:
 	}
 	bool HasFailedInternal() const {
 		return failed;
-	}
-	//! Starts a new operation, which is not affected by whatever went wrong before it
-	void ClearFailure() {
-		failed = false;
 	}
 
 	//! Arithmetic that reports whether the result no longer fits, which the field resolution

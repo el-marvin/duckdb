@@ -1,0 +1,107 @@
+# name: test/sql/function/timestamp/test_icu_make_timestamptz_failed_row.test
+# description: A row that make_timestamptz cannot compute does not fail the rows after it
+# group: [timestamp]
+
+require icu
+
+statement ok
+SET Calendar = 'gregorian';
+
+statement ok
+SET TimeZone = 'UTC';
+
+statement error
+SELECT make_timestamptz(2023, 1, 2147483647, 0, 0, 0);
+----
+Conversion Error: ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(2147483647, 1, 1, 0, 0, 0);
+----
+Conversion Error: ICU date overflows timestamp range
+
+query II
+SELECT d, has_error(make_timestamptz(2023, 1, d, 0, 0, 0))
+FROM (VALUES (1, 2147483647), (2, 1), (3, 2)) v(i, d)
+ORDER BY i;
+----
+2147483647	true
+1	false
+2	false
+
+query III
+SELECT y, d, TRY(make_timestamptz(y, 1, d, 0, 0, 0))
+FROM (VALUES (1, 2023, 2147483647), (2, 2023, 1), (3, 2147483647, 1), (4, 2023, 2), (5, 2023, 2147483647), (6, 2023, 2147483647), (7, 2024, 3)) v(i, y, d)
+ORDER BY i;
+----
+2023	2147483647	NULL
+2023	1	2023-01-01 00:00:00+00
+2147483647	1	NULL
+2023	2	2023-01-02 00:00:00+00
+2023	2147483647	NULL
+2023	2147483647	NULL
+2024	3	2024-01-03 00:00:00+00
+
+# Duplicates of a failing row across several vectors, with NULL arguments between
+query IIII
+SELECT count(*), count(t), min(t), max(t) FROM (
+	SELECT TRY(make_timestamptz(2023, 1, CASE i % 3 WHEN 0 THEN 2147483647 WHEN 1 THEN 1 ELSE NULL END, 0, 0, 0)) t
+	FROM range(5000) r(i)
+);
+----
+5000	1667	2023-01-01 00:00:00+00	2023-01-01 00:00:00+00
+
+# The constant and the per row zone argument use cached zone calendars
+query II
+SELECT d, TRY(make_timestamptz(2023, 7, d, 12, 0, 0, 'Europe/Amsterdam'))
+FROM (VALUES (1, 2147483647), (2, 1)) v(i, d)
+ORDER BY i;
+----
+2147483647	NULL
+1	2023-07-01 10:00:00+00
+
+query III
+SELECT tz, d, TRY(make_timestamptz(2023, 7, d, 12, 0, 0, tz))
+FROM (VALUES (1, 'Asia/Tokyo', 2147483647), (2, 'Asia/Tokyo', 1), (3, 'America/New_York', 2147483647), (4, 'America/New_York', 1), (5, 'Asia/Tokyo', 2)) v(i, tz, d)
+ORDER BY i;
+----
+Asia/Tokyo	2147483647	NULL
+Asia/Tokyo	1	2023-07-01 03:00:00+00
+America/New_York	2147483647	NULL
+America/New_York	1	2023-07-01 16:00:00+00
+Asia/Tokyo	2	2023-07-02 03:00:00+00
+
+# After a failing row the year is still read in the era of the current date, not in a default era: the Chinese
+# default after a cleared calendar is the first 60 year cycle.
+statement ok
+SET Calendar = 'chinese';
+
+query II
+SELECT d, date_part('era', TRY(make_timestamptz(30, 6, d, 0, 0, 0))) = date_part('era', now())
+FROM (VALUES (1, 2147483647), (2, 1)) v(i, d)
+ORDER BY i;
+----
+2147483647	NULL
+1	true
+
+statement ok
+SET Calendar = 'japanese';
+
+query II
+SELECT d, date_part('era', TRY(make_timestamptz(30, 6, d, 0, 0, 0))) = date_part('era', now())
+FROM (VALUES (1, 2147483647), (2, 1)) v(i, d)
+ORDER BY i;
+----
+2147483647	NULL
+1	true
+
+statement ok
+SET Calendar = 'hebrew';
+
+query II
+SELECT d, TRY(make_timestamptz(5784, 10, d, 12, 0, 0)) = TIMESTAMPTZ '2024-07-01 12:00:00+00'
+FROM (VALUES (1, 2147483647), (2, 25)) v(i, d)
+ORDER BY i;
+----
+2147483647	NULL
+25	true
