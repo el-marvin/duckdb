@@ -1,0 +1,253 @@
+# name: test/sql/match_recognize/test_match_recognize_nested_rows.test
+# description: MATCH_RECOGNIZE DEFINE conditions with a navigation or an aggregate read whole STRUCT, UNION and ARRAY values of a row
+# group: [match_recognize]
+
+# Each condition compares the value read with the row's own i, so a value read from another row fails.
+
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE t2 AS FROM (VALUES (1, {'f': 1}), (2, {'f': 2})) v(i, st);
+
+# a whole struct read next to a navigation
+query I
+FROM t2 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st IS NOT NULL AND FIRST(i) = 1);
+----
+2
+
+query I
+FROM t2 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st IS NOT NULL AND MATCH_NUMBER() = 1);
+----
+2
+
+# without a navigation, an aggregate or MATCH_NUMBER the condition is decided over the whole input at once
+query I
+FROM t2 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st IS NOT NULL);
+----
+2
+
+query I
+FROM t2 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st IS NOT NULL AND count(*) < 5);
+----
+2
+
+statement ok
+CREATE TABLE t3 AS SELECT
+    i,
+    {'f': i} AS st,
+    [i] AS l,
+    [i, i + 1]::BIGINT[2] AS a,
+    union_value(k := i)::UNION(k BIGINT, s VARCHAR) AS u,
+    {'g': {'h': i}} AS ns,
+    [{'f': i}] AS sl,
+    {'l': [i]} AS ls,
+    {'a': [i, i]::BIGINT[2]} AS sa
+FROM range(1, 4) r(i);
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st = {'f': i} AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st.f = i AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st = {'f': i} AND count(*) < 5);
+----
+3
+
+# the navigation and the aggregate read the struct themselves
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS FIRST(st) = {'f': 1});
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS FIRST(st) = {'f': 1} AND LAST(st) = st AND st = {'f': i});
+----
+3
+
+# PREV is computed below the matcher, which is the other way a navigation reads the struct
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS coalesce(PREV(st).f, 0) + 1 = st.f);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS max(st) = {'f': i});
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS l = [i] AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS a = [i, i + 1]::BIGINT[2] AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS FIRST(a) = [1, 2]::BIGINT[2] AND a[1] = i);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS u.k = i AND union_tag(u) = 'k' AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS ns = {'g': {'h': i}} AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS ns.g = {'h': i} AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS sl = [{'f': i}] AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS ls = {'l': [i]} AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS sa = {'a': [i, i]::BIGINT[2]} AND FIRST(i) = 1);
+----
+3
+
+query I
+FROM t3 MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS i > 0 AND FIRST(i) = 1);
+----
+3
+
+# without ORDER BY the rows come in any order, but all of them match
+query I
+FROM t3 MATCH_RECOGNIZE (MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st = {'f': i} AND FIRST(i) IS NOT NULL);
+----
+3
+
+query II
+FROM t3 MATCH_RECOGNIZE (PARTITION BY i % 2 ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st = {'f': i} AND FIRST(i) <= i) ORDER BY ALL;
+----
+0	1
+1	2
+
+# a NULL struct and a struct holding a NULL are told apart row by row
+statement ok
+CREATE TABLE tn AS FROM (VALUES (1, {'f': 1}, 1), (2, {'f': 2}, 2), (3, NULL, NULL), (4, {'f': NULL}, 4), (5, {'f': 5}, 5)) v(i, st, x);
+
+query III
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS fi, LAST(A.i) AS li PATTERN (A+) DEFINE A AS st IS NOT NULL AND FIRST(i) IS NOT NULL) ORDER BY fi;
+----
+2	1	2
+2	4	5
+
+query III
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS fi, LAST(A.i) AS li PATTERN (A+) DEFINE A AS st.f IS NOT NULL AND FIRST(i) IS NOT NULL) ORDER BY fi;
+----
+2	1	2
+1	5	5
+
+query III
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS fi, LAST(A.i) AS li PATTERN (A+) DEFINE A AS st IS NOT DISTINCT FROM {'f': NULL}::STRUCT(f INTEGER) AND count(*) > 0) ORDER BY fi;
+----
+1	4	4
+
+query I
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS (LAST(st) IS NULL) = (i = 3));
+----
+5
+
+query I
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS count(st) = count(*) - (i >= 3)::INT);
+----
+5
+
+query III
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS fi, LAST(A.i) AS li PATTERN (A+) DEFINE A AS PREV(st) IS NOT NULL) ORDER BY fi;
+----
+2	2	3
+1	5	5
+
+# PREV is computed below the matcher; the same over a column that is NULL where the struct is
+query III
+FROM tn MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS fi, LAST(A.i) AS li PATTERN (A+) DEFINE A AS PREV(x) IS NOT NULL) ORDER BY fi;
+----
+2	2	3
+1	5	5
+
+query II
+FROM (SELECT i, CASE WHEN i = 2 THEN NULL ELSE i::VARIANT END AS v FROM range(1, 4) r(i)) MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS fi PATTERN (A+) DEFINE A AS v IS NOT NULL AND FIRST(i) IS NOT NULL) ORDER BY fi;
+----
+1	1
+1	3
+
+# rows in several vectors, with a NULL struct every thousand rows
+statement ok
+CREATE TABLE big AS SELECT i, CASE WHEN i % 1000 = 999 THEN NULL ELSE {'f': i} END AS st FROM range(5000) r(i);
+
+query IIII
+SELECT count(*), sum(n), min(n), max(n) FROM big MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st = {'f': i} AND FIRST(i) >= 0);
+----
+5	4995	999	999
+
+query IIII
+SELECT count(*), sum(n), min(n), max(n) FROM big MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS max(st) = {'f': i});
+----
+5	4995	999	999
+
+query II
+SELECT count(*), sum(n) FROM big MATCH_RECOGNIZE (PARTITION BY i % 3 ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS st = {'f': i} AND FIRST(i) >= 0);
+----
+7	4995
+
+query II
+SELECT count(*), sum(n) FROM big MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS FIRST(st) = {'f': 0} AND (LAST(st) IS NULL) = (i % 1000 = 999));
+----
+1	5000
+
+# the same NULL rows in an ARRAY, a STRUCT and a scalar column, counted by aggregates that skip NULL
+statement ok
+CREATE TABLE b AS SELECT i,
+    CASE WHEN i % 997 = 5 THEN NULL ELSE [i % 7, i % 7]::BIGINT[2] END AS a,
+    CASE WHEN i % 997 = 5 THEN NULL ELSE {'f': i % 7} END AS st,
+    CASE WHEN i % 997 = 5 THEN NULL ELSE i % 7 END AS x
+FROM range(10000) r(i);
+
+query II
+SELECT count(*), sum(n) FROM b MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS count(a) = count(*) AND max(a) <= [6, 6]::BIGINT[2]);
+----
+12	9989
+
+query II
+SELECT count(*), sum(n) FROM b MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS count(st) = count(*));
+----
+12	9989
+
+query II
+SELECT count(*), sum(n) FROM b MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n PATTERN (A+) DEFINE A AS count(x) = count(*));
+----
+12	9989
+
+# the pattern gives rows back, so the aggregate over the variable folds earlier rows again
+query IIII
+SELECT count(*), sum(n), min(s), max(s) FROM b MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS s PATTERN (A+ B) DEFINE A AS count(A.st) = count(*) AND max(A.st) < {'f': 6}, B AS st IS NULL OR st = {'f': 6});
+----
+1434	9992	0	9989
+
+query IIII
+SELECT count(*), sum(n), min(s), max(s) FROM b MATCH_RECOGNIZE (ORDER BY i MEASURES count(*) AS n, FIRST(A.i) AS s PATTERN (A+ B) DEFINE A AS count(A.x) = count(*) AND max(A.x) < 6, B AS x IS NULL OR x = 6);
+----
+1434	9992	0	9989

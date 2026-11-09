@@ -890,26 +890,32 @@ private:
 		idx_t next_row = 0;
 	};
 
-	//! One row of one column of a cursor, read where it lies rather than copied out. The row is a
-	//! dictionary over the chunk the cursor holds, so stepping to another row of that chunk writes a
-	//! single index; seeking can replace the chunk, and a view whose chunk has moved is built again.
+	//! One row of one column of a cursor, read where it lies rather than copied out. Where the row is a
+	//! dictionary over the chunk the cursor holds, stepping to another row of that chunk writes a single
+	//! index; seeking can replace the chunk, and a view whose chunk has moved is built again.
 	struct CursorRow {
 		explicit CursorRow(const LogicalType &type) : view(type, 1U), flat(type, 1U) {
-			// the view is built over a chunk before it selects a row, so it starts on a row it has
-			one.set_index(0, 0);
 		}
 
 		Vector &Read(WindowCursor &cursor, idx_t field, idx_t row) {
-			const auto index = cursor.Seek(row);
+			const auto index = UnsafeNumericCast<sel_t>(cursor.Seek(row));
 			if (base != cursor.state.current_row_index) {
 				auto &source = cursor.chunk.data[field];
 				// a dictionary selects rows of a flat vector, so anything else is laid out flat first
-				auto &dictionary = source.GetVectorType() == VectorType::FLAT_VECTOR ? source : Flatten(source);
-				view.Dictionary(dictionary, dictionary.size(), one, 1);
+				dictionary = source.GetVectorType() == VectorType::FLAT_VECTOR ? &source : &Flatten(source);
 				base = cursor.state.current_row_index;
+				sel = nullptr;
+			}
+			if (sel) {
+				sel->set_index(0, index);
+				return view;
+			}
+			one.set_index(0, index);
+			view.Dictionary(*dictionary, dictionary->size(), one, 1);
+			// a struct or array slice is a copy of the row it selects rather than a dictionary
+			if (view.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
 				sel = &DictionaryVector::SelVector(view);
 			}
-			sel->set_index(0, UnsafeNumericCast<sel_t>(index));
 			return view;
 		}
 
@@ -919,12 +925,15 @@ private:
 			return flat;
 		}
 
-		//! The row itself, a one-entry dictionary over the cursor's chunk
+		//! The row itself, one row of the cursor's chunk
 		Vector view;
 		//! Where a chunk the dictionary cannot select from is laid out
 		Vector flat;
-		//! The entry the view selects, which the view holds its own copy of once it is built
+		//! The flat form of the chunk's column that the view selects from
+		optional_ptr<Vector> dictionary;
+		//! The entry the view selects, which a dictionary view shares
 		SelectionVector one {1};
+		//! The view's selection while it is a dictionary over the current chunk, null when it must be sliced again
 		optional_ptr<SelectionVector> sel;
 		//! The chunk the view was built over, so that a cursor moving off it is noticed
 		idx_t base = DConstants::INVALID_INDEX;
