@@ -1,0 +1,68 @@
+# name: test/sql/order/order_null_string_payload.test
+# description: ORDER BY, GROUP BY and their tuple data keep NULL strings NULL and the other strings intact, at top level, in a struct and in a list
+# group: [order]
+
+query II
+SELECT r, CASE WHEN r < 1 THEN 'a long string past the inline limit' END AS d FROM range(3) t(r) ORDER BY r
+----
+0	a long string past the inline limit
+1	NULL
+2	NULL
+
+query II
+SELECT r, CASE WHEN r % 3 = 0 THEN 'a long string past the inline limit' WHEN r % 3 = 1 THEN 'short' END AS d FROM range(6) t(r) ORDER BY r DESC
+----
+5	NULL
+4	short
+3	a long string past the inline limit
+2	NULL
+1	short
+0	a long string past the inline limit
+
+query II
+SELECT r, CASE WHEN r < 1 THEN {'i': 1, 's': 'a long string past the inline limit'}::STRUCT(i INTEGER, s VARCHAR) WHEN r < 3 THEN {'i': NULL, 's': NULL}::STRUCT(i INTEGER, s VARCHAR) WHEN r < 5 THEN NULL::STRUCT(i INTEGER, s VARCHAR) END AS d FROM range(6) t(r) ORDER BY r
+----
+0	{'i': 1, 's': a long string past the inline limit}
+1	{'i': NULL, 's': NULL}
+2	{'i': NULL, 's': NULL}
+3	NULL
+4	NULL
+5	NULL
+
+# three CASE branches over four vectors: a struct with a long string, a struct of NULL fields, a NULL struct
+query II
+SELECT r, CASE WHEN r < 1 THEN {'i': 1, 's': 'a long string past the inline limit'}::STRUCT(i INTEGER, s VARCHAR) WHEN r < 2049 THEN {'i': NULL, 's': NULL}::STRUCT(i INTEGER, s VARCHAR) WHEN r < 6161 THEN NULL::STRUCT(i INTEGER, s VARCHAR) END AS d FROM range(6161) t(r) ORDER BY r
+----
+12322 values hashing to fd33ff7b31bcbf90e2c92afc4aa7bb81
+
+query II
+SELECT r, CASE WHEN r < 1 THEN ['a long string past the inline limit', NULL, 'short'] WHEN r < 2 THEN [NULL] END AS d FROM range(3) t(r) ORDER BY r
+----
+0	[a long string past the inline limit, NULL, short]
+1	[NULL]
+2	NULL
+
+query I
+SELECT CASE WHEN r % 2 = 0 THEN 'a long string past the inline limit' END AS d FROM range(5) t(r) ORDER BY d NULLS FIRST
+----
+NULL
+NULL
+a long string past the inline limit
+a long string past the inline limit
+a long string past the inline limit
+
+query II
+SELECT CASE WHEN r % 2 = 0 THEN 'a long string past the inline limit' END AS d, count(*) FROM range(5) t(r) GROUP BY d ORDER BY d NULLS LAST
+----
+a long string past the inline limit	3
+NULL	2
+
+statement ok
+PREPARE nullable_payload AS SELECT r, CASE WHEN r < ? THEN {'i': ?, 's': ?}::STRUCT(i INTEGER, s VARCHAR) END AS d FROM range(3) t(r) ORDER BY r
+
+query II
+EXECUTE nullable_payload(1, 1, 'a long string past the inline limit')
+----
+0	{'i': 1, 's': a long string past the inline limit}
+1	NULL
+2	NULL

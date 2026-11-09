@@ -142,13 +142,15 @@ void ComputeStringHeapSizesInternal(idx_t *const heap_sizes, const UnifiedVector
 	const auto HAS_SOURCE_SEL = source_sel.IsSet();
 #endif
 
-	// Fully branchless loop
-	const auto null_string_size = StringHeapSize(NullValue<string_t>());
+	// The string of a NULL row may never have been written, so a NULL row reads this one instead of its own.
+	const auto null_string = NullValue<string_t>();
 	for (idx_t i = 0; i < append_count; i++) {
 		const auto append_idx = HAS_APPEND_SEL ? append_sel.get_index_unsafe(i) : i;
 		const auto source_idx = HAS_SOURCE_SEL ? source_sel.get_index_unsafe(append_idx) : append_idx;
 		const auto valid = ALL_VALID || source_validity.RowIsValidUnsafe(source_idx);
-		heap_sizes[i] += valid * StringHeapSize(source_data[source_idx]) + !valid * null_string_size;
+		// Indexing by the validity bit, rather than a conditional, keeps the loop free of branches.
+		const string_t *const candidates[] = {&null_string, source_data + source_idx};
+		heap_sizes[i] += StringHeapSize(*candidates[valid]);
 	}
 }
 

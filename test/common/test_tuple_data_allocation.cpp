@@ -3,7 +3,9 @@
 #include "duckdb/common/types/row/integer_partitioned_tuple_data.hpp"
 #include "duckdb/common/types/row/tuple_data_collection.hpp"
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/common/vector/vector_writer.hpp"
+#include "duckdb/storage/arena_allocator.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb {
@@ -231,4 +233,150 @@ TEST_CASE("Tuple data heap reclamation crosses chunks without heap references", 
 	}
 }
 
+//! Poisons the string slots of NULL rows, so that AddressSanitizer reports any read of them.
+struct PoisonedNullStrings {
+	vector<string_t *> slots;
+
+	void Poison(string_t &slot) {
+		slots.push_back(&slot);
+#ifdef DUCKDB_ARENA_ALLOCATOR_ASAN
+		__asan_poison_memory_region(&slot, sizeof(string_t));
+#endif
+	}
+	~PoisonedNullStrings() {
+#ifdef DUCKDB_ARENA_ALLOCATOR_ASAN
+		for (auto slot : slots) {
+			__asan_unpoison_memory_region(slot, sizeof(string_t));
+		}
+#endif
+	}
+};
+
+TEST_CASE("Tuple data heap sizes do not read the strings of NULL rows", "[tuple_data_allocation]") {
+	constexpr idx_t ROW_COUNT = 8;
+	if (STANDARD_VECTOR_SIZE < ROW_COUNT) {
+		return;
+	}
+	const string long_string(40, 'x');
+	auto is_null_row = [](idx_t row) {
+		return row % 2 == 1;
+	};
+	auto row_string = [&](idx_t row) {
+		return row % 4 == 0 ? long_string : string("short");
+	};
+	auto make_selection = [](const vector<idx_t> &rows) {
+		SelectionVector selection(rows.size());
+		for (idx_t i = 0; i < rows.size(); i++) {
+			selection.set_index(i, rows[i]);
+		}
+		return selection;
+	};
+	const vector<idx_t> dictionary_rows {7, 4, 1, 0, 3, 6};
+	const vector<idx_t> append_rows {5, 2, 0, 3};
+
+	const vector<string> shapes {
+	    "flat",         "append selection", "dictionary source", "append selection over dictionary source",
+	    "struct child", "null struct row",  "constant NULL"};
+	for (const auto &shape : shapes) {
+		DYNAMIC_SECTION(shape) {
+			DuckDB db(nullptr);
+			Connection con(db);
+			auto &buffer_manager = BufferManager::GetBufferManager(*con.context);
+			const auto is_struct = shape == "struct child" || shape == "null struct row";
+			const auto is_constant = shape == "constant NULL";
+			const auto has_dictionary = shape.find("dictionary") != string::npos;
+			const auto has_append_selection = shape.find("append selection") != string::npos;
+			const auto string_type = LogicalType::VARCHAR;
+			const auto column_type = is_struct ? LogicalType::STRUCT({{"s", string_type}}) : string_type;
+			DataChunk chunk;
+			chunk.Initialize(Allocator::DefaultAllocator(), {column_type});
+			PoisonedNullStrings poisoned;
+			if (is_constant) {
+				chunk.data[0].Reference(Value(string_type), count_t(ROW_COUNT));
+				auto constant_data = ConstantVector::GetData<string_t>(chunk.data[0]);
+				REQUIRE(constant_data);
+				poisoned.Poison(constant_data[0]);
+			} else {
+				if (is_struct) {
+					auto writer = FlatVector::Writer<VectorStructType<string_t>>(chunk.data[0], ROW_COUNT);
+					for (idx_t row = 0; row < ROW_COUNT; row++) {
+						if (is_null_row(row) && shape == "null struct row") {
+							writer.WriteNull();
+							continue;
+						}
+						writer.WriteValue([&](VectorWriter<string_t> &child) {
+							if (is_null_row(row)) {
+								child.WriteNull();
+							} else {
+								child.WriteValue(string_t(row_string(row)));
+							}
+						});
+					}
+				} else {
+					auto writer = FlatVector::Writer<string_t>(chunk.data[0], ROW_COUNT);
+					for (idx_t row = 0; row < ROW_COUNT; row++) {
+						if (is_null_row(row)) {
+							writer.WriteNull();
+						} else {
+							writer.WriteValue(string_t(row_string(row)));
+						}
+					}
+				}
+				auto &strings = is_struct ? StructVector::GetEntries(chunk.data[0])[0] : chunk.data[0];
+				auto string_data = FlatVector::GetDataMutable<string_t>(strings);
+				for (idx_t row = 0; row < ROW_COUNT; row++) {
+					if (is_null_row(row)) {
+						poisoned.Poison(string_data[row]);
+					}
+				}
+			}
+
+			vector<idx_t> appended_rows;
+			for (idx_t row = 0; row < ROW_COUNT; row++) {
+				appended_rows.push_back(row);
+			}
+			if (has_dictionary) {
+				chunk.data[0].Slice(make_selection(dictionary_rows), dictionary_rows.size());
+				appended_rows = dictionary_rows;
+			}
+			const auto append_selection = make_selection(append_rows);
+			if (has_append_selection) {
+				vector<idx_t> selected_rows;
+				for (auto append_row : append_rows) {
+					selected_rows.push_back(appended_rows[append_row]);
+				}
+				appended_rows = selected_rows;
+			}
+
+			auto layout = make_shared_ptr<TupleDataLayout>();
+			layout->Initialize({column_type}, TupleDataValidityType::CAN_HAVE_NULL_VALUES);
+			TupleDataCollection collection(buffer_manager, layout, MemoryTag::ORDER_BY);
+			TupleDataAppendState append_state;
+			collection.InitializeAppend(append_state, TupleDataPinProperties::KEEP_EVERYTHING_PINNED);
+			if (has_append_selection) {
+				collection.Append(append_state, chunk, append_selection, append_rows.size());
+			} else {
+				collection.Append(append_state, chunk);
+			}
+			collection.FinalizePinState(append_state.pin_state);
+			REQUIRE(collection.Count() == appended_rows.size());
+
+			DataChunk result;
+			result.Initialize(Allocator::DefaultAllocator(), {column_type});
+			TupleDataScanState scan_state;
+			collection.InitializeScan(scan_state);
+			REQUIRE(collection.Scan(scan_state, result));
+			REQUIRE(result.size() == appended_rows.size());
+			for (idx_t i = 0; i < appended_rows.size(); i++) {
+				const auto row = appended_rows[i];
+				Value expected(column_type);
+				if (!is_constant && (!is_null_row(row) || shape == "struct child")) {
+					const auto string_value = is_null_row(row) ? Value(string_type) : Value(row_string(row));
+					expected = is_struct ? Value::STRUCT({{"s", string_value}}) : string_value;
+				}
+				REQUIRE(Value::NotDistinctFrom(result.GetValue(0, i), expected));
+			}
+		}
+	}
+}
 } // namespace duckdb
