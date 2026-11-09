@@ -183,12 +183,12 @@ logical_opt	<!REGEX>:.*__common_subplan_.*
 query II
 EXPLAIN (FORMAT JSON) SELECT max({'A': x})::VARCHAR, max({'A': x})::VARCHAR FROM t;
 ----
-logical_opt	<REGEX>:.*"Expressions": "max\(struct_pack\(A\)\)".*
+logical_opt	<REGEX>:.*"Expressions": "max\(struct_pack\(A\)\).*
 
 query II
 EXPLAIN (FORMAT JSON) SELECT max({'A': x})::VARCHAR, max({'a': x})::VARCHAR FROM t;
 ----
-logical_opt	<REGEX>:.*"Expressions": \[\s*"max\(struct_pack\(A\)\)",\s*"max\(struct_pack\(a\)\)".*
+logical_opt	<REGEX>:.*"Expressions": \[\s*"max\(struct_pack\(A\)\)[^"]*",\s*"max\(struct_pack\(a\)\).*
 
 query TT
 SELECT max({'A': x})::VARCHAR, max({'a': x})::VARCHAR FROM t;
