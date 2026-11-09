@@ -1,0 +1,245 @@
+# name: test/sql/timezone/test_icu_calendar_failed_new_year.test
+# description: The Chinese and Korean calendars fail every time for a year whose new year cannot be computed
+# group: [timezone]
+
+require icu
+
+statement ok
+SET TimeZone='UTC'
+
+# The new year cache lives as long as the thread, so with one thread every query sees what the earlier ones stored.
+statement ok
+SET threads=1
+
+statement ok
+SET Calendar='chinese'
+
+statement ok
+CREATE TABLE valid_before AS SELECT make_timestamptz(40, 1, 1, 0, 0, 0) AS ts
+
+query III
+SELECT year(ts), month(ts), day(ts) FROM valid_before
+----
+40	1	1
+
+# month 2147483647 of year 2023 is a year past 178 million
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (2023, 2147483647)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (2023, 2147483647)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(2024, 2147483647, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(2024, 2147483647, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 1, 1, 0, 0, 0) FROM (VALUES (-5900000)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 1, 1, 0, 0, 0) FROM (VALUES (-5900000)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(-5900001, 1, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(-5900001, 1, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
+
+# the first year of the chinese calendar whose two solstices both lie past the last day that fits in 32 bits
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (1, 70555165)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (1, 70555165)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 2147483647, 1, 0, 0, 0, 'Asia/Shanghai') FROM (VALUES (2025)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 2147483647, 1, 0, 0, 0, 'Asia/Shanghai') FROM (VALUES (2025)) t(y)
+----
+ICU date overflows timestamp range
+
+query II
+SELECT i, TRY(make_timestamptz(y, m, 1, 0, 0, 0)) FROM (VALUES (1, 2026, 2147483647), (2, 2026, 2147483647)) v(i, y, m) ORDER BY i
+----
+1	NULL
+2	NULL
+
+query II
+SELECT i, TRY(make_timestamptz(y, m, 1, 0, 0, 0)) FROM (VALUES (1, 2026, 2147483647), (2, 2026, 2147483647)) v(i, y, m) ORDER BY i
+----
+1	NULL
+2	NULL
+
+query I
+SELECT TRY(make_timestamptz(-5900002, 1, 1, 0, 0, 0))
+----
+NULL
+
+query I
+SELECT TRY(make_timestamptz(-5900002, 1, 1, 0, 0, 0))
+----
+NULL
+
+query II
+SELECT i, has_error(make_timestamptz(y, m, 1, 0, 0, 0)) FROM (VALUES (1, 2027, 2147483647), (2, 2027, 2147483647)) v(i, y, m) ORDER BY i
+----
+1	true
+2	true
+
+query II
+SELECT i, has_error(make_timestamptz(y, m, 1, 0, 0, 0)) FROM (VALUES (1, 2027, 2147483647), (2, 2027, 2147483647)) v(i, y, m) ORDER BY i
+----
+1	true
+2	true
+
+query III
+SELECT year(ts), month(ts), day(ts) FROM (SELECT make_timestamptz(40, 1, 1, 0, 0, 0) AS ts) WHERE ts = (SELECT ts FROM valid_before)
+----
+40	1	1
+
+statement ok
+SET Calendar='dangi'
+
+statement ok
+CREATE TABLE dangi_before AS SELECT make_timestamptz(40, 1, 1, 0, 0, 0) AS ts
+
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (2023, 2147483647)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (2023, 2147483647)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(2024, 2147483647, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(2024, 2147483647, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 1, 1, 0, 0, 0) FROM (VALUES (-5900000)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 1, 1, 0, 0, 0) FROM (VALUES (-5900000)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 2147483647, 1, 0, 0, 0, 'Asia/Seoul') FROM (VALUES (2025)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 2147483647, 1, 0, 0, 0, 'Asia/Seoul') FROM (VALUES (2025)) t(y)
+----
+ICU date overflows timestamp range
+
+query I
+SELECT TRY(make_timestamptz(y, 2147483647, 1, 0, 0, 0)) FROM (VALUES (2026)) t(y)
+----
+NULL
+
+query I
+SELECT TRY(make_timestamptz(y, 2147483647, 1, 0, 0, 0)) FROM (VALUES (2026)) t(y)
+----
+NULL
+
+query I
+SELECT has_error(make_timestamptz(y, 2147483647, 1, 0, 0, 0)) FROM (VALUES (2027)) t(y)
+----
+true
+
+query I
+SELECT has_error(make_timestamptz(y, 2147483647, 1, 0, 0, 0)) FROM (VALUES (2027)) t(y)
+----
+true
+
+query III
+SELECT year(ts), month(ts), day(ts) FROM (SELECT make_timestamptz(40, 1, 1, 0, 0, 0) AS ts) WHERE ts = (SELECT ts FROM dangi_before)
+----
+40	1	1
+
+# several row groups, so that several threads compute the same failing year, each with its own cache
+statement ok
+SET threads=4
+
+statement ok
+SET Calendar='chinese'
+
+statement ok
+CREATE TABLE failing AS SELECT 2031 AS y FROM range(250000)
+
+query II
+SELECT count(*), count(TRY(make_timestamptz(y, 2147483647, 1, 0, 0, 0))) FROM failing
+----
+250000	0
+
+query II
+SELECT count(*), count(TRY(make_timestamptz(y, 2147483647, 1, 0, 0, 0))) FROM failing
+----
+250000	0
+
+statement ok
+SET threads=1
+
+# the observed islamic calendars cache month starts, from a computation that cannot fail
+statement ok
+SET Calendar='islamic'
+
+statement error
+SELECT make_timestamptz(y, 1, 1, 0, 0, 0) FROM (VALUES (178956970)) t(y)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(y, 1, 1, 0, 0, 0) FROM (VALUES (178956970)) t(y)
+----
+ICU date overflows timestamp range
+
+statement ok
+SET Calendar='gregorian'
+
+statement error
+SELECT make_timestamptz(y, m, 1, 0, 0, 0) FROM (VALUES (2023, 2147483647)) t(y, m)
+----
+ICU date overflows timestamp range
+
+statement error
+SELECT make_timestamptz(2023, 2147483647, 1, 0, 0, 0)
+----
+ICU date overflows timestamp range
