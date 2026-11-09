@@ -739,6 +739,83 @@ void ArrowTopLevelValidityExec(duckdb_v2_scalar_function_exec_info_handle info, 
 	}
 }
 
+struct InvalidUtf8Observed {
+	DUCKDB_V2_ERROR rc = DUCKDB_V2_ERROR_NONE;
+	std::string text;
+};
+InvalidUtf8Observed arrow_invalid_utf8_observed;
+
+void ArrowInvalidUtf8ReleaseSchema(ArrowSchema *schema) {
+	schema->release = nullptr;
+}
+
+void ArrowInvalidUtf8ReleaseArray(ArrowArray *array) {
+	array->release = nullptr;
+}
+
+void ArrowInvalidUtf8Exec(duckdb_v2_scalar_function_exec_info_handle info, duckdb_v2_context_handle context,
+                          duckdb_v2_error_info_handle *err) {
+	arrow_invalid_utf8_observed = {};
+	duckdb_v2_vector_handle result = nullptr;
+	if (duckdb_v2_scalar_function_exec_get_result(info, &result, err) != DUCKDB_V2_ERROR_NONE) {
+		return;
+	}
+	const int32_t offsets[] = {0, 2, 5};
+	const char data[] = "okab\xE2";
+	const void *buffers[] = {nullptr, offsets, data};
+	ArrowSchema child_schema {};
+	child_schema.format = "u";
+	child_schema.name = "a";
+	child_schema.release = ArrowInvalidUtf8ReleaseSchema;
+	ArrowSchema *schema_children[] = {&child_schema};
+	ArrowSchema schema {};
+	schema.format = "+s";
+	schema.name = "";
+	schema.n_children = 1;
+	schema.children = schema_children;
+	schema.release = ArrowInvalidUtf8ReleaseSchema;
+	ArrowArray child_array {};
+	child_array.length = 2;
+	child_array.n_buffers = 3;
+	child_array.buffers = buffers;
+	child_array.release = ArrowInvalidUtf8ReleaseArray;
+	ArrowArray *array_children[] = {&child_array};
+	const void *struct_buffers[] = {nullptr};
+	ArrowArray array {};
+	array.length = 2;
+	array.n_buffers = 1;
+	array.buffers = struct_buffers;
+	array.n_children = 1;
+	array.children = array_children;
+	array.release = ArrowInvalidUtf8ReleaseArray;
+
+	duckdb_v2_arrow_importer_handle importer = nullptr;
+	if (duckdb_v2_arrow_importer_create(context, &schema, 0, &importer, err) != DUCKDB_V2_ERROR_NONE) {
+		return;
+	}
+	duckdb_v2_error_info_handle import_err = nullptr;
+	auto rc = duckdb_v2_arrow_importer_append(importer, &array, false, true, &import_err);
+	if (rc == DUCKDB_V2_ERROR_NONE) {
+		duckdb_v2_data_chunk_handle chunk = nullptr;
+		rc = duckdb_v2_arrow_importer_next_chunk(importer, &chunk, &import_err);
+		duckdb_v2_data_chunk_destroy(&chunk);
+	}
+	arrow_invalid_utf8_observed.rc = rc;
+	if (import_err) {
+		const char *text = nullptr;
+		idx_t text_length = 0;
+		duckdb_v2_error_info_get_text(import_err, &text, &text_length);
+		arrow_invalid_utf8_observed.text.assign(text, text_length);
+		duckdb_v2_error_info_destroy(&import_err);
+	}
+	duckdb_v2_arrow_importer_destroy(&importer);
+	int32_t one = 1;
+	void *out = nullptr;
+	if (duckdb_v2_vector_get_data_mutable(result, &out, err) == DUCKDB_V2_ERROR_NONE) {
+		std::memcpy(out, &one, sizeof(one));
+	}
+}
+
 } // namespace
 
 // ===========================================================================
@@ -2057,6 +2134,16 @@ TEST_CASE("V2 arrow result: functions guard null arguments", "[capi_v2][arrow]")
 
 	REQUIRE(duckdb_v2_arrow_result_destroy(nullptr) == DUCKDB_V2_ERROR_NONE);
 	REQUIRE(duckdb_v2_arrow_result_destroy(&out) == DUCKDB_V2_ERROR_NONE);
+}
+
+TEST_CASE("V2 arrow: the importer rejects strings that are not valid UTF-8", "[capi_v2][arrow]") {
+	EnvFixture fx;
+	RegisterArrowProbe(fx, "arrow_invalid_utf8_probe", ArrowInvalidUtf8Exec);
+	RunArrowProbe(fx.conn, "SELECT arrow_invalid_utf8_probe(1)");
+	REQUIRE(arrow_invalid_utf8_observed.rc != DUCKDB_V2_ERROR_NONE);
+	REQUIRE_THAT(arrow_invalid_utf8_observed.text,
+	             Catch::Matchers::Contains(
+	                 "Invalid string encoding found in Arrow column \"a\": value \"ab\\xE2\" is not valid UTF8"));
 }
 
 } // namespace test_capi_v2

@@ -183,6 +183,7 @@ auto CV2ConvertArrowSlice(ClientContext &context, CV2ArrowImporter &importer, Ar
 		// The dictionary conversion requires a non-null owned_data to attach to its vectors. When
 		// there is no owner the chunk is materialized below, so an inert wrapper is enough.
 		array_state->owned_data = owner ? owner : duckdb::make_shared_ptr<duckdb::ArrowArrayWrapper>();
+		array_state->column_name = importer.table.GetNames()[i];
 		switch (arrow_type->GetPhysicalType()) {
 		case ArrowArrayPhysicalType::DICTIONARY_ENCODED:
 			if (!child_array->dictionary) {

@@ -97,6 +97,8 @@ public:
 	unique_ptr<Vector> dictionary;
 	//! Run-end-encoding state
 	ArrowRunEndEncodingState run_end_encoding;
+	//! The top level column this state converts, named in conversion errors; empty when the reader does not name it
+	string column_name;
 	ClientContext &context;
 
 public:
@@ -134,6 +136,8 @@ public:
 	vector<column_t> column_ids;
 	unordered_map<idx_t, unique_ptr<ArrowArrayScanState>> array_states;
 	TableFilterSet *filters = nullptr;
+	//! The names of the scanned columns, indexed like the column map passed to ArrowToDuckDB
+	optional_ptr<const vector<string>> column_names;
 	//! The DataChunk containing all read columns (even filter columns that are immediately removed)
 	DataChunk all_columns;
 	ClientContext &context;
@@ -150,6 +154,10 @@ public:
 		if (it == array_states.end()) {
 			auto child_p = make_uniq<ArrowArrayScanState>(context);
 			auto &child = *child_p;
+			// a caller's own column map can hold keys the names do not cover, such as a row id column
+			if (column_names && child_idx < column_names->size()) {
+				child.column_name = (*column_names)[child_idx];
+			}
 			array_states.emplace(child_idx, std::move(child_p));
 			return child;
 		}

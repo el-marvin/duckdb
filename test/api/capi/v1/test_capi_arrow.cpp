@@ -1146,6 +1146,55 @@ TEST_CASE("Test C-API Arrow rejects non-monotonic string offsets", "[capi][arrow
 	duckdb_destroy_arrow_converted_schema(&converted);
 }
 
+TEST_CASE("Test C-API Arrow rejects strings that are not valid UTF-8", "[capi][arrow]") {
+	CAPITester tester;
+	REQUIRE(tester.OpenDatabase(nullptr));
+
+	const int32_t offsets[] = {0, 2, 5};
+	const char data[] = "okab\xE2";
+	const void *buffers[] = {nullptr, offsets, data};
+
+	ArrowSchema child_schema = {};
+	child_schema.format = "u";
+	child_schema.name = "a";
+	child_schema.release = ReleaseUnalignedSchema;
+	ArrowSchema *children[] = {&child_schema};
+	ArrowSchema schema = {};
+	schema.format = "+s";
+	schema.n_children = 1;
+	schema.children = children;
+	schema.release = ReleaseUnalignedSchema;
+
+	ArrowArray child_array = {};
+	child_array.length = 2;
+	child_array.n_buffers = 3;
+	child_array.buffers = buffers;
+	child_array.release = ReleaseUnalignedArray;
+	ArrowArray *arrays[] = {&child_array};
+	const void *struct_buffers[] = {nullptr};
+	ArrowArray array = {};
+	array.length = 2;
+	array.n_buffers = 1;
+	array.buffers = struct_buffers;
+	array.n_children = 1;
+	array.children = arrays;
+	array.release = ReleaseUnalignedArray;
+
+	duckdb_arrow_converted_schema converted = nullptr;
+	REQUIRE(duckdb_schema_from_arrow(tester.connection, &schema, &converted) == nullptr);
+	duckdb_data_chunk chunk = nullptr;
+	auto err = duckdb_data_chunk_from_arrow(tester.connection, &array, converted, &chunk);
+	REQUIRE(err != nullptr);
+	REQUIRE(chunk == nullptr);
+	// the message is the exception's serialized form, so its quotes are escaped
+	string message = duckdb_error_data_message(err);
+	REQUIRE_THAT(message, Catch::Matchers::Contains("\"exception_type\":\"Conversion\""));
+	REQUIRE_THAT(message, Catch::Matchers::Contains("Invalid string encoding found in Arrow column \\\"a\\\": value "
+	                                                "\\\"ab\\\\xE2\\\" is not valid UTF8"));
+	duckdb_destroy_error_data(&err);
+	duckdb_destroy_arrow_converted_schema(&converted);
+}
+
 TEST_CASE("Test C-API Arrow round trip of timestamps below the first midnight of the range", "[capi][arrow]") {
 	if (STANDARD_VECTOR_SIZE < 3) {
 		return;

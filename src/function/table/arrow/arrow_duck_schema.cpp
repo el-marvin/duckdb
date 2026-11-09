@@ -29,6 +29,10 @@ vector<LogicalType> &ArrowTableSchema::GetTypes() {
 vector<string> &ArrowTableSchema::GetNames() {
 	return column_names;
 }
+
+const vector<string> &ArrowTableSchema::GetNames() const {
+	return column_names;
+}
 void ArrowType::SetDictionary(unique_ptr<ArrowType> dictionary) {
 	D_ASSERT(!this->dictionary_type);
 	dictionary_type = std::move(dictionary);

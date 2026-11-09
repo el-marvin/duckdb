@@ -11,9 +11,11 @@
 #include "duckdb/common/operator/multiply.hpp"
 #include "duckdb/common/types/arrow_aux_data.hpp"
 #include "duckdb/common/types/arrow_string_view_type.hpp"
+#include "duckdb/common/types/blob.hpp"
 #include "duckdb/function/table/arrow.hpp"
 
 #include "duckdb/common/bswap.hpp"
+#include "utf8proc_wrapper.hpp"
 
 namespace duckdb {
 
@@ -445,6 +447,36 @@ static void SetVectorStringView(Vector &vector, idx_t size, ArrowArray &array, i
 			auto c_data = ArrowBufferData<char>(array, 2 + buffer_index);
 			strings.WriteStringRef(string_t(&c_data[offset], length));
 		}
+	}
+}
+
+// Arrow requires UTF-8 in string columns, but producers do not enforce it.
+static void VerifyUTF8Strings(const Vector &vector, idx_t size, const ArrowArrayScanState &array_state) {
+	auto strings = FlatVector::GetData<string_t>(vector);
+	auto &validity = FlatVector::Validity(vector);
+	for (idx_t row_idx = 0; row_idx < size; row_idx++) {
+		if (!validity.RowIsValid(row_idx)) {
+			continue;
+		}
+		auto &str = strings[row_idx];
+		if (str.IsInlined()) {
+			// an inlined string is zero padded to twelve bytes, so two loads test it for ASCII without a call per value
+			auto data = const_data_ptr_cast(str.GetData());
+			auto bytes = Load<uint64_t>(data) | Load<uint32_t>(data + sizeof(uint64_t));
+			if ((bytes & 0x8080808080808080ULL) == 0) {
+				continue;
+			}
+		}
+		if (Utf8Proc::Analyze(str.GetData(), str.GetSize()) != UnicodeType::INVALID) {
+			continue;
+		}
+		if (array_state.column_name.empty()) {
+			throw ConversionException("Invalid string encoding found in Arrow array: value \"%s\" is not valid UTF8",
+			                          Blob::ToString(str));
+		}
+		throw ConversionException(
+		    "Invalid string encoding found in Arrow column \"%s\": value \"%s\" is not valid UTF8",
+		    array_state.column_name, Blob::ToString(str));
 	}
 }
 
@@ -1002,6 +1034,9 @@ void ArrowToDuckDBConversion::ColumnArrowToDuckDB(Vector &vector, ArrowArray &ar
 				offset += blob_len;
 			}
 		}
+		}
+		if (vector.GetType().id() == LogicalTypeId::VARCHAR) {
+			VerifyUTF8Strings(vector, size, array_state);
 		}
 		break;
 	}

@@ -14,6 +14,7 @@ ArrowArrayScanState &ArrowArrayScanState::GetChild(idx_t child_idx) {
 		auto child_p = make_uniq<ArrowArrayScanState>(context);
 		auto &child = *child_p;
 		child.owned_data = owned_data;
+		child.column_name = column_name;
 		children.emplace(child_idx, std::move(child_p));
 		return child;
 	}

@@ -122,6 +122,7 @@ public:
 	const arrow_column_map_t &GetColumns() const;
 	vector<LogicalType> &GetTypes();
 	vector<string> &GetNames();
+	const vector<string> &GetNames() const;
 
 private:
 	arrow_column_map_t arrow_convert_data;

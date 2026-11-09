@@ -180,6 +180,7 @@ duckdb_error_data duckdb_data_chunk_from_arrow(duckdb_connection connection, str
 		auto array_state = duckdb::make_uniq<duckdb::ArrowArrayScanState>(*conn->context);
 		array_state->owned_data = owned_data;
 		try {
+			array_state->column_name = arrow_table->GetNames()[i];
 			switch (array_physical_type) {
 			case duckdb::ArrowArrayPhysicalType::DICTIONARY_ENCODED:
 				duckdb::ArrowToDuckDBConversion::ColumnArrowToDuckDBDictionary(dchunk->data[i], *array, 0, *array_state,

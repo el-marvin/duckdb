@@ -150,6 +150,7 @@ ArrowTableFunction::ArrowScanInitLocalInternal(ClientContext &context, TableFunc
 	result->column_ids = input.column_ids;
 	result->filters = input.filters.get();
 	auto &bind_data = input.bind_data->Cast<ArrowScanFunctionData>();
+	result->column_names = bind_data.arrow_table.GetNames();
 	if (!bind_data.projection_pushdown_enabled) {
 		result->column_ids.clear();
 	} else if (!input.projection_ids.empty()) {
