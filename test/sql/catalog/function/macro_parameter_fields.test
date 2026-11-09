@@ -406,3 +406,48 @@ query TI
 FROM v;
 ----
 v	2
+
+# a parameter as the receiver of a dot call in an argument of a typed macro, which picks its overload by the argument's type
+
+statement ok
+CREATE MACRO ovl_t(x BIGINT) AS TABLE (SELECT 'bigint ' || x AS v), (x VARCHAR) AS TABLE (SELECT 'varchar ' || x AS v);
+
+statement ok
+CREATE MACRO ovl_dot(p) AS (SELECT v FROM ovl_t(p.abs()::VARCHAR));
+
+statement ok
+CREATE MACRO ovl_plain(p) AS (SELECT v FROM ovl_t(abs(p)::VARCHAR));
+
+statement ok
+CREATE MACRO ovl_field_dot(p) AS (SELECT v FROM ovl_t(p.f.abs()));
+
+statement ok
+CREATE MACRO ovl_field_plain(p) AS (SELECT v FROM ovl_t(abs(struct_extract(p, 'f'))));
+
+statement ok
+CREATE MACRO tm_ovl_dot(p) AS TABLE SELECT v FROM ovl_t(p.abs()::VARCHAR);
+
+statement ok
+CREATE MACRO tm_ovl_plain(p) AS TABLE SELECT v FROM ovl_t(abs(p)::VARCHAR);
+
+statement ok
+CREATE MACRO tm_ovl_field_dot(p) AS TABLE SELECT v FROM ovl_t(p.f.abs());
+
+statement ok
+CREATE MACRO tm_ovl_field_plain(p) AS TABLE SELECT v FROM ovl_t(abs(struct_extract(p, 'f')));
+
+query TTTT
+SELECT ovl_dot(-3), ovl_plain(-3), ovl_field_dot({'f': -3}), ovl_field_plain({'f': -3});
+----
+varchar 3	varchar 3	bigint 3	bigint 3
+
+query TT
+SELECT ovl_dot(x), ovl_plain(x) FROM (VALUES (-1), (2)) t(x) ORDER BY x;
+----
+varchar 1	varchar 1
+varchar 2	varchar 2
+
+query TTTT
+SELECT (FROM tm_ovl_dot(-3)), (FROM tm_ovl_plain(-3)), (FROM tm_ovl_field_dot({'f': -3})), (FROM tm_ovl_field_plain({'f': -3}));
+----
+varchar 3	varchar 3	bigint 3	bigint 3
