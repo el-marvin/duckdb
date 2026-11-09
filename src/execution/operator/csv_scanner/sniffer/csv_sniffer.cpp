@@ -9,11 +9,6 @@ CSVSniffer::CSVSniffer(CSVReaderOptions &options_p, const MultiFileOptions &file
     : state_machine_cache(state_machine_cache_p), options(options_p), file_options(file_options),
       buffer_manager(std::move(buffer_manager_p)), lines_sniffed(0),
       default_null_to_varchar(default_null_to_varchar_p) {
-	// Initialize Format Candidates
-	for (const auto &format_template : format_template_candidates) {
-		auto &logical_type = format_template.first;
-		best_format_candidates[logical_type].clear();
-	}
 	// Initialize max columns found to either 0, or however many were set
 	max_columns_found = set_columns.Size();
 	error_handler = make_shared_ptr<CSVErrorHandler>(options.ignore_errors.GetValue());
@@ -64,7 +59,7 @@ void MatchAndReplaceUserSetVariables(DialectOptions &original, DialectOptions &s
 void CSVSniffer::SetResultOptions() const {
 	bool found_date = false;
 	bool found_timestamp = false;
-	for (auto &type : detected_types) {
+	for (auto &type : set_columns.IsSet() ? *set_columns.types : detected_types) {
 		if (type == LogicalType::DATE) {
 			found_date = true;
 		} else if (type == LogicalType::TIMESTAMP) {
@@ -113,12 +108,15 @@ AdaptiveSnifferResult CSVSniffer::MinimalSniff() {
 		start_row = 1;
 	}
 
-	// Gather Types
-	SetUserDefinedDateTimeFormat(*state_machine);
+	// Gather Types, with the formats the scan of this file will use
 	for (idx_t i = 0; i < state_machine->dialect_options.num_cols; i++) {
 		best_sql_types_candidates_per_column_idx[i] = state_machine->options.auto_type_candidates;
 	}
-	SniffTypes(data_chunk, *state_machine, best_sql_types_candidates_per_column_idx, start_row);
+	const auto scan_formats = StartingFormatCandidates(true);
+	vector<ColumnFormatCandidates> format_candidates(
+	    MaxValue(state_machine->dialect_options.num_cols, data_chunk.ColumnCount()), scan_formats);
+	SniffTypes(data_chunk, *state_machine, best_sql_types_candidates_per_column_idx, start_row, format_candidates);
+	SetColumnFormats(*state_machine, scan_formats);
 
 	// Possibly Gather Header
 	vector<HeaderValue> potential_header;
@@ -137,6 +135,28 @@ AdaptiveSnifferResult CSVSniffer::MinimalSniff() {
 
 	auto names = DetectHeaderInternal(buffer_manager->context, potential_header, *state_machine, set_columns,
 	                                  best_sql_types_candidates_per_column_idx, options, file_options, *error_handler);
+
+	// The formats come from the options, not from this file's sample, so they must read every row of the sample the
+	// scan reads, which starts at the first row when the options say the files have no header
+	const auto drop_unread_formats = [&](DataChunk &chunk, idx_t first_row, idx_t end_row) {
+		for (idx_t col_idx = 0; col_idx < chunk.ColumnCount() && first_row < end_row; col_idx++) {
+			auto &col_type_candidates = best_sql_types_candidates_per_column_idx[col_idx];
+			const auto sql_type = col_type_candidates.back();
+			Vector values(chunk.data[col_idx], first_row, end_row);
+			if (IsDateOrTimestamp(sql_type) &&
+			    !TryCastVector(values, end_row - first_row, sql_type, CurrentFormat(scan_formats.at(sql_type.id())))) {
+				col_type_candidates.erase(col_type_candidates.begin() + 1, col_type_candidates.end());
+			}
+		}
+	};
+	if (start_row > 0 && !options.dialect_options.header.GetValue()) {
+		drop_unread_formats(data_chunk, 0, MinValue<idx_t>(start_row, data_chunk.size()));
+	}
+	for (idx_t chunk_idx = 1; chunk_idx < options.sample_size_chunks && !scanner->FinishedFile(); chunk_idx++) {
+		auto &chunk = scanner->ParseChunk().ToChunk();
+		drop_unread_formats(chunk, 0, chunk.size());
+		chunk.Reset();
+	}
 
 	for (idx_t column_idx = 0; column_idx < best_sql_types_candidates_per_column_idx.size(); column_idx++) {
 		LogicalType d_type = best_sql_types_candidates_per_column_idx[column_idx].back();
@@ -190,6 +210,7 @@ SnifferResult CSVSniffer::SniffCSV(const bool force_match) {
 	DetectHeader();
 	// 5. Type Replacement
 	ReplaceTypes();
+	ChooseFormatsForDeclaredTypes();
 
 	// We reset the buffer for compressed files
 	// This is done because we can't easily seek on compressed files, if a buffer goes out of scope we must read from

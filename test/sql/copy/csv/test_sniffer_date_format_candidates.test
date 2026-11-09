@@ -298,8 +298,8 @@ SELECT typeof(a), a, typeof(b), b FROM read_csv('{TEST_DIR}/timestamp_then_date.
 ----
 TIMESTAMP	2024-02-13 10:00:00	DATE	2024-02-13
 
-# a column whose dates narrowed the formats keeps them narrowed for the next columns, also when a stray value makes it
-# VARCHAR, because a declared type reads it with that format
+# a column whose dates narrowed its formats keeps them, also when a stray value makes it VARCHAR, because a declared
+# type reads it with those formats; they do not narrow the formats of the next columns
 
 statement ok
 COPY (SELECT * FROM (VALUES ('01-13-24'), ('N/A'), ('01-14-24')) t(d)) TO '{TEST_DIR}/stray_value.csv' (HEADER);
@@ -328,8 +328,8 @@ COPY (SELECT * FROM (VALUES ('99-01-01', '01-13-24'), ('abc', '02-14-24')) t(a, 
 query IIII
 SELECT typeof(a), a, typeof(b), b FROM read_csv('{TEST_DIR}/two_columns.csv');
 ----
-VARCHAR	99-01-01	VARCHAR	01-13-24
-VARCHAR	abc	VARCHAR	02-14-24
+VARCHAR	99-01-01	DATE	2024-01-13
+VARCHAR	abc	DATE	2024-02-14
 
 statement ok
 COPY (SELECT * FROM (VALUES ('01-13-24', '01-02-24', '01-13-24'), ('abc', '03-04-24', '02-14-24')) t(a, b, c)) TO '{TEST_DIR}/three_columns.csv' (HEADER);
@@ -340,8 +340,7 @@ SELECT typeof(a), a, typeof(b), b, typeof(c), c FROM read_csv('{TEST_DIR}/three_
 VARCHAR	01-13-24	DATE	2024-01-02	DATE	2024-01-13
 VARCHAR	abc	DATE	2024-03-04	DATE	2024-02-14
 
-# the file has one date format, chosen by the first date column; a later column the chosen format does not read is
-# VARCHAR
+# the file has one date format: the most preferred format that every date column reads
 
 statement ok
 COPY (SELECT * FROM (VALUES ('01-02-24', '01-13-24')) t(a, b)) TO '{TEST_DIR}/shared_format.csv' (HEADER);
@@ -349,10 +348,9 @@ COPY (SELECT * FROM (VALUES ('01-02-24', '01-13-24')) t(a, b)) TO '{TEST_DIR}/sh
 query IIII
 SELECT typeof(a), a, typeof(b), b FROM read_csv('{TEST_DIR}/shared_format.csv');
 ----
-DATE	2001-02-24	VARCHAR	01-13-24
+DATE	2024-01-02	DATE	2024-01-13
 
-# the type refinement over the rest of the sample tests the chosen format only and drops the type on a miss, so a value
-# past the first 2048 rows of the file does not narrow the formats
+# the type refinement over the rest of the sample narrows the formats like the first 2048 rows of the file do
 
 statement ok
 COPY (SELECT CASE WHEN i < 2046 THEN '01-02-24' ELSE '01-13-24' END AS d FROM range(2047) t(i)) TO '{TEST_DIR}/narrow_in_first_chunk.csv' (HEADER);
@@ -368,7 +366,7 @@ COPY (SELECT CASE WHEN i < 2047 THEN '01-02-24' ELSE '01-13-24' END AS d FROM ra
 query II
 SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/narrow_in_second_chunk.csv') GROUP BY ALL;
 ----
-VARCHAR	2048
+DATE	2048
 
 # a value past the sample is not sampled: the scan fails on it and suggests a larger sample
 

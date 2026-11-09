@@ -9,6 +9,8 @@
 #pragma once
 
 #include "duckdb/execution/operator/csv_scanner/csv_state_machine.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/vector/vector_iterator.hpp"
 #include "duckdb/execution/operator/csv_scanner/column_count_scanner.hpp"
@@ -21,8 +23,15 @@ namespace duckdb {
 struct DateTimestampSniffing {
 	bool initialized = false;
 	bool had_match = false;
+	//! The format is given (the user's, or in a minimal sniff the one the scan of the file will use) and not narrowed
+	bool fixed = false;
+	//! The type read a sampled value of the column, so the formats constrain the file's format
+	bool read_value = false;
 	vector<StrpTimeFormat> format;
 };
+
+//! The date and timestamp formats of one column
+using ColumnFormatCandidates = map<LogicalTypeId, DateTimestampSniffing>;
 
 struct QuoteEscapeCombination {
 	QuoteEscapeCombination(char quote, char escape) : quote(quote), escape(escape) {
@@ -63,12 +72,6 @@ struct DialectCandidates {
 	vector<char> comment_candidates;
 	//! Candidates for combinations of quotes and escapes
 	vector<QuoteEscapeCombination> quote_escape_candidates;
-};
-
-//! Struct used to know if we have a date or timestamp type already identified in this CSV File
-struct HasType {
-	bool date = false;
-	bool timestamp = false;
 };
 
 //! Sniffer that detects Header, Dialect and Types of CSV Files
@@ -161,21 +164,36 @@ private:
 	//! Second phase of auto-detection: detect types, format template candidates
 	//! ordered by descending specificity (~ from high to low)
 	void DetectTypes();
-	//! Change the date format for the type to the string
-	//! Try to cast a string value to the specified sql type
-	static void SetDateFormat(CSVStateMachine &candidate, const string &format_specifier,
-	                          const LogicalTypeId &sql_type);
 
 	//! Function that initialized the necessary variables used for date and timestamp detection
-	void InitializeDateAndTimeStampDetection(const string &separator, const LogicalType &sql_type);
-	//! Sets user defined date and time formats (if any)
-	void SetUserDefinedDateTimeFormat(CSVStateMachine &candidate) const;
+	void InitializeDateAndTimeStampDetection(DateTimestampSniffing &format_candidate, const string &separator,
+	                                         const LogicalType &sql_type) const;
+	//! The formats a column starts from: the user's, or with fix_to_options the formats in the options, as fixed
+	ColumnFormatCandidates StartingFormatCandidates(bool fix_to_options) const;
+	//! Sets the column's current date and timestamp formats on the state machine
+	static void SetColumnFormats(CSVStateMachine &candidate, const ColumnFormatCandidates &column_formats);
+	//! The format the candidate reads with: the most preferred one, or the plain cast
+	static StrpTimeFormat CurrentFormat(const DateTimestampSniffing &format_candidate);
+	static bool IsDateOrTimestamp(const LogicalType &type);
+	//! Sets up the templates of a column that has no earlier value, from the first value of the chunk that looks like a
+	//! date
+	void SetUpFormatsFromChunk(DateTimestampSniffing &format_candidate, Vector &values, idx_t size,
+	                           const LogicalType &sql_type) const;
+	//! Whether the type reads the column's values from first_row up to row_idx
+	bool ReadsEarlierValues(CSVStateMachine &state_machine, const VectorIterator<string_t> &values,
+	                        const LogicalType &sql_type, idx_t first_row, idx_t row_idx) const;
 	//! Detects the date or timestamp format from the value at row_idx and the column's earlier values
-	void DetectDateAndTimeStampFormats(CSVStateMachine &candidate, const LogicalType &sql_type,
-	                                   const VectorIterator<string_t> &values, idx_t first_row, idx_t row_idx);
+	void DetectDateAndTimeStampFormats(CSVStateMachine &candidate, DateTimestampSniffing &format_candidate,
+	                                   const LogicalType &sql_type, const VectorIterator<string_t> &values,
+	                                   idx_t first_row, idx_t row_idx) const;
 	//! Sniffs the types from a data chunk
 	void SniffTypes(DataChunk &data_chunk, CSVStateMachine &state_machine,
-	                unordered_map<idx_t, vector<LogicalType>> &info_sql_types_candidates, idx_t start_idx_detection);
+	                unordered_map<idx_t, vector<LogicalType>> &info_sql_types_candidates, idx_t start_idx_detection,
+	                vector<ColumnFormatCandidates> &column_formats);
+	//! Chooses the file's date and timestamp formats from the columns of those types, the declared columns first; a
+	//! sniffed column that shares no format with the columns before it becomes VARCHAR
+	void ChooseDateAndTimestampFormats(vector<LogicalType> &column_types, const vector<bool> &declared,
+	                                   optional_ptr<const vector<HeaderValue>> first_row);
 
 	//! Variables for Type Detection
 	//! Format Candidates for Date and Timestamp Types
@@ -186,17 +204,37 @@ private:
 	      "%d-%m-%y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%y-%m-%d %H:%M:%S"}},
 	};
 	unordered_map<idx_t, vector<LogicalType>> best_sql_types_candidates_per_column_idx;
-	map<LogicalTypeId, vector<StrpTimeFormat>> best_format_candidates;
+	//! The type candidates, before the format choice, of the columns it made VARCHAR
+	unordered_map<idx_t, vector<LogicalType>> types_lost_to_format_choice;
+	//! The date and timestamp formats of each column of the best candidate
+	vector<ColumnFormatCandidates> best_format_candidates;
 	unique_ptr<StringValueScanner> best_candidate;
+	//! The first chunk the best candidate parsed, which its scanner holds until the type refinement
+	optional_ptr<DataChunk> best_first_chunk;
+	idx_t best_first_chunk_start = 0;
+	//! Whether header detection took the first row as data, rather than as the header or a row it skipped
+	bool first_row_is_data = false;
 	vector<HeaderValue> best_header_row;
-	//! Variable used for sniffing date and timestamp
-	map<LogicalTypeId, DateTimestampSniffing> format_candidates;
 
 	//! ------------------------------------------------------//
 	//! ------------------ Type Refinement ------------------ //
 	//! ------------------------------------------------------//
 	void RefineTypes();
-	bool TryCastVector(Vector &parse_chunk_col, idx_t size, const LogicalType &sql_type) const;
+	bool TryCastVector(Vector &parse_chunk_col, idx_t size, const LogicalType &sql_type,
+	                   const StrpTimeFormat &date_time_format) const;
+	//! Whether the type reads every value of the chunk
+	bool ReadsChunk(Vector &parse_chunk_col, idx_t size, const LogicalType &sql_type,
+	                const StrpTimeFormat &date_time_format, optional_idx first_valid_row) const;
+	//! Whether the type reads the chunk, narrowing the column's formats for a date or timestamp type
+	bool RefineCandidate(Vector &parse_chunk_col, idx_t size, const LogicalType &sql_type,
+	                     ColumnFormatCandidates &column_formats, optional_idx first_valid_row) const;
+	//! Removes the type candidates that do not read the chunk from first_row on; check_top false skips the most
+	//! specific candidate of each column, which detection already checked
+	void RefineCandidatesWithChunk(DataChunk &chunk, idx_t first_row, bool check_top);
+	//! The type of a column as RefineTypes reports it
+	LogicalType DetectedType(idx_t column_idx) const;
+	//! Chooses the formats again once the declared types are known
+	void ChooseFormatsForDeclaredTypes();
 	vector<LogicalType> detected_types;
 	//! If when finding a SQLNULL type in type detection we default it to varchar
 	const bool default_null_to_varchar;

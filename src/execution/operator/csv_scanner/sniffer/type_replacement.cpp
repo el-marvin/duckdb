@@ -38,4 +38,41 @@ void CSVSniffer::ReplaceTypes() {
 		manually_set[i] = true;
 	}
 }
+
+void CSVSniffer::ChooseFormatsForDeclaredTypes() {
+	vector<bool> declared(detected_types.size(), false);
+	vector<LogicalType> column_types = detected_types;
+	bool any_declared = false;
+	for (idx_t col_idx = 0; col_idx < detected_types.size(); col_idx++) {
+		if (set_columns.IsSet() && col_idx < set_columns.Size()) {
+			column_types[col_idx] = (*set_columns.types)[col_idx];
+		} else if (col_idx >= manually_set.size() || !manually_set[col_idx]) {
+			continue;
+		}
+		declared[col_idx] = true;
+		any_declared = true;
+	}
+	if (!any_declared) {
+		return;
+	}
+	// The choice before header detection did not know the declared columns, so the columns it made VARCHAR get their
+	// types back and the choice is made again
+	if (!best_candidate->GetStateMachine().options.all_varchar) {
+		for (auto &lost : types_lost_to_format_choice) {
+			const auto col_idx = lost.first;
+			// a header only file has SQLNULL types by now, which stay
+			if (col_idx < column_types.size() && !declared[col_idx] && column_types[col_idx] == LogicalType::VARCHAR) {
+				best_sql_types_candidates_per_column_idx[col_idx] = lost.second;
+				column_types[col_idx] = DetectedType(col_idx);
+			}
+		}
+	}
+	types_lost_to_format_choice.clear();
+	ChooseDateAndTimestampFormats(column_types, declared, first_row_is_data ? &best_header_row : nullptr);
+	for (idx_t col_idx = 0; col_idx < detected_types.size(); col_idx++) {
+		if (!declared[col_idx]) {
+			detected_types[col_idx] = column_types[col_idx];
+		}
+	}
+}
 } // namespace duckdb

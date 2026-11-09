@@ -1,0 +1,435 @@
+# name: test/sql/copy/csv/test_sniffer_formats_per_column.test
+# description: The CSV sniffer chooses date and timestamp formats per column, after the declared types are known, and a type that takes over reads every sampled value
+# group: [csv]
+
+statement ok
+SET threads = 4;
+
+# each column keeps the formats that read its own values: a column with a stray value does not narrow the next column
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv');
+----
+VARCHAR	99-01-01	DATE	2024-01-13
+VARCHAR	abc	DATE	2024-02-14
+
+query I
+SELECT DateFormat FROM sniff_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv');
+----
+%m-%d-%y
+
+# a declared column reads with its own formats, and the sniffed column that cannot share them loses the type
+
+statement error
+SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv', types = {'a': 'DATE'});
+----
+Could not convert string "abc" to 'DATE'
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv', types = {'a': 'DATE'}, ignore_errors = true);
+----
+DATE	1999-01-01	VARCHAR	01-13-24
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv', types = ['DATE'], ignore_errors = true);
+----
+DATE	1999-01-01	VARCHAR	01-13-24
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv', columns = {'a': 'DATE', 'b': 'VARCHAR'}, ignore_errors = true);
+----
+DATE	1999-01-01	VARCHAR	01-13-24
+
+# a declared type that is not a date leaves the other column its own formats
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/declared_and_sniffed.csv', types = {'b': 'DATE'});
+----
+VARCHAR	99-01-01	DATE	2024-01-13
+VARCHAR	abc	DATE	2024-02-14
+
+# two date columns that share no format: the first keeps its own, the second loses the type, unless the first is
+# declared VARCHAR
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/two_layouts.csv');
+----
+DATE	2013-02-24	VARCHAR	01-13-24
+DATE	2014-03-24	VARCHAR	02-14-24
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/two_layouts.csv', types = {'a': 'VARCHAR'});
+----
+VARCHAR	13-02-24	DATE	2024-01-13
+VARCHAR	14-03-24	DATE	2024-02-14
+
+# the plain cast shares no format with a template: the later column becomes VARCHAR, as a date column does when a
+# sampled value misses its format; a declared type or the user's format gives it a type
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/plain_then_template.csv');
+----
+DATE	2024-02-13	VARCHAR	13-02-2024
+DATE	2024-02-14	VARCHAR	14-02-2024
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/template_then_plain.csv');
+----
+DATE	2024-02-13	VARCHAR	2024-02-13
+DATE	2024-02-14	VARCHAR	2024-02-14
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/template_then_plain.csv', types = {'b': 'TIMESTAMP'});
+----
+DATE	2024-02-13	TIMESTAMP	2024-02-13 00:00:00
+DATE	2024-02-14	TIMESTAMP	2024-02-14 00:00:00
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/template_then_plain.csv', dateformat = '%d-%m-%Y');
+----
+DATE	2024-02-13	TIMESTAMP	2024-02-13 00:00:00
+DATE	2024-02-14	TIMESTAMP	2024-02-14 00:00:00
+
+# a declared column without a value the type read does not constrain the format of the other columns
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/null_declared.csv', types = {'a': 'DATE'});
+----
+DATE	NULL	DATE	2024-02-13
+DATE	NULL	DATE	2024-02-14
+
+query II
+SELECT a, b FROM read_csv('data/csv/sniffer_formats_per_column/null_declared.csv', columns = {'a': 'DATE', 'b': 'DATE'});
+----
+NULL	2024-02-13
+NULL	2024-02-14
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/stray_first_declared.csv', types = {'a': 'DATE'}, ignore_errors = true);
+----
+DATE	2024-01-13	DATE	2024-01-15
+DATE	2024-01-12	DATE	2024-02-16
+
+query I
+SELECT DateFormat FROM sniff_csv('data/csv/sniffer_formats_per_column/two_layouts.csv', types = {'a': 'VARCHAR'});
+----
+%m-%d-%y
+
+# the choice after the declared types changes only the date and timestamp columns it decides
+
+query IIIIII
+SELECT typeof(a), a, typeof(b), b, typeof(c), c FROM read_csv('data/csv/sniffer_formats_per_column/no_header.csv', names = ['a', 'b', 'c'], null_padding = true, types = {'b': 'INTEGER'});
+----
+DATE	2024-01-01	INTEGER	5	VARCHAR	NULL
+DATE	2024-01-02	INTEGER	6	VARCHAR	NULL
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/all_varchar.csv', all_varchar = true, types = {'a': 'BIGINT'});
+----
+BIGINT	1	VARCHAR	2024-01-01
+BIGINT	2	VARCHAR	2024-01-02
+
+query II
+SELECT typeof(a), typeof(b) FROM read_csv(['data/csv/sniffer_formats_per_column/files/header_only.csv', 'data/csv/sniffer_formats_per_column/files/date_and_number.csv'], types = {'a': 'DATE'}, union_by_name = true) LIMIT 1;
+----
+DATE	BIGINT
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/single_row.csv', header = true, types = {'x': 'BIGINT'}));
+----
+x	BIGINT
+2024-01-01	VARCHAR
+
+# a first row that header detection takes as data is a sampled value of the choice after the declared types: the
+# sniffed column whose only format that reads it cannot be shared with the declared column becomes VARCHAR
+
+query IIII
+SELECT typeof(column0), column0, typeof(column1), column1 FROM read_csv('data/csv/sniffer_formats_per_column/first_row_data.csv', types = ['DATE'], ignore_errors = true);
+----
+DATE	2024-01-14	VARCHAR	24-12-31
+DATE	2024-01-13	VARCHAR	01-02-24
+
+statement error
+SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/first_row_data.csv', types = ['DATE']);
+----
+Could not convert string "abc" to 'DATE'
+
+query II
+SELECT typeof(column1), column1 FROM read_csv('data/csv/sniffer_formats_per_column/declared_first_row_data.csv', types = {'column1': 'DATE'});
+----
+DATE	2032-02-01
+DATE	2003-02-01
+DATE	2003-02-01
+
+# a header only file keeps the types of a header only file, also when its header looks like dates
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/files/header_dates.csv', header = true, types = ['VARCHAR']));
+----
+13-02-2024	VARCHAR
+01-13-24	VARCHAR
+
+query II
+SELECT typeof("01-13-24"), "01-13-24" FROM read_csv(['data/csv/sniffer_formats_per_column/files/header_dates.csv', 'data/csv/sniffer_formats_per_column/files/header_dates_data.csv'], header = true, types = ['VARCHAR'], union_by_name = true);
+----
+BIGINT	42
+BIGINT	43
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/header_only_dates.csv', header = true, types = {'01-13-24_1': 'DATE'}));
+----
+13-02-24	VARCHAR
+01-13-24	VARCHAR
+01-13-24_1	DATE
+
+# COPY takes the declared types from the table
+
+statement ok
+CREATE TABLE sniffed_date (a VARCHAR, b DATE);
+
+statement ok
+COPY sniffed_date FROM 'data/csv/sniffer_formats_per_column/declared_and_sniffed.csv' (AUTO_DETECT true);
+
+query II
+SELECT a, b FROM sniffed_date;
+----
+99-01-01	2024-01-13
+abc	2024-02-14
+
+statement ok
+CREATE TABLE declared_date (a DATE, b VARCHAR);
+
+statement ok
+COPY declared_date FROM 'data/csv/sniffer_formats_per_column/declared_and_sniffed.csv' (AUTO_DETECT true, IGNORE_ERRORS true);
+
+query II
+SELECT a, b FROM declared_date;
+----
+1999-01-01	01-13-24
+
+# timestamps follow the same rules
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/timestamps_declared_and_sniffed.csv');
+----
+VARCHAR	99-01-01 10:00:00	TIMESTAMP	2024-01-13 10:00:00
+VARCHAR	abc	TIMESTAMP	1999-02-14 11:00:00
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/timestamps_declared_and_sniffed.csv', types = {'a': 'TIMESTAMP'}, ignore_errors = true);
+----
+TIMESTAMP	1999-01-01 10:00:00	VARCHAR	13-01-24 10:00:00
+
+# the user's formats win over the sniffed ones and fail loudly on a value they reject in a declared column
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/user_format.csv', dateformat = '%m-%d-%y');
+----
+DATE	2024-01-13	DATE	2024-02-14
+DATE	2024-01-14	DATE	2024-02-15
+
+query IIII
+SELECT typeof(a), a, typeof(b), b FROM read_csv('data/csv/sniffer_formats_per_column/user_timestamp_format.csv', timestampformat = '%d-%m-%y %H:%M:%S');
+----
+TIMESTAMP	2024-01-13 10:00:00	TIMESTAMP	2024-01-14 11:00:00
+TIMESTAMP	2024-01-15 10:00:00	TIMESTAMP	2024-01-16 11:00:00
+
+statement error
+SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/user_format.csv', dateformat = '%d-%m-%y', types = {'a': 'DATE'});
+----
+Could not convert string "01-13-24" to 'DATE'
+
+statement error
+SELECT * FROM read_csv('data/csv/sniffer_formats_per_column/timestamps_declared_and_sniffed.csv', timestampformat = '%d-%m-%y %H:%M:%S', types = {'b': 'TIMESTAMP', 'a': 'TIMESTAMP'});
+----
+Could not convert string "99-01-01 10:00:00" to 'TIMESTAMP'
+
+# the user's format reads the first row the way the scan does, also with a declared column next to it
+
+query II
+SELECT typeof(column0), column0 FROM read_csv('data/csv/sniffer_formats_per_column/user_unpadded_date.csv', dateformat = '%-y-%m-%d', types = {'column1': 'INTEGER'});
+----
+DATE	2005-02-03
+DATE	2006-02-03
+
+query II
+SELECT typeof(column0), column0 FROM read_csv('data/csv/sniffer_formats_per_column/user_unpadded_timestamp.csv', timestampformat = '%-y-%m-%d %H:%M:%S', types = {'column1': 'INTEGER'});
+----
+TIMESTAMP	2005-02-03 10:00:00
+TIMESTAMP	2006-02-03 11:00:00
+
+# a TIMESTAMP_TZ that takes over from TIMESTAMP must read the earlier values, which a template read
+
+query II
+SELECT typeof(a), a FROM read_csv('data/csv/sniffer_formats_per_column/timestamp_then_offset.csv');
+----
+VARCHAR	13-02-2024 10:00:00
+VARCHAR	2024-02-13 10:00:00+01:00
+
+query II
+SELECT typeof(a), a FROM read_csv('data/csv/sniffer_formats_per_column/timestamp_then_offset.csv', timestampformat = '%d-%m-%Y %H:%M:%S');
+----
+VARCHAR	13-02-2024 10:00:00
+VARCHAR	2024-02-13 10:00:00+01:00
+
+query II
+SELECT typeof(a), count(a) FROM read_csv('data/csv/sniffer_formats_per_column/iso_timestamp_then_offset.csv') GROUP BY ALL;
+----
+TIMESTAMP WITH TIME ZONE	2
+
+# in the type refinement past the first 2048 rows, the type that takes over must read the earlier chunks too
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '13-02-2024' ELSE '2024-02-13 10:00:00' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/date_then_timestamp_second_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/date_then_timestamp_second_chunk.csv') GROUP BY ALL;
+----
+VARCHAR	2048
+
+statement ok
+COPY (SELECT CASE WHEN i < 2046 THEN '13-02-2024' ELSE '2024-02-13 10:00:00' END AS d FROM range(2047) t(i)) TO '{TEST_DIR}/date_then_timestamp_first_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/date_then_timestamp_first_chunk.csv') GROUP BY ALL;
+----
+VARCHAR	2047
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '10:00:00' ELSE '2024-02-13' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/time_then_date_second_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/time_then_date_second_chunk.csv') GROUP BY ALL;
+----
+VARCHAR	2048
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '5' ELSE '2024-02-13' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/number_then_date_second_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/number_then_date_second_chunk.csv') GROUP BY ALL;
+----
+VARCHAR	2048
+
+statement ok
+COPY (SELECT CASE WHEN i < 2100 THEN NULL ELSE '14-02-2024' END AS a, '13-02-2024' AS b FROM range(2101) t(i)) TO '{TEST_DIR}/empty_then_date_second_chunk.csv' (HEADER);
+
+query III
+SELECT typeof(a), count(a), max(a) FROM read_csv('{TEST_DIR}/empty_then_date_second_chunk.csv') GROUP BY ALL;
+----
+DATE	1	2024-02-14
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '1,000' ELSE '1.5' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/thousands_then_double.csv' (HEADER, DELIMITER ';');
+
+query II
+SELECT typeof(d), sum(d) FROM read_csv('{TEST_DIR}/thousands_then_double.csv', delim = ';', thousands = ',') GROUP BY ALL;
+----
+DOUBLE	2047001.5
+
+# a type that takes over and reads the earlier values still does
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '2024-02-13' ELSE '2024-02-13 10:00:00' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/iso_date_then_timestamp_second_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), count(d) FROM read_csv('{TEST_DIR}/iso_date_then_timestamp_second_chunk.csv') GROUP BY ALL;
+----
+TIMESTAMP	2048
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '1' ELSE '1.5' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/integer_then_double_second_chunk.csv' (HEADER);
+
+query II
+SELECT typeof(d), sum(d) FROM read_csv('{TEST_DIR}/integer_then_double_second_chunk.csv') GROUP BY ALL;
+----
+DOUBLE	2048.5
+
+# a later file is read with the first file's formats when they read its sampled values, and with its own otherwise
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first.csv', 'data/csv/sniffer_formats_per_column/files/day_first.csv'], filename = true);
+----
+2024-01-13	month_first.csv
+2024-02-14	month_first.csv
+2024-01-13	day_first.csv
+1999-02-14	day_first.csv
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv(['data/csv/sniffer_formats_per_column/files/day_first.csv', 'data/csv/sniffer_formats_per_column/files/month_first.csv'], filename = true);
+----
+2024-01-13	day_first.csv
+1999-02-14	day_first.csv
+2024-01-13	month_first.csv
+2024-02-14	month_first.csv
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv('data/csv/sniffer_formats_per_column/files/*_first.csv', filename = true) ORDER BY ALL;
+----
+1999-02-14	day_first.csv
+2024-01-13	day_first.csv
+2024-01-13	month_first.csv
+2024-02-14	month_first.csv
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first.csv', 'data/csv/sniffer_formats_per_column/files/ambiguous.csv'], filename = true);
+----
+2024-01-13	month_first.csv
+2024-02-14	month_first.csv
+2024-01-02	ambiguous.csv
+2024-03-04	ambiguous.csv
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv(['data/csv/sniffer_formats_per_column/files/day_first.csv', 'data/csv/sniffer_formats_per_column/files/ambiguous.csv'], filename = true);
+----
+2024-01-13	day_first.csv
+1999-02-14	day_first.csv
+2024-02-01	ambiguous.csv
+2024-04-03	ambiguous.csv
+
+# the first file's formats must read the later file's whole sample, not only its first chunk
+
+statement ok
+COPY (SELECT CASE WHEN i < 2047 THEN '01-02-24' ELSE '14-02-99' END AS d FROM range(2048) t(i)) TO '{TEST_DIR}/day_first_in_second_chunk.csv' (HEADER);
+
+query IIII
+SELECT typeof(min(d)), min(d), max(d), count(d) FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first.csv', '{TEST_DIR}/day_first_in_second_chunk.csv'], sample_size = -1, files_to_sniff = -1);
+----
+DATE	1999-02-14	2024-02-14	2050
+
+# the scan of a later file reads its first row when the first file has no header, so the formats must read it too
+
+query I
+SELECT d FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first_no_header.csv', 'data/csv/sniffer_formats_per_column/files/day_first_no_header.csv'], names = ['d'], sample_size = -1, files_to_sniff = -1);
+----
+2024-01-13
+2024-02-14
+1999-02-14
+2024-02-01
+1999-03-02
+
+statement error
+SELECT * FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first.csv', 'data/csv/sniffer_formats_per_column/files/no_date.csv'], files_to_sniff = 1);
+----
+<REGEX>:.*Schema mismatch between globbed files.*no_date.csv.*
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first.csv', 'data/csv/sniffer_formats_per_column/files/day_first.csv'], union_by_name = true, filename = true);
+----
+2024-01-13	month_first.csv
+2024-02-14	month_first.csv
+2024-01-13	day_first.csv
+1999-02-14	day_first.csv
+
+query II
+SELECT d, parse_filename(filename) FROM read_csv(['data/csv/sniffer_formats_per_column/files/month_first.csv', 'data/csv/sniffer_formats_per_column/files/ambiguous.csv'], dateformat = '%d-%m-%y', filename = true);
+----
+01-13-24	month_first.csv
+02-14-24	month_first.csv
+01-02-24	ambiguous.csv
+03-04-24	ambiguous.csv
+
+statement error
+SELECT * FROM read_csv(['data/csv/sniffer_formats_per_column/files/ambiguous.csv', 'data/csv/sniffer_formats_per_column/files/month_first.csv'], dateformat = '%d-%m-%y', files_to_sniff = 1);
+----
+<REGEX>:.*Schema mismatch between globbed files.*month_first.csv.*

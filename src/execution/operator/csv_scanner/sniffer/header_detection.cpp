@@ -347,8 +347,12 @@ vector<Identifier> CSVSniffer::DetectHeaderInternal(
 }
 void CSVSniffer::DetectHeader() {
 	auto &sniffer_state_machine = best_candidate->GetStateMachine();
+	const auto rows_until_header = sniffer_state_machine.dialect_options.rows_until_header;
 	names = DetectHeaderInternal(buffer_manager->context, best_header_row, sniffer_state_machine, set_columns,
 	                             best_sql_types_candidates_per_column_idx, options, file_options, *error_handler);
+	first_row_is_data = !sniffer_state_machine.dialect_options.header.GetValue() &&
+	                    sniffer_state_machine.dialect_options.rows_until_header == rows_until_header &&
+	                    !best_header_row.empty();
 	if (EmptyOrOnlyHeader()) {
 		// This file only contains a header, lets default to the lowest type of all.
 		detected_types.clear();
