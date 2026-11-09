@@ -1,0 +1,45 @@
+# name: test/sql/function/timestamp/test_icu_strptime_iso_week_range.test
+# description: the ICU strptime rejects an ISO week that its ISO year does not have, as the core strptime does
+# group: [timestamp]
+
+require icu
+
+statement ok
+SET Calendar = 'gregorian';
+
+statement ok
+SET TimeZone = 'UTC';
+
+statement error
+SELECT strptime('2021-W53-1 UTC', '%G-W%V-%u %Z');
+----
+ISO week out of range for the ISO year, expected a value between 1 and 52
+
+query I
+SELECT try_strptime('2021-W53-1 +0100', '%G-W%V-%u %z');
+----
+NULL
+
+query III
+SELECT strptime('2021-W52-7 UTC', '%G-W%V-%u %Z'), strptime('2020-W53-7 UTC', '%G-W%V-%u %Z'), strptime('2026-W53-1 +0100', '%G-W%V-%u %z');
+----
+2022-01-02 00:00:00+00	2021-01-03 00:00:00+00	2026-12-27 23:00:00+00
+
+query I
+SELECT strptime('2021-W53-1 UTC', ['%G-W%V-%u %Z', '%Y-W%j-%w %Z']);
+----
+2021-02-22 00:00:00+00
+
+query II
+SELECT s, try_strptime(s, '%G-W%V-%u %Z')
+FROM (VALUES ('2020-W53-5 UTC'), ('2021-W53-5 UTC'), ('2021-W52-5 UTC')) t(s);
+----
+2020-W53-5 UTC	2021-01-01 00:00:00+00
+2021-W53-5 UTC	NULL
+2021-W52-5 UTC	2021-12-31 00:00:00+00
+
+# %V without %G counts in ISO year 1900, which has 52 weeks
+query II
+SELECT strptime('52 UTC', '%V %Z'), try_strptime('53 UTC', '%V %Z');
+----
+1900-12-24 00:00:00+00	NULL

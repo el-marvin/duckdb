@@ -1375,6 +1375,15 @@ bool StrpTimeFormat::Parse(const char *data, size_t size, ParseResult &result, b
 		iso_year = (iso_year > 9999) ? 1900 : iso_year;
 		iso_week = (iso_week > 53) ? 1 : iso_week;
 		iso_weekday = (iso_weekday > 7) ? 1 : iso_weekday;
+		// December 28 always lies in the last ISO week of its year
+		const auto dec28 = Date::FromDate(UnsafeNumericCast<int32_t>(iso_year), 12, 28);
+		const auto iso_weeks = UnsafeNumericCast<uint64_t>(Date::ExtractISOWeekNumber(dec28));
+		if (iso_week > iso_weeks) {
+			error_message =
+			    "ISO week out of range for the ISO year, expected a value between 1 and " + to_string(iso_weeks);
+			error_position = 0;
+			return false;
+		}
 		// Gregorian and ISO agree on the year of January 4
 		auto jan4 = Date::FromDate(UnsafeNumericCast<int32_t>(iso_year), 1, 4);
 		// ISO Week 1 starts on the previous Monday

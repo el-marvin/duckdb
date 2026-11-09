@@ -1,0 +1,195 @@
+# name: test/sql/function/timestamp/test_strptime_iso_week_range.test
+# description: strptime rejects an ISO week that its ISO year does not have
+# group: [timestamp]
+
+# ISO year 2021 has 52 weeks
+statement error
+SELECT strptime('2021-W53-1', '%G-W%V-%u');
+----
+ISO week out of range for the ISO year, expected a value between 1 and 52
+
+query I
+SELECT try_strptime('2021-W53-1', '%G-W%V-%u');
+----
+NULL
+
+# without a weekday the Monday of the week is meant
+statement error
+SELECT strptime('2021-53', '%G-%V');
+----
+ISO week out of range for the ISO year, expected a value between 1 and 52
+
+statement error
+SELECT strptime('2021-53 10:11:12', '%G-%V %H:%M:%S');
+----
+ISO week out of range for the ISO year
+
+# years of 52 weeks: the last week parses, every day of week 53 fails
+query III
+SELECT strptime('2021-W52-7', '%G-W%V-%u'), strptime('2023-W01-1', '%G-W%V-%u'), strptime('2023-W52-7', '%G-W%V-%u');
+----
+2022-01-02 00:00:00	2023-01-02 00:00:00	2023-12-31 00:00:00
+
+query II
+SELECT y, list(try_strptime(y || '-W53-' || d, '%G-W%V-%u') ORDER BY d)
+FROM range(2021, 2024, 2) a(y), range(1, 8) b(d)
+GROUP BY y
+ORDER BY y;
+----
+2021	[NULL, NULL, NULL, NULL, NULL, NULL, NULL]
+2023	[NULL, NULL, NULL, NULL, NULL, NULL, NULL]
+
+statement error
+SELECT strptime('2023-53-1', '%G-%V-%u');
+----
+ISO week out of range for the ISO year, expected a value between 1 and 52
+
+# years of 53 weeks, one starting on a Thursday (2015, 2026) and a leap year starting on a Wednesday (2020)
+query III
+SELECT strptime('2015-W53-1', '%G-W%V-%u'), strptime('2020-W53-1', '%G-W%V-%u'), strptime('2026-W53-1', '%G-W%V-%u');
+----
+2015-12-28 00:00:00	2020-12-28 00:00:00	2026-12-28 00:00:00
+
+query III
+SELECT strptime('2015-W53-7', '%G-W%V-%u'), strptime('2020-W53-7', '%G-W%V-%u'), strptime('2026-W53-7', '%G-W%V-%u');
+----
+2016-01-03 00:00:00	2021-01-03 00:00:00	2027-01-03 00:00:00
+
+query I
+SELECT strptime('2020-53', '%G-%V');
+----
+2020-12-28 00:00:00
+
+# every week and weekday of ISO years 1900 to 2100: 165 years of 52 weeks reject week 53, every other text parses
+# to a distinct date that strftime writes back as the same text, and together they cover every day of those years
+query IIII
+SELECT count(*) FILTER (rt IS NULL), count(rt), count(DISTINCT rt), count(*) FILTER (strftime(rt, '%G-W%V-%u') <> txt)
+FROM (
+	SELECT txt, try_strptime(txt, '%G-W%V-%u') AS rt
+	FROM (SELECT printf('%04d-W%02d-%d', y, w, d) AS txt FROM range(1900, 2101) a(y), range(1, 54) b(w), range(1, 8) c(d))
+);
+----
+1155	73416	73416	0
+
+# the week is checked against an ISO year that the text gives after it
+statement error
+SELECT strptime('53 2021', '%V %G');
+----
+ISO week out of range for the ISO year, expected a value between 1 and 52
+
+query III
+SELECT strptime('53 2020', '%V %G'), try_strptime('53 2021 1', '%V %G %u'), strptime('7 53 2020', '%u %V %G');
+----
+2020-12-28 00:00:00	NULL	2021-01-03 00:00:00
+
+# the ends of the ISO year range: year 0 and year 9999 have 52 weeks
+query III
+SELECT strptime('0000-W01-1', '%G-W%V-%u'), strptime('0000-W52-7', '%G-W%V-%u'), try_strptime('0000-W53-1', '%G-W%V-%u');
+----
+0001-01-03 (BC) 00:00:00	0001-12-31 (BC) 00:00:00	NULL
+
+query II
+SELECT strptime('9999-W52-7', '%G-W%V-%u'), try_strptime('9999-W53-1', '%G-W%V-%u');
+----
+10000-01-02 00:00:00	NULL
+
+# week 0 and 54, weekday 0 and 8 fail in every year
+statement error
+SELECT strptime('2020-W00-1', '%G-W%V-%u');
+----
+ISO week offset out of range, expected a value between 1 and 53
+
+statement error
+SELECT strptime('2020-W54-1', '%G-W%V-%u');
+----
+ISO week offset out of range, expected a value between 1 and 53
+
+statement error
+SELECT strptime('2020-W53-0', '%G-W%V-%u');
+----
+ISO weekday offset out of range, expected a value between 1 and 7
+
+statement error
+SELECT strptime('2020-W53-8', '%G-W%V-%u');
+----
+ISO weekday offset out of range, expected a value between 1 and 7
+
+# %V without %G counts in ISO year 1900, which has 52 weeks
+query II
+SELECT strptime('52', '%V'), strptime('52-7', '%V-%u');
+----
+1900-12-24 00:00:00	1900-12-30 00:00:00
+
+statement error
+SELECT strptime('53', '%V');
+----
+ISO week out of range for the ISO year, expected a value between 1 and 52
+
+query I
+SELECT try_strptime('53-1', '%V-%u');
+----
+NULL
+
+# %G without %V means week 1
+query III
+SELECT strptime('2021', '%G'), strptime('2020', '%G'), strptime('2021-7', '%G-%u');
+----
+2021-01-04 00:00:00	2019-12-30 00:00:00	2021-01-10 00:00:00
+
+# a Gregorian date given beside the ISO fields gives the date, and the ISO fields are only range checked
+query II
+SELECT strptime('2021-W53-1 2021-06-01', '%G-W%V-%u %Y-%m-%d'), strptime('2021-06-01 2021-W53-1', '%Y-%m-%d %G-W%V-%u');
+----
+2021-06-01 00:00:00	2021-06-01 00:00:00
+
+# %U and %W number partial weeks: week 0 and week 53 may give a day outside the year, as in Python
+query IIII
+SELECT strptime('2021-53-6', '%Y-%U-%w'), strptime('2021-0-0', '%Y-%U-%w'), strptime('2021-53-6', '%Y-%W-%w'), strptime('2021-0-1', '%Y-%W-%w');
+----
+2022-01-08 00:00:00	2020-12-27 00:00:00	2022-01-08 00:00:00	2020-12-28 00:00:00
+
+# a list of formats goes on to the next format
+query I
+SELECT strptime('2021-W53-1', ['%G-W%V-%u', '%Y-W%j-%w']);
+----
+2021-02-22 00:00:00
+
+statement error
+SELECT strptime('2021-W53-1', ['%G-W%V-%u', '%Y-W%m-%d']);
+----
+Could not parse string
+
+# rows are checked one by one
+query II
+SELECT s, try_strptime(s, '%G-W%V-%u')
+FROM (VALUES ('2020-W53-5'), ('2021-W53-5'), (NULL), ('2021-W52-5'), ('2021-W53-5')) t(s);
+----
+2020-W53-5	2021-01-01 00:00:00
+2021-W53-5	NULL
+NULL	NULL
+2021-W52-5	2021-12-31 00:00:00
+2021-W53-5	NULL
+
+# a user date format in read_csv
+statement ok
+COPY (FROM (VALUES ('2021-W52-7'), ('2020-W53-7')) t(d)) TO '{TEST_DIR}/iso_weeks_ok.csv' (HEADER);
+
+statement ok
+COPY (FROM (VALUES ('2021-W52-7'), ('2021-W53-1')) t(d)) TO '{TEST_DIR}/iso_weeks_bad.csv' (HEADER);
+
+query I
+SELECT d FROM read_csv('{TEST_DIR}/iso_weeks_ok.csv', dateformat = '%G-W%V-%u');
+----
+2022-01-02
+2021-01-03
+
+statement error
+SELECT d FROM read_csv('{TEST_DIR}/iso_weeks_bad.csv', dateformat = '%G-W%V-%u', columns = {'d': 'DATE'});
+----
+Could not convert string "2021-W53-1" to 'DATE'
+
+query II
+SELECT typeof(d), d FROM read_csv('{TEST_DIR}/iso_weeks_bad.csv', dateformat = '%G-W%V-%u');
+----
+VARCHAR	2021-W52-7
+VARCHAR	2021-W53-1
