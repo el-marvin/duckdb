@@ -765,7 +765,7 @@ SELECT s.next_sub(), (SELECT v FROM s.tq());
 query TT
 EXPLAIN (SQL) SELECT s.next_sub();
 ----
-sql	<REGEX>:.*nextval\('memory\.s\.seq'\).*
+sql	<REGEX>:.*nextval\('[^']*\.s\.seq'\).*
 
 statement ok
 CREATE MACRO s.cur_sub() AS (SELECT currval('seq'));
@@ -773,7 +773,7 @@ CREATE MACRO s.cur_sub() AS (SELECT currval('seq'));
 query TT
 EXPLAIN (SQL) SELECT s.cur_sub();
 ----
-sql	<REGEX>:.*currval\('memory\.s\.seq'\).*
+sql	<REGEX>:.*currval\('[^']*\.s\.seq'\).*
 
 # EXPORT writes the bodies as written, and IMPORT from a fresh session creates and calls them
 
