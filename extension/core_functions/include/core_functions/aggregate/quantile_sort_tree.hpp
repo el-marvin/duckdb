@@ -174,15 +174,25 @@ struct QuantileInterpolator {
 	      CRN(ExactNumericCast<idx_t>(ceil(RN))), begin(0), end(n_p) {
 	}
 
+	template <class INPUT_TYPE, class TARGET_TYPE>
+	TARGET_TYPE InterpolateValues(const INPUT_TYPE &lo, const INPUT_TYPE &hi, Vector &result) const {
+		if constexpr (std::is_same<TARGET_TYPE, double>::value && NumericLimits<INPUT_TYPE>::IsIntegral()) {
+			//	Integers are interpolated before they become a DOUBLE, so the result is rounded once
+			return ExactInterpolation::InterpolateToDouble(lo, RN - FRN, hi);
+		} else {
+			return InterpolateOperator::Operation<TARGET_TYPE>(
+			    QuantileCast::Operation<INPUT_TYPE, TARGET_TYPE>(lo, result), RN - FRN,
+			    QuantileCast::Operation<INPUT_TYPE, TARGET_TYPE>(hi, result));
+		}
+	}
+
 	template <class INPUT_TYPE, class TARGET_TYPE, typename ACCESSOR = QuantileDirect<INPUT_TYPE>>
 	TARGET_TYPE Interpolate(INPUT_TYPE lidx, INPUT_TYPE hidx, Vector &result, const ACCESSOR &accessor) const {
 		using ACCESS_TYPE = typename ACCESSOR::RESULT_TYPE;
 		if (lidx == hidx) {
 			return QuantileCast::Operation<ACCESS_TYPE, TARGET_TYPE>(accessor(lidx), result);
 		} else {
-			auto lo = QuantileCast::Operation<ACCESS_TYPE, TARGET_TYPE>(accessor(lidx), result);
-			auto hi = QuantileCast::Operation<ACCESS_TYPE, TARGET_TYPE>(accessor(hidx), result);
-			return InterpolateOperator::Operation<TARGET_TYPE>(lo, RN - FRN, hi);
+			return InterpolateValues<ACCESS_TYPE, TARGET_TYPE>(accessor(lidx), accessor(hidx), result);
 		}
 	}
 
@@ -196,9 +206,7 @@ struct QuantileInterpolator {
 		} else {
 			std::nth_element(v_t + begin, v_t + FRN, v_t + end, comp);
 			std::nth_element(v_t + FRN, v_t + CRN, v_t + end, comp);
-			auto lo = QuantileCast::Operation<ACCESS_TYPE, TARGET_TYPE>(accessor(v_t[FRN]), result);
-			auto hi = QuantileCast::Operation<ACCESS_TYPE, TARGET_TYPE>(accessor(v_t[CRN]), result);
-			return InterpolateOperator::Operation<TARGET_TYPE>(lo, RN - FRN, hi);
+			return InterpolateValues<ACCESS_TYPE, TARGET_TYPE>(accessor(v_t[FRN]), accessor(v_t[CRN]), result);
 		}
 	}
 
@@ -207,9 +215,7 @@ struct QuantileInterpolator {
 		if (CRN == FRN) {
 			return QuantileCast::Operation<INPUT_TYPE, TARGET_TYPE>(dest[0], result);
 		} else {
-			auto lo = QuantileCast::Operation<INPUT_TYPE, TARGET_TYPE>(dest[0], result);
-			auto hi = QuantileCast::Operation<INPUT_TYPE, TARGET_TYPE>(dest[1], result);
-			return InterpolateOperator::Operation<TARGET_TYPE>(lo, RN - FRN, hi);
+			return InterpolateValues<INPUT_TYPE, TARGET_TYPE>(dest[0], dest[1], result);
 		}
 	}
 

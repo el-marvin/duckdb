@@ -114,17 +114,17 @@ SELECT list_mad([NULL::INTERVAL])
 query I
 select list_mad(x) from (values (['127'::DECIMAL(3,0), '-128'::DECIMAL(3,0)])) tbl(x);
 ----
-127
+128
 
 query I
 select list_mad(x) from (values (['32767'::DECIMAL(5,0), '-32768'::DECIMAL(5,0)])) tbl(x);
 ----
-32767
+32768
 
 query I
 select list_mad(x) from (values (['2147483647'::DECIMAL(10,0), '-2147483648'::DECIMAL(10,0)])) tbl(x);
 ----
-2147483647
+2147483648
 
 statement ok
 select list_mad(x) from (values ([-1e308, 1e308])) tbl(x);

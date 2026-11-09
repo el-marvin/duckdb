@@ -526,10 +526,15 @@ AggregateFunction GetContinuousQuantileTemplated(const LogicalType &type) {
 	case LogicalTypeId::FLOAT:
 		return OP::template GetFunction<float, float>(type, type);
 	case LogicalTypeId::UTINYINT:
+		return OP::template GetFunction<uint8_t, double>(type, LogicalType::DOUBLE);
 	case LogicalTypeId::USMALLINT:
+		return OP::template GetFunction<uint16_t, double>(type, LogicalType::DOUBLE);
 	case LogicalTypeId::UINTEGER:
+		return OP::template GetFunction<uint32_t, double>(type, LogicalType::DOUBLE);
 	case LogicalTypeId::UBIGINT:
+		return OP::template GetFunction<uint64_t, double>(type, LogicalType::DOUBLE);
 	case LogicalTypeId::UHUGEINT:
+		return OP::template GetFunction<uhugeint_t, double>(type, LogicalType::DOUBLE);
 	case LogicalTypeId::DOUBLE:
 		return OP::template GetFunction<double, double>(LogicalType::DOUBLE, LogicalType::DOUBLE);
 	case LogicalTypeId::DECIMAL:
@@ -924,7 +929,7 @@ static vector<LogicalType> GetContinuousQuantileTypes() {
 	return {LogicalType::TINYINT,   LogicalType::SMALLINT, LogicalType::INTEGER,      LogicalType::BIGINT,
 	        LogicalType::HUGEINT,   LogicalType::FLOAT,    LogicalType::DOUBLE,       LogicalType::DATE,
 	        LogicalType::TIMESTAMP, LogicalType::TIME,     LogicalType::TIMESTAMP_TZ, LogicalType::TIMESTAMP_TZ_NS,
-	        LogicalType::TIME_TZ};
+	        LogicalType::TIME_TZ,   LogicalType::UHUGEINT};
 }
 
 AggregateFunctionSet QuantileContFun::GetFunctions() {

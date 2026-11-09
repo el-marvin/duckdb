@@ -1,5 +1,4 @@
 #include "duckdb/function/window/window_executor.hpp"
-#include "duckdb/common/bit_utils.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/interpolate.hpp"
@@ -1326,64 +1325,10 @@ static double FillSlopeFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_vali
 	return num / den;
 }
 
-//	Integer backed values and orderings are handled as their distance from the minimum of their type,
-//	which fits a uhugeint_t for every integer type, so no difference of two of them overflows.
-template <typename T>
-static uhugeint_t FillOffset(T value) {
-	return uhugeint_t(0, static_cast<uint64_t>(value) - static_cast<uint64_t>(NumericLimits<T>::Minimum()));
-}
-
-template <>
-uhugeint_t FillOffset(hugeint_t value) {
-	return uhugeint_t(static_cast<uint64_t>(value.upper) ^ (uint64_t(1) << 63), value.lower);
-}
-
-template <>
-uhugeint_t FillOffset(uhugeint_t value) {
-	return value;
-}
-
-template <typename T>
-static bool TryFillValue(const uhugeint_t &offset, T &result) {
-	if (offset.upper != 0 || offset.lower > FillOffset(NumericLimits<T>::Maximum()).lower) {
-		return false;
-	}
-	result = static_cast<T>(offset.lower + static_cast<uint64_t>(NumericLimits<T>::Minimum()));
-	return true;
-}
-
-template <>
-bool TryFillValue(const uhugeint_t &offset, hugeint_t &result) {
-	result = hugeint_t(static_cast<int64_t>(offset.upper ^ (uint64_t(1) << 63)), offset.lower);
-	return true;
-}
-
-template <>
-bool TryFillValue(const uhugeint_t &offset, uhugeint_t &result) {
-	result = offset;
-	return true;
-}
-
-struct FillDifference {
-	uhugeint_t magnitude;
-	bool negative;
-};
-
-static FillDifference FillSubtract(const uhugeint_t &lhs, const uhugeint_t &rhs) {
-	if (lhs.upper > rhs.upper || (lhs.upper == rhs.upper && lhs.lower >= rhs.lower)) {
-		return {uhugeint_t(lhs.upper - rhs.upper - (lhs.lower < rhs.lower), lhs.lower - rhs.lower), false};
-	}
-	return {uhugeint_t(rhs.upper - lhs.upper - (rhs.lower < lhs.lower), rhs.lower - lhs.lower), true};
-}
-
 //! The position (x - x0) / (x1 - x0) of a row: a double slope for floating point values, and for integer values
 //! exactly numerator * 2^exponent / denominator, the exponent nonzero only for floating point orderings.
-struct FillPosition {
+struct FillPosition : ExactPosition {
 	double slope = 0;
-	bool negative = false;
-	uhugeint_t numerator {0, 0};
-	uhugeint_t denominator {0, 1};
-	int64_t exponent = 0;
 };
 
 typedef FillPosition (*fill_position_t)(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid);
@@ -1398,9 +1343,9 @@ static FillPosition FillSlopePositionFunc(WindowCursor &cursor, idx_t row_idx, i
 template <typename T>
 static FillPosition FillPositionFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid) {
 	FillPosition position;
-	const auto x0 = FillOffset(cursor.GetCell<T>(0, prev_valid));
-	const auto num = FillSubtract(FillOffset(cursor.GetCell<T>(0, row_idx)), x0);
-	const auto den = FillSubtract(FillOffset(cursor.GetCell<T>(0, next_valid)), x0);
+	const auto x0 = ExactInterpolation::ToOffset(cursor.GetCell<T>(0, prev_valid));
+	const auto num = ExactInterpolation::Subtract(ExactInterpolation::ToOffset(cursor.GetCell<T>(0, row_idx)), x0);
+	const auto den = ExactInterpolation::Subtract(ExactInterpolation::ToOffset(cursor.GetCell<T>(0, next_valid)), x0);
 	if (den.magnitude.upper == 0 && den.magnitude.lower == 0) {
 		// Duplicate X values, so pick the first.
 		return position;
@@ -1415,18 +1360,14 @@ template <typename T>
 static FillPosition FillFloatingPositionFunc(WindowCursor &cursor, idx_t row_idx, idx_t prev_valid, idx_t next_valid) {
 	FillPosition position;
 	position.slope = FillSlopeFunc<T>(cursor, row_idx, prev_valid, next_valid);
-	position.negative = std::signbit(position.slope);
 	if (!std::isfinite(position.slope)) {
 		//	The double position overflowed, so only equal endpoints still give an exact value
+		position.negative = std::signbit(position.slope);
 		position.numerator = 1;
 		position.exponent = NumericLimits<int64_t>::Maximum();
 		return position;
 	}
-	int exponent;
-	const auto mantissa = std::frexp(std::abs(position.slope), &exponent);
-	const int32_t mantissa_bits = std::numeric_limits<double>::digits;
-	position.numerator = static_cast<uint64_t>(std::ldexp(mantissa, mantissa_bits));
-	position.exponent = exponent - mantissa_bits;
+	static_cast<ExactPosition &>(position) = ExactPosition::FromDouble(position.slope);
 	return position;
 }
 
@@ -1463,183 +1404,6 @@ static fill_position_t GetFillPositionFunction(const LogicalType &order_type, co
 	}
 }
 
-//! A 256 bit unsigned integer, wide enough for the product of two uhugeint_t values
-struct FillWide {
-	uhugeint_t upper;
-	uhugeint_t lower;
-
-	bool operator==(const FillWide &rhs) const {
-		return upper == rhs.upper && lower == rhs.lower;
-	}
-	bool operator!=(const FillWide &rhs) const {
-		return !(*this == rhs);
-	}
-};
-
-static FillWide FillMultiply(const uhugeint_t &lhs, const uhugeint_t &rhs) {
-	if (lhs.upper == 0 && rhs.upper == 0) {
-		return {0, uhugeint_t(lhs.lower) * uhugeint_t(rhs.lower)};
-	}
-	const auto lower_lower = uhugeint_t(lhs.lower) * uhugeint_t(rhs.lower);
-	const auto lower_upper = uhugeint_t(lhs.lower) * uhugeint_t(rhs.upper);
-	const auto upper_lower = uhugeint_t(lhs.upper) * uhugeint_t(rhs.lower);
-	const auto upper_upper = uhugeint_t(lhs.upper) * uhugeint_t(rhs.upper);
-	const auto middle = uhugeint_t(lower_lower.upper) + uhugeint_t(lower_upper.lower) + uhugeint_t(upper_lower.lower);
-	FillWide result;
-	result.lower = uhugeint_t(middle.lower, lower_lower.lower);
-	result.upper =
-	    upper_upper + uhugeint_t(lower_upper.upper) + uhugeint_t(upper_lower.upper) + uhugeint_t(middle.upper);
-	return result;
-}
-
-static FillWide FillShiftLeft(const FillWide &value, idx_t shift) {
-	if (shift >= 256) {
-		return {0, 0};
-	}
-	if (shift >= 128) {
-		return {value.lower << (shift - 128), 0};
-	}
-	return {(value.upper << shift) | (value.lower >> (128 - shift)), value.lower << shift};
-}
-
-static FillWide FillShiftRight(const FillWide &value, idx_t shift) {
-	if (shift >= 256) {
-		return {0, 0};
-	}
-	if (shift >= 128) {
-		return {0, value.upper >> (shift - 128)};
-	}
-	return {value.upper >> shift, (value.lower >> shift) | (value.upper << (128 - shift))};
-}
-
-enum class FillRemainder : uint8_t { BELOW_HALF, HALF, ABOVE_HALF };
-
-struct FillQuotient {
-	uhugeint_t magnitude;
-	FillRemainder remainder;
-};
-
-template <typename T>
-static FillRemainder FillCompareHalf(const T &remainder, const T &divisor) {
-	const T rest = divisor - remainder;
-	if (remainder < rest) {
-		return FillRemainder::BELOW_HALF;
-	}
-	return remainder == rest ? FillRemainder::HALF : FillRemainder::ABOVE_HALF;
-}
-
-//! (upper * 2^64 + lower) / divisor for upper < divisor, by 32 bit digits (Hacker's Delight, divlu)
-static uint64_t FillDivideDigit(uint64_t upper, uint64_t lower, uint64_t divisor, uint64_t &remainder) {
-	D_ASSERT(upper < divisor);
-	const uint64_t base = uint64_t(1) << 32;
-	const auto shift = CountZeros<uint64_t>::Leading(divisor);
-	divisor <<= shift;
-	const auto divisor_upper = divisor >> 32;
-	const auto divisor_lower = divisor & (base - 1);
-	const auto numerator = shift == 0 ? upper : (upper << shift) | (lower >> (64 - shift));
-	const auto shifted_lower = lower << shift;
-	const auto digit_upper = shifted_lower >> 32;
-	const auto digit_lower = shifted_lower & (base - 1);
-
-	auto quotient_upper = numerator / divisor_upper;
-	auto rest = numerator - quotient_upper * divisor_upper;
-	while (quotient_upper >= base || quotient_upper * divisor_lower > base * rest + digit_upper) {
-		quotient_upper -= 1;
-		rest += divisor_upper;
-		if (rest >= base) {
-			break;
-		}
-	}
-	const auto partial = numerator * base + digit_upper - quotient_upper * divisor;
-	auto quotient_lower = partial / divisor_upper;
-	rest = partial - quotient_lower * divisor_upper;
-	while (quotient_lower >= base || quotient_lower * divisor_lower > base * rest + digit_lower) {
-		quotient_lower -= 1;
-		rest += divisor_upper;
-		if (rest >= base) {
-			break;
-		}
-	}
-	remainder = (partial * base + digit_lower - quotient_lower * divisor) >> shift;
-	return quotient_upper * base + quotient_lower;
-}
-
-static bool FillDivide(const FillWide &dividend, const uhugeint_t &divisor, FillQuotient &result) {
-	if (dividend.upper >= divisor) {
-		return false;
-	}
-	uhugeint_t remainder;
-	if (divisor.upper == 0) {
-		uint64_t digit_remainder = dividend.upper.lower;
-		const auto quotient_upper =
-		    FillDivideDigit(digit_remainder, dividend.lower.upper, divisor.lower, digit_remainder);
-		const auto quotient_lower =
-		    FillDivideDigit(digit_remainder, dividend.lower.lower, divisor.lower, digit_remainder);
-		result.magnitude = uhugeint_t(quotient_upper, quotient_lower);
-		remainder = digit_remainder;
-	} else {
-		remainder = dividend.upper;
-		result.magnitude = 0;
-		for (idx_t bit = 128; bit > 0; bit -= 1) {
-			const auto carry = (remainder.upper >> 63) != 0;
-			remainder = (remainder << 1) | ((dividend.lower >> (bit - 1)) & 1);
-			result.magnitude = result.magnitude << 1;
-			if (carry || remainder >= divisor) {
-				remainder = remainder - divisor;
-				result.magnitude = result.magnitude | 1;
-			}
-		}
-	}
-	result.remainder = FillCompareHalf(remainder, divisor);
-	return true;
-}
-
-static bool FillDividePowerOfTwo(const FillWide &dividend, idx_t shift, FillQuotient &result) {
-	D_ASSERT(shift > 0);
-	const auto quotient = FillShiftRight(dividend, shift);
-	if (quotient.upper != 0) {
-		return false;
-	}
-	result.magnitude = quotient.lower;
-	const auto half_bit = shift - 1;
-	if (half_bit >= 256 || (FillShiftRight(dividend, half_bit).lower & 1) == 0) {
-		result.remainder = FillRemainder::BELOW_HALF;
-	} else if (FillShiftLeft(dividend, 256 - half_bit) == FillWide {0, 0}) {
-		result.remainder = FillRemainder::HALF;
-	} else {
-		result.remainder = FillRemainder::ABOVE_HALF;
-	}
-	return true;
-}
-
-//! |delta| * position, which fails when the quotient does not fit a uhugeint_t
-static bool FillScale(const uhugeint_t &delta, const FillPosition &position, FillQuotient &result) {
-	if (position.exponent == 0 && delta.upper == 0 && position.numerator.upper == 0 &&
-	    position.denominator.upper == 0 &&
-	    (position.numerator.lower == 0 ||
-	     delta.lower <= NumericLimits<uint64_t>::Maximum() / position.numerator.lower)) {
-		const auto product = delta.lower * position.numerator.lower;
-		const auto divisor = position.denominator.lower;
-		result.magnitude = uhugeint_t(0, product / divisor);
-		result.remainder = FillCompareHalf(product % divisor, divisor);
-		return true;
-	}
-	auto product = FillMultiply(delta, position.numerator);
-	if (position.exponent < 0) {
-		D_ASSERT(position.denominator == 1);
-		return FillDividePowerOfTwo(product, static_cast<idx_t>(-position.exponent), result);
-	}
-	if (position.exponent > 0) {
-		const auto shift = static_cast<idx_t>(position.exponent);
-		const auto shifted = FillShiftLeft(product, shift);
-		if (FillShiftRight(shifted, shift) != product) {
-			return false;
-		}
-		product = shifted;
-	}
-	return FillDivide(product, position.denominator, result);
-}
-
 typedef void (*fill_interpolate_t)(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi,
                                    const FillPosition &position);
 
@@ -1648,21 +1412,11 @@ typedef void (*fill_interpolate_t)(Vector &result, idx_t i, WindowCursor &cursor
 template <typename T>
 static void FillInterpolateFunc(Vector &result, idx_t i, WindowCursor &cursor, idx_t lo, idx_t hi,
                                 const FillPosition &position) {
-	auto value = FillOffset(cursor.GetCell<T>(0, lo));
-	const auto delta = FillSubtract(FillOffset(cursor.GetCell<T>(0, hi)), value);
-	FillQuotient offset;
-	if (!FillScale(delta.magnitude, position, offset)) {
-		return;
-	}
-	const auto negative = delta.negative != position.negative;
-	auto valid = negative ? Uhugeint::TrySubtractInPlace(value, offset.magnitude)
-	                      : Uhugeint::TryAddInPlace(value, offset.magnitude);
-	const auto odd = (value.lower & 1) != 0;
-	if (valid && (offset.remainder == FillRemainder::ABOVE_HALF || (offset.remainder == FillRemainder::HALF && odd))) {
-		valid = negative ? Uhugeint::TrySubtractInPlace(value, 1) : Uhugeint::TryAddInPlace(value, 1);
-	}
+	uhugeint_t value;
 	auto data = FlatVector::GetDataMutable<T>(result);
-	if (valid && TryFillValue(value, data[i])) {
+	if (ExactInterpolation::TryInterpolate(ExactInterpolation::ToOffset(cursor.GetCell<T>(0, lo)),
+	                                       ExactInterpolation::ToOffset(cursor.GetCell<T>(0, hi)), position, value) &&
+	    ExactInterpolation::TryFromOffset(value, data[i])) {
 		FlatVector::SetNull(result, i, false);
 	}
 }

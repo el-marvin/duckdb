@@ -7,6 +7,7 @@
 
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/bignum.hpp"
+#include "duckdb/common/bit_utils.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/interpolate.hpp"
@@ -1914,38 +1915,396 @@ double InterpolateOperator::Operation(const double &lo, const double d, const do
 	return lo * (1.0 - d) + hi * d;
 }
 
-//! Interpolates between two integers without going through a double for the values themselves.
-//! The result lies between the two values, but the double arithmetic can round past them (and past the int64 range,
-//! where llround is undefined), so bound it against the endpoints before converting back.
-static int64_t InterpolateInt64(const int64_t lo, const double d, const int64_t hi) {
-	int64_t delta;
-	if (!TrySubtractOperator::Operation(hi, lo, delta)) {
-		const auto range_min = MinValue(lo, hi);
-		const auto range_max = MaxValue(lo, hi);
-		const auto mixed = static_cast<double>(lo) * (1.0 - d) + static_cast<double>(hi) * d;
-		if (mixed <= static_cast<double>(range_min)) {
-			return range_min;
+ExactPosition ExactPosition::FromDouble(const double position) {
+	D_ASSERT(std::isfinite(position));
+	uint64_t bits;
+	memcpy(&bits, &position, sizeof(bits));
+	const uint64_t fraction_mask = (uint64_t(1) << 52) - 1;
+	const auto biased_exponent = static_cast<int64_t>((bits >> 52) & 0x7ff);
+	ExactPosition result;
+	result.negative = (bits >> 63) != 0;
+	if (biased_exponent == 0) {
+		result.numerator = uhugeint_t(0, bits & fraction_mask);
+		result.exponent = -1074;
+	} else {
+		result.numerator = uhugeint_t(0, (bits & fraction_mask) | (uint64_t(1) << 52));
+		result.exponent = biased_exponent - 1075;
+	}
+	return result;
+}
+
+namespace {
+
+//	The helpers below use field arithmetic, because the uhugeint_t operators are out of line and these run per row
+uhugeint_t ExactAdd(const uhugeint_t &lhs, const uhugeint_t &rhs) {
+	const auto lower = lhs.lower + rhs.lower;
+	return uhugeint_t(lhs.upper + rhs.upper + (lower < lhs.lower), lower);
+}
+
+uhugeint_t ExactSubtract(const uhugeint_t &lhs, const uhugeint_t &rhs) {
+	return uhugeint_t(lhs.upper - rhs.upper - (lhs.lower < rhs.lower), lhs.lower - rhs.lower);
+}
+
+bool ExactLess(const uhugeint_t &lhs, const uhugeint_t &rhs) {
+	return lhs.upper < rhs.upper || (lhs.upper == rhs.upper && lhs.lower < rhs.lower);
+}
+
+bool ExactIsZero(const uhugeint_t &value) {
+	return value.upper == 0 && value.lower == 0;
+}
+
+uhugeint_t ExactMultiply64(uint64_t lhs, uint64_t rhs) {
+#if ((__GNUC__ >= 5) || defined(__clang__)) && defined(__SIZEOF_INT128__)
+	const auto product = __uint128_t(lhs) * __uint128_t(rhs);
+	return uhugeint_t(uint64_t(product >> 64), uint64_t(product));
+#else
+	const uint64_t mask = 0xffffffff;
+	const auto lower_lower = (lhs & mask) * (rhs & mask);
+	const auto lower_upper = (lhs & mask) * (rhs >> 32);
+	const auto upper_lower = (lhs >> 32) * (rhs & mask);
+	const auto upper_upper = (lhs >> 32) * (rhs >> 32);
+	const auto middle = (lower_lower >> 32) + (lower_upper & mask) + (upper_lower & mask);
+	return uhugeint_t(upper_upper + (lower_upper >> 32) + (upper_lower >> 32) + (middle >> 32),
+	                  (middle << 32) | (lower_lower & mask));
+#endif
+}
+
+//! A 256 bit unsigned integer, wide enough for the product of two uhugeint_t values
+struct ExactWide {
+	uhugeint_t upper;
+	uhugeint_t lower;
+
+	bool operator==(const ExactWide &rhs) const {
+		return upper.upper == rhs.upper.upper && upper.lower == rhs.upper.lower && lower.upper == rhs.lower.upper &&
+		       lower.lower == rhs.lower.lower;
+	}
+	bool operator!=(const ExactWide &rhs) const {
+		return !(*this == rhs);
+	}
+	bool IsZero() const {
+		return upper.upper == 0 && upper.lower == 0 && lower.upper == 0 && lower.lower == 0;
+	}
+};
+
+ExactWide ExactMultiply(const uhugeint_t &lhs, const uhugeint_t &rhs) {
+	if (lhs.upper == 0 && rhs.upper == 0) {
+		return {uhugeint_t(0, 0), ExactMultiply64(lhs.lower, rhs.lower)};
+	}
+	const auto lower_lower = ExactMultiply64(lhs.lower, rhs.lower);
+	const auto lower_upper = ExactMultiply64(lhs.lower, rhs.upper);
+	const auto upper_lower = ExactMultiply64(lhs.upper, rhs.lower);
+	const auto upper_upper = ExactMultiply64(lhs.upper, rhs.upper);
+	const auto middle = ExactAdd(ExactAdd(uhugeint_t(0, lower_lower.upper), uhugeint_t(0, lower_upper.lower)),
+	                             uhugeint_t(0, upper_lower.lower));
+	ExactWide result;
+	result.lower = uhugeint_t(middle.lower, lower_lower.lower);
+	result.upper = ExactAdd(ExactAdd(upper_upper, uhugeint_t(0, lower_upper.upper)),
+	                        ExactAdd(uhugeint_t(0, upper_lower.upper), uhugeint_t(0, middle.upper)));
+	return result;
+}
+
+ExactWide ExactFromWords(const uint64_t (&words)[4]) {
+	return {uhugeint_t(words[3], words[2]), uhugeint_t(words[1], words[0])};
+}
+
+ExactWide ExactShiftLeft(const ExactWide &value, idx_t shift) {
+	const uint64_t words[4] = {value.lower.lower, value.lower.upper, value.upper.lower, value.upper.upper};
+	uint64_t result[4] = {0, 0, 0, 0};
+	const auto word_shift = shift / 64;
+	const auto bit_shift = shift % 64;
+	for (idx_t i = word_shift; i < 4; i++) {
+		result[i] = words[i - word_shift] << bit_shift;
+		if (bit_shift != 0 && i > word_shift) {
+			result[i] |= words[i - word_shift - 1] >> (64 - bit_shift);
 		}
-		if (mixed >= static_cast<double>(range_max)) {
-			return range_max;
+	}
+	return ExactFromWords(result);
+}
+
+ExactWide ExactShiftRight(const ExactWide &value, idx_t shift) {
+	const uint64_t words[4] = {value.lower.lower, value.lower.upper, value.upper.lower, value.upper.upper};
+	uint64_t result[4] = {0, 0, 0, 0};
+	const auto word_shift = shift / 64;
+	const auto bit_shift = shift % 64;
+	for (idx_t i = 0; i + word_shift < 4; i++) {
+		result[i] = words[i + word_shift] >> bit_shift;
+		if (bit_shift != 0 && i + word_shift + 1 < 4) {
+			result[i] |= words[i + word_shift + 1] << (64 - bit_shift);
 		}
-		return std::llround(mixed);
 	}
-	const auto offset_min = MinValue<int64_t>(delta, 0);
-	const auto offset_max = MaxValue<int64_t>(delta, 0);
-	const auto offset = static_cast<double>(delta) * d;
-	if (offset <= static_cast<double>(offset_min)) {
-		return lo + offset_min;
+	return ExactFromWords(result);
+}
+
+//! The bits of value below 2^shift
+ExactWide ExactLowBits(const ExactWide &value, idx_t shift) {
+	uint64_t words[4] = {value.lower.lower, value.lower.upper, value.upper.lower, value.upper.upper};
+	for (idx_t i = 0; i < 4; i++) {
+		const auto word_start = i * 64;
+		if (shift <= word_start) {
+			words[i] = 0;
+		} else if (shift < word_start + 64) {
+			words[i] &= (uint64_t(1) << (shift - word_start)) - 1;
+		}
 	}
-	if (offset >= static_cast<double>(offset_max)) {
-		return lo + offset_max;
+	return ExactFromWords(words);
+}
+
+enum class ExactRemainder : uint8_t { BELOW_HALF, HALF, ABOVE_HALF };
+
+struct ExactQuotient {
+	uhugeint_t magnitude;
+	ExactRemainder remainder;
+};
+
+template <typename T>
+ExactRemainder ExactCompareHalf(const T &remainder, const T &divisor) {
+	const T rest = divisor - remainder;
+	if (remainder < rest) {
+		return ExactRemainder::BELOW_HALF;
 	}
-	return lo + std::llround(offset);
+	return remainder == rest ? ExactRemainder::HALF : ExactRemainder::ABOVE_HALF;
+}
+
+//! (upper * 2^64 + lower) / divisor for upper < divisor, by 32 bit digits (Hacker's Delight, divlu)
+uint64_t ExactDivideDigit(uint64_t upper, uint64_t lower, uint64_t divisor, uint64_t &remainder) {
+	D_ASSERT(upper < divisor);
+	const uint64_t base = uint64_t(1) << 32;
+	const auto shift = CountZeros<uint64_t>::Leading(divisor);
+	divisor <<= shift;
+	const auto divisor_upper = divisor >> 32;
+	const auto divisor_lower = divisor & (base - 1);
+	const auto numerator = shift == 0 ? upper : (upper << shift) | (lower >> (64 - shift));
+	const auto shifted_lower = lower << shift;
+	const auto digit_upper = shifted_lower >> 32;
+	const auto digit_lower = shifted_lower & (base - 1);
+
+	auto quotient_upper = numerator / divisor_upper;
+	auto rest = numerator - quotient_upper * divisor_upper;
+	while (quotient_upper >= base || quotient_upper * divisor_lower > base * rest + digit_upper) {
+		quotient_upper -= 1;
+		rest += divisor_upper;
+		if (rest >= base) {
+			break;
+		}
+	}
+	const auto partial = numerator * base + digit_upper - quotient_upper * divisor;
+	auto quotient_lower = partial / divisor_upper;
+	rest = partial - quotient_lower * divisor_upper;
+	while (quotient_lower >= base || quotient_lower * divisor_lower > base * rest + digit_lower) {
+		quotient_lower -= 1;
+		rest += divisor_upper;
+		if (rest >= base) {
+			break;
+		}
+	}
+	remainder = (partial * base + digit_lower - quotient_lower * divisor) >> shift;
+	return quotient_upper * base + quotient_lower;
+}
+
+bool ExactDivide(const ExactWide &dividend, const uhugeint_t &divisor, ExactQuotient &result) {
+	if (dividend.upper >= divisor) {
+		return false;
+	}
+	uhugeint_t remainder;
+	if (divisor.upper == 0) {
+		uint64_t digit_remainder = dividend.upper.lower;
+		const auto quotient_upper =
+		    ExactDivideDigit(digit_remainder, dividend.lower.upper, divisor.lower, digit_remainder);
+		const auto quotient_lower =
+		    ExactDivideDigit(digit_remainder, dividend.lower.lower, divisor.lower, digit_remainder);
+		result.magnitude = uhugeint_t(quotient_upper, quotient_lower);
+		remainder = digit_remainder;
+	} else {
+		remainder = dividend.upper;
+		result.magnitude = 0;
+		for (idx_t bit = 128; bit > 0; bit -= 1) {
+			const auto carry = (remainder.upper >> 63) != 0;
+			remainder = (remainder << 1) | ((dividend.lower >> (bit - 1)) & 1);
+			result.magnitude = result.magnitude << 1;
+			if (carry || remainder >= divisor) {
+				remainder = remainder - divisor;
+				result.magnitude = result.magnitude | 1;
+			}
+		}
+	}
+	result.remainder = ExactCompareHalf(remainder, divisor);
+	return true;
+}
+
+bool ExactDividePowerOfTwo(const ExactWide &dividend, idx_t shift, ExactQuotient &result) {
+	D_ASSERT(shift > 0);
+	const auto quotient = ExactShiftRight(dividend, shift);
+	if (quotient.upper != 0) {
+		return false;
+	}
+	result.magnitude = quotient.lower;
+	const auto half_bit = shift - 1;
+	if (half_bit >= 256 || (ExactShiftRight(dividend, half_bit).lower & 1) == 0) {
+		result.remainder = ExactRemainder::BELOW_HALF;
+	} else if (ExactShiftLeft(dividend, 256 - half_bit).IsZero()) {
+		result.remainder = ExactRemainder::HALF;
+	} else {
+		result.remainder = ExactRemainder::ABOVE_HALF;
+	}
+	return true;
+}
+
+//! |delta| * position, which fails when the quotient does not fit a uhugeint_t
+bool ExactScale(const uhugeint_t &delta, const ExactPosition &position, ExactQuotient &result) {
+	if (position.exponent == 0 && delta.upper == 0 && position.numerator.upper == 0 &&
+	    position.denominator.upper == 0 &&
+	    (position.numerator.lower == 0 ||
+	     delta.lower <= NumericLimits<uint64_t>::Maximum() / position.numerator.lower)) {
+		const auto product = delta.lower * position.numerator.lower;
+		const auto divisor = position.denominator.lower;
+		result.magnitude = uhugeint_t(0, product / divisor);
+		result.remainder = ExactCompareHalf(product % divisor, divisor);
+		return true;
+	}
+	auto product = ExactMultiply(delta, position.numerator);
+	if (position.exponent < 0) {
+		D_ASSERT(position.denominator == 1);
+		return ExactDividePowerOfTwo(product, static_cast<idx_t>(-position.exponent), result);
+	}
+	if (position.exponent > 0) {
+		const auto shift = static_cast<idx_t>(position.exponent);
+		const auto shifted = ExactShiftLeft(product, shift);
+		if (ExactShiftRight(shifted, shift) != product) {
+			return false;
+		}
+		product = shifted;
+	}
+	return ExactDivide(product, position.denominator, result);
+}
+
+//! The DOUBLE nearest to (value + sticky) * 2^exponent, ties to even, where sticky stands for a nonzero
+//! remainder below the lowest bit of a nonzero value
+double ExactRoundToDouble(const ExactWide &value, bool sticky, int64_t exponent) {
+	D_ASSERT(!value.IsZero());
+	idx_t leading;
+	if (value.upper.upper != 0) {
+		leading = CountZeros<uint64_t>::Leading(value.upper.upper);
+	} else if (value.upper.lower != 0) {
+		leading = 64 + CountZeros<uint64_t>::Leading(value.upper.lower);
+	} else if (value.lower.upper != 0) {
+		leading = 128 + CountZeros<uint64_t>::Leading(value.lower.upper);
+	} else {
+		leading = 192 + CountZeros<uint64_t>::Leading(value.lower.lower);
+	}
+	const auto top = static_cast<int64_t>(255 - leading);
+	uint64_t bits;
+	if (top > 63) {
+		const auto shift = static_cast<idx_t>(top - 63);
+		bits = ExactShiftRight(value, shift).lower.lower;
+		sticky = sticky || !ExactLowBits(value, shift).IsZero();
+	} else {
+		bits = value.lower.lower << (63 - top);
+	}
+	exponent += top - 63;
+	const int32_t dropped = 64 - std::numeric_limits<double>::digits;
+	auto mantissa = bits >> dropped;
+	const auto round = (bits >> (dropped - 1)) & 1;
+	const auto rest = sticky || (bits & ((uint64_t(1) << (dropped - 1)) - 1)) != 0;
+	if (round && (rest || (mantissa & 1))) {
+		mantissa += 1;
+	}
+	exponent += dropped;
+	if (mantissa >> std::numeric_limits<double>::digits) {
+		mantissa >>= 1;
+		exponent += 1;
+	}
+	const auto biased_exponent = exponent + 52 + 1023;
+	if (biased_exponent < 1 || biased_exponent > 2046) {
+		return std::ldexp(static_cast<double>(mantissa), static_cast<int>(exponent));
+	}
+	const uint64_t result_bits =
+	    (static_cast<uint64_t>(biased_exponent) << 52) | (mantissa & ((uint64_t(1) << 52) - 1));
+	double result;
+	memcpy(&result, &result_bits, sizeof(result));
+	return result;
+}
+
+} // namespace
+
+bool ExactInterpolation::TryInterpolate(const uhugeint_t &y0, const uhugeint_t &y1, const ExactPosition &position,
+                                        uhugeint_t &result) {
+	result = y0;
+	const auto delta = Subtract(y1, y0);
+	ExactQuotient offset;
+	if (!ExactScale(delta.magnitude, position, offset)) {
+		return false;
+	}
+	const auto negative = delta.negative != position.negative;
+	auto valid = negative ? Uhugeint::TrySubtractInPlace(result, offset.magnitude)
+	                      : Uhugeint::TryAddInPlace(result, offset.magnitude);
+	const auto odd = (result.lower & 1) != 0;
+	if (valid &&
+	    (offset.remainder == ExactRemainder::ABOVE_HALF || (offset.remainder == ExactRemainder::HALF && odd))) {
+		valid = negative ? Uhugeint::TrySubtractInPlace(result, 1) : Uhugeint::TryAddInPlace(result, 1);
+	}
+	return valid;
+}
+
+double ExactInterpolation::InterpolateOffsetsToDouble(const uhugeint_t &y0, const double position, const uhugeint_t &y1,
+                                                      const uhugeint_t &zero) {
+	D_ASSERT(position >= 0 && position < 1);
+	const auto exact = ExactPosition::FromDouble(position);
+	const auto delta = Subtract(y1, y0);
+	const auto product = ExactMultiply(delta.magnitude, exact.numerator);
+	//	|delta| * position is integral + fraction * 2^-shift, and y0 moved by integral stays between y0 and y1
+	const auto shift = static_cast<idx_t>(-exact.exponent);
+	const auto integral = ExactShiftRight(product, shift).lower;
+	const auto fraction = ExactLowBits(product, shift);
+	const auto value = delta.negative ? ExactSubtract(y0, integral) : ExactAdd(y0, integral);
+	const auto value_negative = ExactLess(value, zero);
+	const auto magnitude = value_negative ? ExactSubtract(zero, value) : ExactSubtract(value, zero);
+	if (fraction.IsZero()) {
+		if (ExactIsZero(magnitude)) {
+			return 0;
+		}
+		const auto result = ExactRoundToDouble(ExactWide {uhugeint_t(0, 0), magnitude}, false, 0);
+		return value_negative ? -result : result;
+	}
+	if (ExactIsZero(magnitude)) {
+		//	A multiple of 2^-shift, which a double position keeps at or above 2^-1074, so a subnormal result is exact
+		const auto result = ExactRoundToDouble(fraction, false, -static_cast<int64_t>(shift));
+		return delta.negative ? -result : result;
+	}
+	//	whole and part take the sign of the result, so |result| = |whole| + |part| and nothing cancels
+	auto whole = magnitude;
+	const auto complement = value_negative != delta.negative;
+	if (complement) {
+		whole = ExactSubtract(whole, uhugeint_t(0, 1));
+	}
+	if (ExactIsZero(whole) && shift < 256) {
+		//	|result| = 1 - fraction * 2^-shift, which can be far below one
+		const auto one = ExactShiftLeft(ExactWide {uhugeint_t(0, 0), uhugeint_t(0, 1)}, shift);
+		const auto borrow = ExactLess(one.lower, fraction.lower);
+		const ExactWide part {ExactSubtract(ExactSubtract(one.upper, fraction.upper), uhugeint_t(0, borrow)),
+		                      ExactSubtract(one.lower, fraction.lower)};
+		const auto result = ExactRoundToDouble(part, false, -static_cast<int64_t>(shift));
+		return value_negative ? -result : result;
+	}
+	//	|result| is at least one half here, so 64 bits of the part and a sticky bit decide the rounding
+	uint64_t part;
+	bool sticky = false;
+	if (shift <= 64) {
+		part = ExactShiftLeft(fraction, 64 - shift).lower.lower;
+	} else {
+		part = ExactShiftRight(fraction, shift - 64).lower.lower;
+		sticky = !ExactLowBits(fraction, shift - 64).IsZero();
+	}
+	if (complement) {
+		part = 0 - part - (sticky ? 1 : 0);
+	}
+	const ExactWide scaled {uhugeint_t(0, whole.upper), uhugeint_t(whole.lower, part)};
+	const auto result = ExactRoundToDouble(scaled, sticky, -64);
+	return value_negative ? -result : result;
 }
 
 template <>
 dtime_t InterpolateOperator::Operation(const dtime_t &lo, const double d, const dtime_t &hi) {
-	return dtime_t(InterpolateInt64(lo.value, d, hi.value));
+	return dtime_t(ExactInterpolation::Interpolate(lo.value, d, hi.value));
 }
 
 //! TIMETZ values are interpolated by their time normalized to UTC - the result is the normalized time at offset +00
@@ -1955,9 +2314,9 @@ dtime_tz_t InterpolateOperator::Operation(const dtime_tz_t &lo, const double d, 
 		return lo;
 	}
 	// the sort key holds the normalized time (biased by the maximum offset) in its upper bits
-	const auto lo_micros = static_cast<double>(dtime_tz_t::decode_micros(lo.sort_key()));
-	const auto hi_micros = static_cast<double>(dtime_tz_t::decode_micros(hi.sort_key()));
-	auto micros = std::llround(lo_micros * (1.0 - d) + hi_micros * d);
+	const auto lo_micros = static_cast<int64_t>(dtime_tz_t::decode_micros(lo.sort_key()));
+	const auto hi_micros = static_cast<int64_t>(dtime_tz_t::decode_micros(hi.sort_key()));
+	auto micros = ExactInterpolation::Interpolate(lo_micros, d, hi_micros);
 	micros -= int64_t(dtime_tz_t::MAX_OFFSET) * int64_t(dtime_tz_t::OFFSET_MICROS);
 	micros %= Interval::MICROS_PER_DAY;
 	if (micros < 0) {
@@ -1975,45 +2334,12 @@ timestamp_t InterpolateOperator::Operation(const timestamp_t &lo, const double d
 	if (!Value::IsFinite(lo) || !Value::IsFinite(hi)) {
 		throw ConversionException("Cannot interpolate infinite TIMESTAMP values");
 	}
-	return timestamp_t(InterpolateInt64(lo.value, d, hi.value));
-}
-
-template <>
-hugeint_t InterpolateOperator::Operation(const hugeint_t &lo, const double d, const hugeint_t &hi) {
-	hugeint_t delta_hugeint = hi;
-	if (Hugeint::TrySubtractInPlace(delta_hugeint, lo)) {
-		const auto delta = Hugeint::Cast<double>(delta_hugeint);
-		// Rounding delta to double can carry the offset past hi, and past the HUGEINT range when hi is the minimum.
-		return Hugeint::Add(lo, Hugeint::Convert(delta * d));
-	}
-
-	// if delta overflows, we fall back to original subtraction to avoid UB
-	// only happens when lo and hi are so apart that their difference can't be stored in a hugeint
-	return Hugeint::Convert(Operation(Hugeint::Cast<double>(lo), d, Hugeint::Cast<double>(hi)));
-}
-
-template <>
-uhugeint_t InterpolateOperator::Operation(const uhugeint_t &lo, const double d, const uhugeint_t &hi) {
-	return Uhugeint::Convert(Operation(Uhugeint::Cast<double>(lo), d, Uhugeint::Cast<double>(hi)));
-}
-
-static interval_t MultiplyByDouble(const interval_t &i, const double &d) { // NOLINT
-	D_ASSERT(d >= 0 && d <= 1);
-	return Interval::FromMicro(std::llround(static_cast<double>(Interval::GetMicro(i)) * d));
-}
-
-inline interval_t operator+(const interval_t &lhs, const interval_t &rhs) {
-	return Interval::FromMicro(Interval::GetMicro(lhs) + Interval::GetMicro(rhs));
-}
-
-inline interval_t operator-(const interval_t &lhs, const interval_t &rhs) {
-	return Interval::FromMicro(Interval::GetMicro(lhs) - Interval::GetMicro(rhs));
+	return timestamp_t(ExactInterpolation::Interpolate(lo.value, d, hi.value));
 }
 
 template <>
 interval_t InterpolateOperator::Operation(const interval_t &lo, const double d, const interval_t &hi) {
-	const interval_t delta = hi - lo;
-	return lo + MultiplyByDouble(delta, d);
+	return Interval::FromMicro(ExactInterpolation::Interpolate(Interval::GetMicro(lo), d, Interval::GetMicro(hi)));
 }
 
 } // namespace duckdb
