@@ -149,6 +149,15 @@ Value KeyValueSecret::TryGetValue(const Identifier &key, bool error_on_missing) 
 	return lookup->second;
 }
 
+static CatalogTransaction SecretLookupTransaction(optional_ptr<Context> context, DatabaseInstance &db) {
+	auto client = Context::TryGetClientContext(context);
+	// A client without an active transaction, as during its commit, gets the secrets a reader of the database gets.
+	if (client && client->transaction.HasActiveTransaction()) {
+		return CatalogTransaction::GetSystemCatalogTransaction(*client);
+	}
+	return CatalogTransaction::GetSystemTransaction(db);
+}
+
 KeyValueSecretReader::KeyValueSecretReader(DatabaseInstance &db_p, const char **secret_types, idx_t secret_types_len,
                                            string path_p) {
 	db = db_p;
@@ -163,6 +172,7 @@ KeyValueSecretReader::KeyValueSecretReader(DatabaseInstance &db_p, const char *s
 KeyValueSecretReader::KeyValueSecretReader(ClientContext &context_p, const char **secret_types, idx_t secret_types_len,
                                            string path_p) {
 	context = &context_p.GetContext();
+	db = context->GetDatabase();
 	path = std::move(path_p);
 	Initialize(secret_types, secret_types_len);
 }
@@ -182,7 +192,7 @@ void KeyValueSecretReader::Initialize(const char **secret_types, idx_t secret_ty
 	}
 
 	auto &secret_manager = db->GetSecretManager();
-	auto transaction = context ? context->GetSystemCatalogTransaction() : CatalogTransaction::GetSystemTransaction(*db);
+	auto transaction = SecretLookupTransaction(context, *db);
 
 	SecretMatch secret_match;
 	for (idx_t i = 0; i < secret_types_len; i++) {
@@ -219,8 +229,7 @@ KeyValueSecretReader::KeyValueSecretReader(FileOpener &opener_p, optional_ptr<Fi
 			throw InvalidConfigurationException("Secret '%s' named by '%s' cannot be looked up without a database",
 			                                    secret_name, path);
 		}
-		auto transaction =
-		    context ? context->GetSystemCatalogTransaction() : CatalogTransaction::GetSystemTransaction(*db);
+		auto transaction = SecretLookupTransaction(context, *db);
 		secret_entry = db->GetSecretManager().GetSecretByName(transaction, secret_name);
 		if (!secret_entry) {
 			throw InvalidConfigurationException("Secret '%s' named by '%s' not found", secret_name, path);
@@ -261,13 +270,10 @@ SettingLookupResult KeyValueSecretReader::TryGetSecretKeyOrSetting(const Identif
 		return SettingLookupResult(SettingScope::SECRET);
 	}
 	if (context) {
-		auto res = context->TryGetCurrentSetting(setting_name, result);
-		if (res) {
-			return res;
-		}
+		return context->TryGetCurrentSetting(setting_name, result);
 	}
 	if (db) {
-		db->TryGetCurrentSetting(setting_name, result);
+		return db->TryGetCurrentSetting(setting_name, result);
 	}
 	return SettingLookupResult();
 }

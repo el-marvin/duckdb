@@ -329,11 +329,9 @@ public:
 	template <class TYPE>
 	TYPE GetSecretKeyOrSettingOrDefault(const Identifier &secret_key, const Identifier &setting_name,
 	                                    TYPE default_value) {
-		TYPE result;
-		if (TryGetSecretKeyOrSetting(secret_key, setting_name, result)) {
-			return result;
-		}
-		return default_value;
+		TYPE result = default_value;
+		TryGetSecretKeyOrSetting(secret_key, setting_name, result);
+		return result;
 	}
 
 protected:
@@ -347,8 +345,7 @@ protected:
 	//! Optionally an owning pointer to the secret entry
 	shared_ptr<SecretEntry> secret_entry;
 
-	//! Secrets/settings will be fetched either through a context (local + global settings) or a databaseinstance
-	//! (global only)
+	//! Settings are read through the context when there is one, otherwise the database; secrets through the database
 	optional_ptr<DatabaseInstance> db;
 	optional_ptr<Context> context;
 
